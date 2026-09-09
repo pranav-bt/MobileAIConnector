@@ -37,6 +37,32 @@ function describeAssistantMessage(message: Record<string, unknown>): string | nu
 }
 
 export class ClaudeEngine implements OrchestratorEngine {
+  async complete(args: { prompt: string; model: 'opus' | 'sonnet' | 'haiku' }): Promise<{ text: string; tokens: number }> {
+    let text = '';
+    let tokens = 0;
+    const stream = query({
+      prompt: args.prompt,
+      options: {
+        model: MODEL_IDS[args.model],
+        maxTurns: 1,
+        allowedTools: [],
+      },
+    });
+    for await (const message of stream) {
+      const m = message as unknown as Record<string, unknown>;
+      if (m['type'] === 'result') {
+        if (typeof m['result'] === 'string') text = m['result'];
+        const usage = m['usage'];
+        if (isRecord(usage)) {
+          const inputTokens = typeof usage['input_tokens'] === 'number' ? usage['input_tokens'] : 0;
+          const outputTokens = typeof usage['output_tokens'] === 'number' ? usage['output_tokens'] : 0;
+          tokens = inputTokens + outputTokens;
+        }
+      }
+    }
+    return { text, tokens };
+  }
+
   async runWorker(args: {
     prompt: string;
     team: { blockedTools: string[]; charter: string };

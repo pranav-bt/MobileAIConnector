@@ -20,6 +20,9 @@ export interface WorkerRunResult {
 }
 
 export interface OrchestratorEngine {
+  // One model call, no tools — what master routing and lead reviews use.
+  complete(args: { prompt: string; model: ModelTier }): Promise<{ text: string; tokens: number }>;
+
   runWorker(args: {
     prompt: string;
     team: Team;

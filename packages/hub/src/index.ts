@@ -6,7 +6,9 @@ import { startEventLog } from './persist.js';
 import { startServer, type HubServer } from './server.js';
 import { startDemo } from './demo.js';
 import { ClaudeEngine } from './engine/claude.js';
-import { createEngineHandlers } from './engine/handlers.js';
+import { MockEngine } from './engine/mock.js';
+import { Orchestrator } from './orchestrator/orchestrator.js';
+import { TeamRegistry } from './orchestrator/teams.js';
 import { PairingManager } from './security/pairing.js';
 import type { CommandHandlers } from './commands.js';
 
@@ -14,7 +16,7 @@ export interface HubOptions {
   port?: number;
   demo?: boolean;
   demoFast?: boolean;
-  engine?: 'claude' | null;
+  engine?: 'claude' | 'mock' | null;
   dataDir?: string;
   cwd?: string;
 }
@@ -40,9 +42,18 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   let handlers: CommandHandlers;
   let stopDemo: (() => void) | null = null;
 
-  if (options.engine === 'claude') {
-    handlers = createEngineHandlers(bus, new ClaudeEngine(), cwd);
-    console.log('[hub] engine mode: claude — tasks you submit will run real agents');
+  if (options.engine === 'claude' || options.engine === 'mock') {
+    const engine = options.engine === 'claude' ? new ClaudeEngine() : new MockEngine();
+    const registry = new TeamRegistry(dataDir);
+    registry.init();
+    const orchestrator = new Orchestrator(bus, engine, registry, cwd);
+    orchestrator.init();
+    handlers = orchestrator;
+    console.log(
+      options.engine === 'claude'
+        ? '[hub] engine mode: claude — tasks you submit will run real agents'
+        : '[hub] engine mode: mock — deterministic fake engine (tests/offline dev)',
+    );
   } else {
     const demo = startDemo(bus, { fast: options.demoFast });
     handlers = demo.handlers;
@@ -81,7 +92,7 @@ if (isMain) {
   const engineFlag = args.indexOf('--engine');
   void startHub({
     demo: args.includes('--demo') || engineFlag === -1,
-    engine: engineFlag !== -1 ? (args[engineFlag + 1] as 'claude') : null,
+    engine: engineFlag !== -1 ? (args[engineFlag + 1] as 'claude' | 'mock') : null,
     port: portFlag !== -1 ? Number(args[portFlag + 1]) : undefined,
   });
 }

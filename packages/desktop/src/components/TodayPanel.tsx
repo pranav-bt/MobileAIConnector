@@ -40,6 +40,10 @@ export function TodayPanel(props: {
   const resetsDay = usage.weeklyResetsAt
     ? new Date(usage.weeklyResetsAt).toLocaleDateString(undefined, { weekday: 'short' })
     : '—';
+  // Engine mode counts tokens itself but can't see subscription limits yet.
+  const tokensOnly = usage.weeklyResetsAt === 0;
+  const formatTokens = (count: number): string =>
+    count >= 1_000_000 ? `${(count / 1_000_000).toFixed(1)}M` : count >= 1_000 ? `${(count / 1_000).toFixed(1)}k` : String(count);
 
   return (
     <aside className="today">
@@ -119,12 +123,16 @@ export function TodayPanel(props: {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
           <div className="sect" style={{ marginBottom: 6 }}>Usage</div>
           <div className="act">
-            {Math.round(usage.weeklyPct)}% of weekly · resets {resetsDay}
+            {tokensOnly
+              ? `${formatTokens(usage.tokensToday)} tokens today`
+              : `${Math.round(usage.weeklyPct)}% of weekly · resets ${resetsDay}`}
           </div>
         </div>
-        <div className="track" style={{ marginTop: 0 }}>
-          <div className="fill" style={{ width: `${usage.weeklyPct}%`, background: usage.weeklyPct >= 75 ? 'var(--amber)' : 'var(--faint)' }} />
-        </div>
+        {!tokensOnly && (
+          <div className="track" style={{ marginTop: 0 }}>
+            <div className="fill" style={{ width: `${usage.weeklyPct}%`, background: usage.weeklyPct >= 75 ? 'var(--amber)' : 'var(--faint)' }} />
+          </div>
+        )}
       </div>
     </aside>
   );
