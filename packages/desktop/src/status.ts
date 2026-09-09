@@ -16,14 +16,17 @@ export function ringColor(agent: Agent): string {
 
 export function initialsOf(agent: Agent): string {
   if (agent.role === 'master') return 'M';
-  const compact = agent.name.replace(/[^A-Za-z0-9]/g, '');
+  // "Worker C-1" -> "C1"; codes beat initials for scanability.
+  const lastToken = agent.name.trim().split(/\s+/).at(-1) ?? '';
+  const code = lastToken.match(/^([A-Za-z])-?(\d+)$/);
+  if (code) return `${code[1].toUpperCase()}${code[2]}`;
   const letters = agent.name
     .split(/[\s-]+/)
     .map((part) => part[0])
     .filter(Boolean)
     .join('')
     .toUpperCase();
-  return (letters.length >= 2 ? letters.slice(0, 2) : compact.slice(0, 2).toUpperCase()) || '?';
+  return letters.slice(0, 2) || '?';
 }
 
 export function isActive(agent: Agent): boolean {
