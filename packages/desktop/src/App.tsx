@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { useHub } from './hub';
+import { useEffect, useState } from 'react';
+import { hubClient, useHub } from './hub';
+import { initShellBridge } from './shell';
 import { Rail, type View } from './components/Rail';
 import { TopBar } from './components/TopBar';
 import { Office } from './components/Office';
@@ -13,6 +14,10 @@ import { TodayPanel } from './components/TodayPanel';
 export function App(): JSX.Element {
   const { state, status, send } = useHub();
   const [view, setView] = useState<View>('office');
+
+  useEffect(() => {
+    initShellBridge((command) => hubClient.send(command));
+  }, []);
 
   return (
     <div className="app">

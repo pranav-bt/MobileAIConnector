@@ -16,8 +16,11 @@ https://claude.ai/code/artifact/2ca3a0e6-562e-4184-a465-0eeab90b2d1f
   server (`server.ts`), JSONL event log (`persist.ts`), demo driver
   (`demo.ts`), Claude Agent SDK engine (`engine/`), pairing/kill-switch
   crypto (`security/pairing.ts`).
-- `packages/desktop` — React + Vite office UI (Tauri shell comes later; it
-  runs in a browser today). Pure client of the hub.
+- `packages/desktop` — React + Vite office UI; pure client of the hub. Runs
+  in a browser (`npm run desktop`) or in the Tauri shell (`src-tauri/`,
+  `npm run shell:dev -w @agent-hq/desktop`) which adds the native window,
+  tray (close hides, Quit exits), and the global Ctrl+Shift+K kill hotkey.
+  Building the shell needs the Rust toolchain (`~/.cargo/bin`) + MSVC.
 - `android/` — Kotlin companion app (not scaffolded yet; see its README).
 
 ## Commands
