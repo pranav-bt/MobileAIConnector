@@ -58,6 +58,8 @@ try {
     ws.on('open', () => resolve());
     ws.on('error', reject);
   });
+  // The hub classifies a connection by its first frame — say hello first.
+  ws.send(encodeCommand({ type: 'hello', client: 'cli', name: 'orch-smoke' }));
 
   const snapshot = await waitFor('snapshot', (e) => e.type === 'snapshot');
   if (snapshot.type !== 'snapshot') fail('unreachable');

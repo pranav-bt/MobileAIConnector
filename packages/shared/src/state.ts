@@ -3,6 +3,7 @@ import type {
   HubEvent,
   PermissionRequest,
   Project,
+  SecurityState,
   Snapshot,
   Task,
   Team,
@@ -19,6 +20,11 @@ export interface HubState {
   permissions: Record<string, PermissionRequest>;
   projects: Record<string, Project>;
   usage: Usage;
+  security: SecurityState;
+}
+
+export function emptySecurity(): SecurityState {
+  return { fingerprint: '', pairedDevice: null, pairingQr: null, deviceSessions: 0 };
 }
 
 export function emptyUsage(): Usage {
@@ -41,6 +47,7 @@ export function emptyState(): HubState {
     permissions: {},
     projects: {},
     usage: emptyUsage(),
+    security: emptySecurity(),
   };
 }
 
@@ -52,6 +59,7 @@ export function toSnapshot(state: HubState): Snapshot {
     permissions: Object.values(state.permissions),
     projects: Object.values(state.projects),
     usage: state.usage,
+    security: state.security,
   };
 }
 
@@ -65,6 +73,7 @@ export function fromSnapshot(snapshot: Snapshot): HubState {
     permissions: byId(snapshot.permissions),
     projects: byId(snapshot.projects),
     usage: snapshot.usage,
+    security: snapshot.security,
   };
 }
 
@@ -93,6 +102,8 @@ export function applyEvent(state: HubState, event: HubEvent): HubState {
       return { ...state, projects: { ...state.projects, [event.project.id]: event.project } };
     case 'usage.updated':
       return { ...state, usage: event.usage };
+    case 'security.updated':
+      return { ...state, security: event.security };
     case 'activity':
       // Activity entries are a feed, not state; persisted by the hub's log
       // and rendered live by clients that care. State is unchanged.

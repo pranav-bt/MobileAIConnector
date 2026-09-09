@@ -42,7 +42,13 @@ npm run typecheck      # tsc across workspaces
   to emit it). Engine-specific code lives only under `packages/hub/src/engine/`.
 - Usage is measured in tokens/percent of subscription limits, never dollars;
   dollars appear only around the overage toggle.
-- Exactly one paired device slot; approvals from the phone must carry a
-  signature the hub verifies (`PairingManager.verifyApprovalSignature`).
+- Transport policy: loopback clients speak plaintext; anything else must be
+  the paired device over the encrypted session (X25519 static+ephemeral →
+  HKDF → ChaCha20-Poly1305 frames, `security/session.ts`). Clients speak
+  first — the hub classifies a connection by its first frame.
+- Exactly one paired device slot; approvals arriving over a device session
+  must be Ed25519-signed over `${decision}:${requestId}` — unsigned or
+  forged approvals are dropped. Security commands (pairing, revoke, kill)
+  are honored only from local clients.
 - Teams are config records — creating one must always work as a single
   command (`team.create`), and the office UI renders rooms from the registry.

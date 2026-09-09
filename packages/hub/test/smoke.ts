@@ -58,6 +58,8 @@ try {
     ws.on('open', () => resolve());
     ws.on('error', reject);
   });
+  // The hub classifies a connection by its first frame — say hello first.
+  ws.send(encodeCommand({ type: 'hello', client: 'cli', name: 'smoke' }));
 
   const snapshot = await waitFor('snapshot', (e) => e.type === 'snapshot');
   if (snapshot.type !== 'snapshot') fail('unreachable');
@@ -65,7 +67,6 @@ try {
   if (snapshot.snapshot.agents.length < 8) fail(`expected >=8 agents, got ${snapshot.snapshot.agents.length}`);
   console.log(`snapshot ok: ${snapshot.snapshot.teams.length} teams, ${snapshot.snapshot.agents.length} agents`);
 
-  ws.send(encodeCommand({ type: 'hello', client: 'cli', name: 'smoke' }));
   ws.send(encodeCommand({ type: 'task.submit', text: 'Smoke test task: touch nothing, report back' }));
   const routed = await waitFor(
     'submitted task routed to a team',

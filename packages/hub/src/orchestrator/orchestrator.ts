@@ -335,9 +335,4 @@ export class Orchestrator implements CommandHandlers {
     });
     this.#activity('master', null, `new team created: ${team.name}`);
   }
-
-  killConnection(): void {
-    // Wired to real key revocation in the security milestone.
-    this.#activity('master', null, 'kill switch pressed — device key revocation lands with the security milestone');
-  }
 }

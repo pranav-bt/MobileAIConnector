@@ -135,6 +135,16 @@ export const UsageSchema = z.object({
 });
 export type Usage = z.infer<typeof UsageSchema>;
 
+// Live security posture: shown on the desktop Security page and the rail.
+export const SecurityStateSchema = z.object({
+  fingerprint: z.string(),
+  pairedDevice: z.object({ name: z.string(), pairedAt: z.number() }).nullable(),
+  // JSON payload rendered as a QR while pairing mode is active; null otherwise.
+  pairingQr: z.string().nullable(),
+  deviceSessions: z.number(),
+});
+export type SecurityState = z.infer<typeof SecurityStateSchema>;
+
 export const ActivityEntrySchema = z.object({
   agentId: z.string(),
   taskId: z.string().nullable(),
@@ -150,6 +160,7 @@ export const SnapshotSchema = z.object({
   permissions: z.array(PermissionRequestSchema),
   projects: z.array(ProjectSchema),
   usage: UsageSchema,
+  security: SecurityStateSchema,
 });
 export type Snapshot = z.infer<typeof SnapshotSchema>;
 
@@ -162,6 +173,7 @@ export const HubEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('permission.updated'), request: PermissionRequestSchema }),
   z.object({ type: z.literal('project.updated'), project: ProjectSchema }),
   z.object({ type: z.literal('usage.updated'), usage: UsageSchema }),
+  z.object({ type: z.literal('security.updated'), security: SecurityStateSchema }),
   z.object({ type: z.literal('activity'), entry: ActivityEntrySchema }),
 ]);
 export type HubEvent = z.infer<typeof HubEventSchema>;

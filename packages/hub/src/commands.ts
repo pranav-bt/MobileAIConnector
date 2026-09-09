@@ -1,7 +1,9 @@
 import type { ClientCommand } from '@agent-hq/shared';
 
 // The server parses wire frames into ClientCommands and hands them here.
-// The demo driver and the real engine each provide an implementation.
+// The demo driver and the orchestrator each provide an implementation.
+// Security commands (pairing.*, device.revoke, connection.kill) never reach
+// these handlers — the server routes them to the SecurityController.
 export interface CommandHandlers {
   submitTask(text: string, projectId: string | null): void;
   respondPermission(requestId: string, decision: 'approve' | 'deny', scope: 'once' | 'task'): void;
@@ -13,7 +15,6 @@ export interface CommandHandlers {
     workerModel?: 'opus' | 'sonnet' | 'haiku';
     quotaSharePct?: number;
   }): void;
-  killConnection(): void;
 }
 
 export function dispatchCommand(handlers: CommandHandlers, command: ClientCommand): void {
@@ -26,7 +27,10 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
       return handlers.respondPermission(command.requestId, command.decision, command.scope);
     case 'team.create':
       return handlers.createTeam(command);
+    case 'pairing.start':
+    case 'pairing.cancel':
+    case 'device.revoke':
     case 'connection.kill':
-      return handlers.killConnection();
+      return; // handled by the server's security layer
   }
 }

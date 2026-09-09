@@ -2,10 +2,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   createHash,
+  createPrivateKey,
   createPublicKey,
   generateKeyPairSync,
   randomBytes,
   verify as cryptoVerify,
+  type KeyObject,
 } from 'node:crypto';
 
 // Device pairing: exactly one device slot, keys pinned on both sides.
@@ -75,6 +77,25 @@ export class PairingManager {
   get pairedDevice(): { name: string; pairedAt: number } | null {
     const device = this.#required().device;
     return device ? { name: device.name, pairedAt: device.pairedAt } : null;
+  }
+
+  get pcPublicKeyDerB64(): string {
+    return this.#required().pcPublicKeyDerB64;
+  }
+
+  get pcPrivateKey(): KeyObject {
+    return createPrivateKey({
+      key: Buffer.from(this.#required().pcPrivateKeyDerB64, 'base64'),
+      format: 'der',
+      type: 'pkcs8',
+    });
+  }
+
+  // The paired device's static X25519 key, pinned at pairing time.
+  get devicePublicKey(): KeyObject | null {
+    const device = this.#required().device;
+    if (!device) return null;
+    return createPublicKey({ key: Buffer.from(device.publicKeyDerB64, 'base64'), format: 'der', type: 'spki' });
   }
 
   // The QR on the PC screen encodes exactly this payload.

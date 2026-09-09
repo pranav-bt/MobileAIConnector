@@ -228,12 +228,6 @@ export function startDemo(bus: HubBus, options: DemoOptions = {}): {
       });
     },
 
-    killConnection() {
-      bus.publish({
-        type: 'activity',
-        entry: { agentId: 'master', taskId: null, message: 'kill switch pressed (demo) — key revocation lands with the security milestone', at: now() },
-      });
-    },
   };
 
   return {

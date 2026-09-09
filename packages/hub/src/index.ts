@@ -10,6 +10,7 @@ import { MockEngine } from './engine/mock.js';
 import { Orchestrator } from './orchestrator/orchestrator.js';
 import { TeamRegistry } from './orchestrator/teams.js';
 import { PairingManager } from './security/pairing.js';
+import { SecurityController } from './security/controller.js';
 import type { CommandHandlers } from './commands.js';
 
 export interface HubOptions {
@@ -25,6 +26,7 @@ export interface RunningHub {
   port: number;
   bus: HubBus;
   pairing: PairingManager;
+  security: SecurityController;
   close(): Promise<void>;
 }
 
@@ -61,16 +63,20 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     console.log('[hub] demo mode: replaying the mockup scenario, no usage spent');
   }
 
-  const server: HubServer = await startServer(bus, handlers, port);
-  console.log(`[hub] listening on ws://127.0.0.1:${port}`);
+  const securityController = new SecurityController(bus, pairing, port);
+  const server: HubServer = await startServer(bus, handlers, securityController, port);
+  securityController.publishState();
+  console.log(`[hub] listening on ws://0.0.0.0:${port} (plaintext for loopback, encrypted sessions for the paired device)`);
   console.log(`[hub] pc key fingerprint: ${pairing.fingerprint}`);
 
   return {
     port,
     bus,
     pairing,
+    security: securityController,
     close: async () => {
       stopDemo?.();
+      securityController.stop();
       stopLog();
       await server.close();
     },

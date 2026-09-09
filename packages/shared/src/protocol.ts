@@ -48,6 +48,11 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     workerModel: ModelTierSchema.optional(),
     quotaSharePct: z.number().min(0).max(100).optional(),
   }),
+  // Security commands — the hub only honors these from trusted local
+  // clients, never from a device session.
+  z.object({ type: z.literal('pairing.start') }),
+  z.object({ type: z.literal('pairing.cancel') }),
+  z.object({ type: z.literal('device.revoke') }),
   z.object({ type: z.literal('connection.kill') }),
 ]);
 export type ClientCommand = z.infer<typeof ClientCommandSchema>;
