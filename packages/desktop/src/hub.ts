@@ -74,7 +74,19 @@ class HubClient {
   getSnapshot = (): HubSnapshot => this.#snapshot;
 }
 
-export const hubClient = new HubClient(`ws://127.0.0.1:${DEFAULT_HUB_PORT}`);
+export const HUB_URL_STORAGE_KEY = 'hq.hubUrl';
+
+export function currentHubUrl(): string {
+  try {
+    const stored = localStorage.getItem(HUB_URL_STORAGE_KEY);
+    if (stored && stored.trim()) return stored.trim();
+  } catch {
+    /* storage unavailable — use the default */
+  }
+  return `ws://127.0.0.1:${DEFAULT_HUB_PORT}`;
+}
+
+export const hubClient = new HubClient(currentHubUrl());
 
 export function useHub(): HubSnapshot & { send: (command: ClientCommand) => void } {
   const snapshot = useSyncExternalStore(hubClient.subscribe, hubClient.getSnapshot);

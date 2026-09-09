@@ -1,6 +1,8 @@
 import type {
+  ActivityEntry,
   Agent,
   HubEvent,
+  HubInfo,
   PermissionRequest,
   Project,
   SecurityState,
@@ -9,6 +11,7 @@ import type {
   Team,
   Usage,
 } from './schema.js';
+import { ACTIVITY_LOG_CAP } from './schema.js';
 
 // One reducer, used verbatim by the hub (authoritative) and by every client
 // (replica). A client that applies the same events holds the same state.
@@ -21,10 +24,16 @@ export interface HubState {
   projects: Record<string, Project>;
   usage: Usage;
   security: SecurityState;
+  activityLog: ActivityEntry[];
+  info: HubInfo;
 }
 
 export function emptySecurity(): SecurityState {
   return { fingerprint: '', pairedDevice: null, pairingQr: null, deviceSessions: 0 };
+}
+
+export function emptyInfo(): HubInfo {
+  return { mode: 'demo', workspaceDir: '', dataDir: '', version: '' };
 }
 
 export function emptyUsage(): Usage {
@@ -48,6 +57,8 @@ export function emptyState(): HubState {
     projects: {},
     usage: emptyUsage(),
     security: emptySecurity(),
+    activityLog: [],
+    info: emptyInfo(),
   };
 }
 
@@ -60,6 +71,8 @@ export function toSnapshot(state: HubState): Snapshot {
     projects: Object.values(state.projects),
     usage: state.usage,
     security: state.security,
+    activityLog: state.activityLog,
+    info: state.info,
   };
 }
 
@@ -74,6 +87,8 @@ export function fromSnapshot(snapshot: Snapshot): HubState {
     projects: byId(snapshot.projects),
     usage: snapshot.usage,
     security: snapshot.security,
+    activityLog: snapshot.activityLog,
+    info: snapshot.info,
   };
 }
 
@@ -104,10 +119,10 @@ export function applyEvent(state: HubState, event: HubEvent): HubState {
       return { ...state, usage: event.usage };
     case 'security.updated':
       return { ...state, security: event.security };
+    case 'hub.updated':
+      return { ...state, info: event.info };
     case 'activity':
-      // Activity entries are a feed, not state; persisted by the hub's log
-      // and rendered live by clients that care. State is unchanged.
-      return state;
+      return { ...state, activityLog: [...state.activityLog, event.entry].slice(-ACTIVITY_LOG_CAP) };
     default:
       return state;
   }

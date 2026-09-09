@@ -2,7 +2,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_HUB_PORT } from '@agent-hq/shared';
 import { HubBus } from './bus.js';
-import { startEventLog } from './persist.js';
+import { loadPriorState, startEventLog, startSnapshotWriter } from './persist.js';
 import { startServer, type HubServer } from './server.js';
 import { startDemo } from './demo.js';
 import { ClaudeEngine } from './engine/claude.js';
@@ -43,16 +43,30 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
 
   let handlers: CommandHandlers;
   let stopDemo: (() => void) | null = null;
+  let stopSnapshots: (() => void) | null = null;
+  const mode: 'demo' | 'claude' | 'mock' =
+    options.engine === 'claude' || options.engine === 'mock' ? options.engine : 'demo';
 
-  if (options.engine === 'claude' || options.engine === 'mock') {
-    const engine = options.engine === 'claude' ? new ClaudeEngine() : new MockEngine();
+  if (mode === 'claude' || mode === 'mock') {
+    const engine = mode === 'claude' ? new ClaudeEngine() : new MockEngine();
     const registry = new TeamRegistry(dataDir);
     registry.init();
     const orchestrator = new Orchestrator(bus, engine, registry, cwd);
     orchestrator.init();
+
+    // Task history and usage survive restarts; anything mid-flight when the
+    // hub died comes back as paused.
+    const prior = loadPriorState(dataDir);
+    if (prior) {
+      for (const task of prior.tasks) bus.publish({ type: 'task.updated', task });
+      orchestrator.seedUsage(prior.usage);
+      bus.publish({ type: 'usage.updated', usage: prior.usage });
+    }
+    stopSnapshots = startSnapshotWriter(bus, dataDir);
+
     handlers = orchestrator;
     console.log(
-      options.engine === 'claude'
+      mode === 'claude'
         ? '[hub] engine mode: claude — tasks you submit will run real agents'
         : '[hub] engine mode: mock — deterministic fake engine (tests/offline dev)',
     );
@@ -62,6 +76,8 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     stopDemo = demo.stop;
     console.log('[hub] demo mode: replaying the mockup scenario, no usage spent');
   }
+
+  bus.publish({ type: 'hub.updated', info: { mode, workspaceDir: cwd, dataDir, version: '0.1.0' } });
 
   const securityController = new SecurityController(bus, pairing, port);
   const server: HubServer = await startServer(bus, handlers, securityController, port);
@@ -76,6 +92,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     security: securityController,
     close: async () => {
       stopDemo?.();
+      stopSnapshots?.();
       securityController.stop();
       stopLog();
       await server.close();

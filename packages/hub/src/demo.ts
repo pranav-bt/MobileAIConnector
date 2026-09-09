@@ -195,6 +195,20 @@ export function startDemo(bus: HubBus, options: DemoOptions = {}): {
       }, 2000);
     },
 
+    stopTask(taskId) {
+      const current = bus.state.tasks[taskId];
+      if (!current || ['done', 'failed', 'paused'].includes(current.status)) return;
+      patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' });
+      for (const request of Object.values(bus.state.permissions)) {
+        if (request.taskId === taskId && request.status === 'pending') {
+          bus.publish({ type: 'permission.updated', request: { ...request, status: 'expired', resolvedAt: now() } });
+        }
+      }
+      for (const agentId of current.agentIds) {
+        patchAgent(agentId, { status: 'idle', activity: 'task stopped', taskId: null });
+      }
+    },
+
     respondPermission(requestId, decision) {
       const request = bus.state.permissions[requestId];
       if (!request || request.status !== 'pending') return;

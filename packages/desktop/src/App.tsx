@@ -3,7 +3,11 @@ import { useHub } from './hub';
 import { Rail, type View } from './components/Rail';
 import { TopBar } from './components/TopBar';
 import { Office } from './components/Office';
+import { TasksPage } from './components/TasksPage';
+import { ResourcesPage } from './components/ResourcesPage';
+import { HistoryPage } from './components/HistoryPage';
 import { SecurityPage } from './components/SecurityPage';
+import { SettingsPage } from './components/SettingsPage';
 import { TodayPanel } from './components/TodayPanel';
 
 export function App(): JSX.Element {
@@ -15,7 +19,12 @@ export function App(): JSX.Element {
       <Rail state={state} status={status} view={view} onNavigate={setView} send={send} />
       <main className="main">
         <TopBar state={state} send={send} />
-        {view === 'office' ? <Office state={state} /> : <SecurityPage state={state} send={send} />}
+        {view === 'office' && <Office state={state} />}
+        {view === 'tasks' && <TasksPage state={state} send={send} />}
+        {view === 'resources' && <ResourcesPage state={state} />}
+        {view === 'history' && <HistoryPage state={state} />}
+        {view === 'security' && <SecurityPage state={state} send={send} />}
+        {view === 'settings' && <SettingsPage state={state} />}
       </main>
       <TodayPanel state={state} send={send} />
     </div>

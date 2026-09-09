@@ -1,4 +1,4 @@
-import type { Agent, ModelTier, PermissionRequest, Task, Team } from '@agent-hq/shared';
+import type { Agent, ModelTier, PermissionRequest, Task, Team, Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine } from '../engine/types.js';
@@ -23,6 +23,8 @@ export class Orchestrator implements CommandHandlers {
   #activeWorkers = new Map<string, number>();
   #queues = new Map<string, string[]>();
   #pendingResolvers = new Map<string, (decision: 'approve' | 'deny') => void>();
+  #controllers = new Map<string, AbortController>();
+  #stopping = new Set<string>();
   #routingCount = 0;
   #tokensByModel: Record<ModelTier, number> = { opus: 0, sonnet: 0, haiku: 0 };
 
@@ -61,6 +63,17 @@ export class Orchestrator implements CommandHandlers {
       tokensUsed: 0,
       updatedAt: now(),
     });
+  }
+
+  // Restore token counters from a persisted usage snapshot (per-tier split
+  // reconstructed from the mix percentages — close enough for meters).
+  seedUsage(usage: Usage): void {
+    const total = usage.tokensToday;
+    this.#tokensByModel = {
+      opus: Math.round((total * usage.modelMixPct.opus) / 100),
+      sonnet: Math.round((total * usage.modelMixPct.sonnet) / 100),
+      haiku: Math.round((total * usage.modelMixPct.haiku) / 100),
+    };
   }
 
   // --- helpers -----------------------------------------------------------
@@ -117,6 +130,36 @@ export class Orchestrator implements CommandHandlers {
 
   submitTask(text: string): void {
     void this.#intake(text);
+  }
+
+  stopTask(taskId: string): void {
+    const task = this.#bus.state.tasks[taskId];
+    if (!task || ['done', 'failed', 'paused'].includes(task.status)) return;
+    this.#stopping.add(taskId);
+
+    // Unblock a worker parked on a permission (as a denial), expire the card.
+    for (const request of Object.values(this.#bus.state.permissions)) {
+      if (request.taskId !== taskId || request.status !== 'pending') continue;
+      this.#bus.publish({
+        type: 'permission.updated',
+        request: { ...request, status: 'expired', resolvedAt: now() },
+      });
+      const resolve = this.#pendingResolvers.get(request.id);
+      if (resolve) {
+        this.#pendingResolvers.delete(request.id);
+        resolve('deny');
+      }
+    }
+
+    const controller = this.#controllers.get(taskId);
+    if (controller) controller.abort();
+    else this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' }); // queued/routing — no worker yet
+    // If the task was queued, drop it from its team's queue.
+    if (task.teamId) {
+      const queue = this.#queues.get(task.teamId);
+      if (queue) this.#queues.set(task.teamId, queue.filter((queued) => queued !== taskId));
+    }
+    this.#activity('master', taskId, `task stopped by you: ${task.title.slice(0, 50)}`);
   }
 
   async #intake(text: string): Promise<void> {
@@ -195,12 +238,16 @@ export class Orchestrator implements CommandHandlers {
     this.#patchTask(taskId, { status: 'in_flight', agentIds: [`${team.id}-lead`, workerId], progressPct: 5 });
     this.#patchAgent(`${team.id}-lead`, { status: 'working', activity: `briefing ${workerName}`, taskId });
 
+    const controller = new AbortController();
+    this.#controllers.set(taskId, controller);
+
     try {
       const result = await this.#engine.runWorker({
         prompt: task.detail,
         team,
         model: team.workerModel,
         cwd: this.#workspaceDir,
+        signal: controller.signal,
         callbacks: {
           onActivity: (message) => {
             this.#patchAgent(workerId, { status: 'working', activity: message.slice(0, 90) });
@@ -220,6 +267,12 @@ export class Orchestrator implements CommandHandlers {
         },
       });
 
+      if (this.#stopping.has(taskId)) {
+        this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' });
+        this.#patchAgent(workerId, { status: 'idle', activity: 'task stopped', taskId: null });
+        return;
+      }
+
       // Lead review: the worker's report becomes the synopsis the owner reads.
       this.#patchTask(taskId, { status: 'review', progressPct: 95 });
       this.#patchAgent(workerId, { status: 'reporting', activity: 'reporting to lead' });
@@ -230,10 +283,17 @@ export class Orchestrator implements CommandHandlers {
       this.#patchTask(taskId, { status: 'done', progressPct: 100, synopsis: review.synopsis || null });
       this.#activity(`${team.id}-lead`, taskId, `report filed: ${task.title.slice(0, 50)}`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.#patchTask(taskId, { status: 'failed', synopsis: `Failed: ${message}` });
-      this.#patchAgent(workerId, { status: 'blocked', activity: message.slice(0, 90) });
+      if (this.#stopping.has(taskId)) {
+        this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' });
+        this.#patchAgent(workerId, { status: 'idle', activity: 'task stopped', taskId: null });
+      } else {
+        const message = error instanceof Error ? error.message : String(error);
+        this.#patchTask(taskId, { status: 'failed', synopsis: `Failed: ${message}` });
+        this.#patchAgent(workerId, { status: 'blocked', activity: message.slice(0, 90) });
+      }
     } finally {
+      this.#controllers.delete(taskId);
+      this.#stopping.delete(taskId);
       this.#patchAgent(`${team.id}-lead`, { status: 'idle', activity: 'standing by', taskId: null });
       this.#retireWorker(workerId);
       this.#activeWorkers.set(team.id, Math.max(0, (this.#activeWorkers.get(team.id) ?? 1) - 1));

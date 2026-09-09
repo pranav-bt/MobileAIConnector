@@ -75,9 +75,17 @@ export class ClaudeEngine implements OrchestratorEngine {
     let tokens = 0;
     let synopsis = '';
 
+    // Bridge the orchestrator's stop signal into the SDK's abort mechanism.
+    const abortController = new AbortController();
+    if (args.signal) {
+      if (args.signal.aborted) abortController.abort();
+      else args.signal.addEventListener('abort', () => abortController.abort(), { once: true });
+    }
+
     const stream = query({
       prompt: args.prompt,
       options: {
+        abortController,
         model: MODEL_IDS[args.model],
         cwd: args.cwd,
         systemPrompt: {

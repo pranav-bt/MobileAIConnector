@@ -28,8 +28,9 @@ export class MockEngine implements OrchestratorEngine {
     model: ModelTier;
     cwd: string;
     callbacks: WorkerRunCallbacks;
+    signal?: AbortSignal;
   }): Promise<WorkerRunResult> {
-    const { callbacks } = args;
+    const { callbacks, signal } = args;
     callbacks.onActivity('mock: examining the task');
     if (args.prompt.toLowerCase().includes('install')) {
       const decision = await callbacks.onPermission({
@@ -37,8 +38,10 @@ export class MockEngine implements OrchestratorEngine {
         command: 'npm install mock-package',
         reason: 'mock worker wants to install a package',
       });
+      if (signal?.aborted) throw new Error('aborted');
       callbacks.onActivity(decision === 'approve' ? 'mock: package installed' : 'mock: denied — working around it');
     }
+    if (signal?.aborted) throw new Error('aborted');
     callbacks.onTokens(42);
     return { synopsis: 'Mock worker: completed the task as described.', tokens: 42 };
   }

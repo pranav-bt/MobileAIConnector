@@ -112,6 +112,24 @@ try {
   await waitFor('research lead seeded', (e) => e.type === 'agent.updated' && e.agent.id === 'research-lead');
   console.log('team.create ok: room + lead live');
 
+  // 4. Stopping a task whose worker is parked on a permission request.
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding: install another tool (stop-test)' }));
+  const pendingStop = await waitFor(
+    'stop-test permission request',
+    (e) => e.type === 'permission.updated' && e.request.status === 'pending' && e.request.id !== pending.request.id,
+  );
+  if (pendingStop.type !== 'permission.updated') fail('unreachable');
+  ws.send(encodeCommand({ type: 'task.stop', taskId: pendingStop.request.taskId }));
+  await waitFor(
+    'stop-test permission expired',
+    (e) => e.type === 'permission.updated' && e.request.id === pendingStop.request.id && e.request.status === 'expired',
+  );
+  await waitFor(
+    'stop-test task paused',
+    (e) => e.type === 'task.updated' && e.task.id === pendingStop.request.taskId && e.task.status === 'paused',
+  );
+  console.log('task.stop ok: permission expired, task paused');
+
   console.log('ORCH SMOKE PASS');
   ws.close();
   await hub.close();

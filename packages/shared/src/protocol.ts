@@ -31,6 +31,10 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     projectId: z.string().nullable().optional(),
   }),
   z.object({
+    type: z.literal('task.stop'),
+    taskId: z.string(),
+  }),
+  z.object({
     type: z.literal('permission.respond'),
     requestId: z.string(),
     decision: PermissionDecisionSchema,

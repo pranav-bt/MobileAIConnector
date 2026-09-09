@@ -29,6 +29,24 @@ export function initialsOf(agent: Agent): string {
   return letters.slice(0, 2) || '?';
 }
 
+export function formatTokens(count: number): string {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
+  return String(count);
+}
+
+export const TASK_STATUS_LABELS: Record<string, { label: string; color: string }> = {
+  intake: { label: 'intake', color: 'var(--faint)' },
+  routing: { label: 'routing', color: 'var(--accent)' },
+  queued: { label: 'queued', color: 'var(--faint)' },
+  in_flight: { label: 'in flight', color: 'var(--green)' },
+  awaiting_permission: { label: 'awaiting you', color: 'var(--amber)' },
+  review: { label: 'lead review', color: 'var(--violet)' },
+  done: { label: 'done', color: 'var(--green)' },
+  failed: { label: 'failed', color: 'var(--red)' },
+  paused: { label: 'paused', color: 'var(--faint)' },
+};
+
 export function isActive(agent: Agent): boolean {
   return agent.status === 'working' || agent.status === 'waiting_permission' || agent.status === 'reporting';
 }

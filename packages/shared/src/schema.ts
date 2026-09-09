@@ -153,6 +153,18 @@ export const ActivityEntrySchema = z.object({
 });
 export type ActivityEntry = z.infer<typeof ActivityEntrySchema>;
 
+// Clients keep the most recent activity entries in state (capped) so task
+// detail views and history have something to show.
+export const ACTIVITY_LOG_CAP = 200;
+
+export const HubInfoSchema = z.object({
+  mode: z.enum(['demo', 'claude', 'mock']),
+  workspaceDir: z.string(),
+  dataDir: z.string(),
+  version: z.string(),
+});
+export type HubInfo = z.infer<typeof HubInfoSchema>;
+
 export const SnapshotSchema = z.object({
   agents: z.array(AgentSchema),
   teams: z.array(TeamSchema),
@@ -161,6 +173,8 @@ export const SnapshotSchema = z.object({
   projects: z.array(ProjectSchema),
   usage: UsageSchema,
   security: SecurityStateSchema,
+  activityLog: z.array(ActivityEntrySchema),
+  info: HubInfoSchema,
 });
 export type Snapshot = z.infer<typeof SnapshotSchema>;
 
@@ -174,6 +188,7 @@ export const HubEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('project.updated'), project: ProjectSchema }),
   z.object({ type: z.literal('usage.updated'), usage: UsageSchema }),
   z.object({ type: z.literal('security.updated'), security: SecurityStateSchema }),
+  z.object({ type: z.literal('hub.updated'), info: HubInfoSchema }),
   z.object({ type: z.literal('activity'), entry: ActivityEntrySchema }),
 ]);
 export type HubEvent = z.infer<typeof HubEventSchema>;

@@ -6,6 +6,7 @@ import type { ClientCommand } from '@agent-hq/shared';
 // these handlers — the server routes them to the SecurityController.
 export interface CommandHandlers {
   submitTask(text: string, projectId: string | null): void;
+  stopTask(taskId: string): void;
   respondPermission(requestId: string, decision: 'approve' | 'deny', scope: 'once' | 'task'): void;
   createTeam(input: {
     name: string;
@@ -23,6 +24,8 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
       return; // connection bookkeeping happens in the server
     case 'task.submit':
       return handlers.submitTask(command.text, command.projectId ?? null);
+    case 'task.stop':
+      return handlers.stopTask(command.taskId);
     case 'permission.respond':
       return handlers.respondPermission(command.requestId, command.decision, command.scope);
     case 'team.create':

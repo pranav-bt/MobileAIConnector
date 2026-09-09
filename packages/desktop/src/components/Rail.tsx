@@ -1,15 +1,15 @@
 import type { ClientCommand, HubState } from '@agent-hq/shared';
 import type { ConnectionStatus } from '../hub';
 
-export type View = 'office' | 'security';
+export type View = 'office' | 'tasks' | 'resources' | 'history' | 'security' | 'settings';
 
-const NAV_ITEMS: { label: string; view: View | null }[] = [
+const NAV_ITEMS: { label: string; view: View }[] = [
   { label: 'Office', view: 'office' },
-  { label: 'Tasks', view: null },
-  { label: 'Resources', view: null },
-  { label: 'History', view: null },
+  { label: 'Tasks', view: 'tasks' },
+  { label: 'Resources', view: 'resources' },
+  { label: 'History', view: 'history' },
   { label: 'Security', view: 'security' },
-  { label: 'Settings', view: null },
+  { label: 'Settings', view: 'settings' },
 ];
 
 export function Rail(props: {
@@ -36,9 +36,8 @@ export function Rail(props: {
         <button
           key={item.label}
           className={`navi${item.view === props.view ? ' active' : ''}`}
-          style={{ textAlign: 'left', opacity: item.view === null ? 0.55 : 1 }}
-          onClick={() => item.view && props.onNavigate(item.view)}
-          title={item.view === null ? 'coming in a later milestone' : undefined}
+          style={{ textAlign: 'left' }}
+          onClick={() => props.onNavigate(item.view)}
         >
           <span>{item.label}</span>
         </button>
