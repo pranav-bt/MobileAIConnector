@@ -1,5 +1,5 @@
 import type { HubState } from '@agent-hq/shared';
-import { formatTokens } from '../status';
+import { formatResetDay, formatResetTime, formatTokens, usageColor } from '../status';
 
 // Categorical hues for the model mix — validated for the dark surface
 // (lightness band, CVD separation, contrast) during the design phase.
@@ -28,13 +28,54 @@ export function ResourcesPage(props: { state: HubState }): JSX.Element {
   return (
     <div style={{ flexGrow: 1, padding: '18px 20px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, alignContent: 'start', overflowY: 'auto' }}>
       <div className="tcard" style={{ padding: 16 }}>
-        <div className="sect">Tokens used</div>
+        <div className="sect">Session — 5-hour window</div>
+        {usage.windowResetsAt > 0 ? (
+          <>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 8 }}>
+              <span className="mono" style={{ fontSize: 24, fontWeight: 600 }}>{Math.round(usage.windowPct)}%</span>
+              <span className="act">used · resets {formatResetTime(usage.windowResetsAt)}</span>
+            </div>
+            <div className="track" style={{ marginTop: 10 }}>
+              <div className="fill" style={{ width: `${usage.windowPct}%`, background: usageColor(usage.windowPct) }} />
+            </div>
+            <div className="act" style={{ marginTop: 8, color: 'var(--faint)' }}>
+              whole account — chat sessions, terminal Claude Code, and HQ agents alike
+            </div>
+          </>
+        ) : (
+          <span className="empty-note" style={{ display: 'block', marginTop: 10 }}>
+            unavailable — is Claude Code signed in on this PC?
+          </span>
+        )}
+      </div>
+
+      <div className="tcard" style={{ padding: 16 }}>
+        <div className="sect">Weekly limit</div>
+        {usage.weeklyResetsAt > 0 ? (
+          <>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 8 }}>
+              <span className="mono" style={{ fontSize: 24, fontWeight: 600 }}>{Math.round(usage.weeklyPct)}%</span>
+              <span className="act">used · resets {formatResetDay(usage.weeklyResetsAt)}</span>
+            </div>
+            <div className="track" style={{ marginTop: 10 }}>
+              <div className="fill" style={{ width: `${usage.weeklyPct}%`, background: usageColor(usage.weeklyPct) }} />
+            </div>
+            <div className="act" style={{ marginTop: 8, color: 'var(--faint)' }}>
+              overage spending: {usage.overageEnabled ? 'ON — usage past the limit costs money' : 'off — hitting a limit only pauses work'}
+            </div>
+          </>
+        ) : (
+          <span className="empty-note" style={{ display: 'block', marginTop: 10 }}>
+            unavailable — refreshed every 5 minutes while the hub runs real agents
+          </span>
+        )}
+      </div>
+
+      <div className="tcard" style={{ padding: 16 }}>
+        <div className="sect">Tokens by HQ agents</div>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 8 }}>
           <span className="mono" style={{ fontSize: 24, fontWeight: 600 }}>{formatTokens(usage.tokensToday)}</span>
-          <span className="act">across all agents (persists over restarts)</span>
-        </div>
-        <div className="act" style={{ marginTop: 10, color: 'var(--faint)' }}>
-          subscription window/weekly meters land when limit data is available — until then this counts raw tokens
+          <span className="act">HQ's own share of the meters above (persists over restarts)</span>
         </div>
       </div>
 

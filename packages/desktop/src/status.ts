@@ -47,6 +47,20 @@ export const TASK_STATUS_LABELS: Record<string, { label: string; color: string }
   paused: { label: 'paused', color: 'var(--faint)' },
 };
 
+export function usageColor(pct: number): string {
+  if (pct >= 90) return 'var(--red)';
+  if (pct >= 75) return 'var(--amber)';
+  return 'var(--accent-solid)';
+}
+
+export function formatResetTime(ts: number): string {
+  return new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
+export function formatResetDay(ts: number): string {
+  return new Date(ts).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+}
+
 export function isActive(agent: Agent): boolean {
   return agent.status === 'working' || agent.status === 'waiting_permission' || agent.status === 'reporting';
 }

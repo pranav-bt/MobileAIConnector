@@ -8,7 +8,8 @@ export function TopBar(props: {
 }): JSX.Element {
   const [text, setText] = useState('');
   const activeCount = Object.values(props.state.agents).filter(isActive).length;
-  const weeklyPct = Math.round(props.state.usage.weeklyPct);
+  const usage = props.state.usage;
+  const limitsKnown = usage.windowResetsAt > 0 || usage.weeklyResetsAt > 0;
 
   const submit = () => {
     const trimmed = text.trim();
@@ -34,7 +35,11 @@ export function TopBar(props: {
         <span className="dot" style={{ background: 'var(--green)' }} />
         {activeCount} AGENTS ACTIVE
       </span>
-      <span className="pill">WEEKLY&nbsp;&nbsp;{weeklyPct}%</span>
+      {limitsKnown && (
+        <span className="pill">
+          5H&nbsp;{Math.round(usage.windowPct)}%&nbsp;&nbsp;·&nbsp;&nbsp;WK&nbsp;{Math.round(usage.weeklyPct)}%
+        </span>
+      )}
     </div>
   );
 }

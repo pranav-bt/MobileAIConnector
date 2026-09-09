@@ -11,6 +11,7 @@ import { Orchestrator } from './orchestrator/orchestrator.js';
 import { TeamRegistry } from './orchestrator/teams.js';
 import { PairingManager } from './security/pairing.js';
 import { SecurityController } from './security/controller.js';
+import { startLimitsPoller } from './usage/limits.js';
 import type { CommandHandlers } from './commands.js';
 
 export interface HubOptions {
@@ -79,6 +80,10 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
 
   bus.publish({ type: 'hub.updated', info: { mode, workspaceDir: cwd, dataDir, version: '0.1.0' } });
 
+  // Real subscription meters (5h window / weekly, incl. chat usage) — only
+  // when running real agents; demo seeds fake meters and mock stays offline.
+  const stopLimits = mode === 'claude' ? startLimitsPoller(bus) : null;
+
   const securityController = new SecurityController(bus, pairing, port);
   const server: HubServer = await startServer(bus, handlers, securityController, port);
   securityController.publishState();
@@ -92,6 +97,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     security: securityController,
     close: async () => {
       stopDemo?.();
+      stopLimits?.();
       stopSnapshots?.();
       securityController.stop();
       stopLog();

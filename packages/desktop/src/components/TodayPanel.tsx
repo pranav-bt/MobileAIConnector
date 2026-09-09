@@ -1,4 +1,5 @@
 import type { ClientCommand, HubState, Task } from '@agent-hq/shared';
+import { formatResetDay, formatResetTime, formatTokens, usageColor } from '../status';
 
 function teamName(state: HubState, teamId: string | null): string {
   return (teamId && state.teams[teamId]?.name) || 'Unassigned';
@@ -37,13 +38,7 @@ export function TodayPanel(props: {
   const failed = tasks.filter((task) => task.status === 'failed').slice(0, 2);
 
   const usage = state.usage;
-  const resetsDay = usage.weeklyResetsAt
-    ? new Date(usage.weeklyResetsAt).toLocaleDateString(undefined, { weekday: 'short' })
-    : '—';
-  // Engine mode counts tokens itself but can't see subscription limits yet.
-  const tokensOnly = usage.weeklyResetsAt === 0;
-  const formatTokens = (count: number): string =>
-    count >= 1_000_000 ? `${(count / 1_000_000).toFixed(1)}M` : count >= 1_000 ? `${(count / 1_000).toFixed(1)}k` : String(count);
+  const limitsKnown = usage.windowResetsAt > 0 || usage.weeklyResetsAt > 0;
 
   return (
     <aside className="today">
@@ -120,17 +115,34 @@ export function TodayPanel(props: {
       <div style={{ flexGrow: 1 }} />
 
       <div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-          <div className="sect" style={{ marginBottom: 6 }}>Usage</div>
+        <div className="sect" style={{ marginBottom: 6 }}>Usage — whole account</div>
+        {limitsKnown ? (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+              <span style={{ fontSize: 12 }}>session (5h)</span>
+              <span className="act">
+                {Math.round(usage.windowPct)}%{usage.windowResetsAt > 0 && ` · resets ${formatResetTime(usage.windowResetsAt)}`}
+              </span>
+            </div>
+            <div className="track" style={{ marginTop: 4 }}>
+              <div className="fill" style={{ width: `${usage.windowPct}%`, background: usageColor(usage.windowPct) }} />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 8 }}>
+              <span style={{ fontSize: 12 }}>weekly</span>
+              <span className="act">
+                {Math.round(usage.weeklyPct)}%{usage.weeklyResetsAt > 0 && ` · resets ${formatResetDay(usage.weeklyResetsAt)}`}
+              </span>
+            </div>
+            <div className="track" style={{ marginTop: 4 }}>
+              <div className="fill" style={{ width: `${usage.weeklyPct}%`, background: usageColor(usage.weeklyPct) }} />
+            </div>
+            <div className="act" style={{ marginTop: 7, color: 'var(--faint)' }}>
+              {formatTokens(usage.tokensToday)} tokens of that by HQ agents
+            </div>
+          </>
+        ) : (
           <div className="act">
-            {tokensOnly
-              ? `${formatTokens(usage.tokensToday)} tokens today`
-              : `${Math.round(usage.weeklyPct)}% of weekly · resets ${resetsDay}`}
-          </div>
-        </div>
-        {!tokensOnly && (
-          <div className="track" style={{ marginTop: 0 }}>
-            <div className="fill" style={{ width: `${usage.weeklyPct}%`, background: usage.weeklyPct >= 75 ? 'var(--amber)' : 'var(--faint)' }} />
+            limit data unavailable · {formatTokens(usage.tokensToday)} tokens by HQ agents
           </div>
         )}
       </div>
