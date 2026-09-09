@@ -1,0 +1,26 @@
+{
+  "name": "@agent-hq/hub",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "dev:demo": "tsx src/index.ts --demo",
+    "dev:engine": "tsx src/index.ts --engine claude",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke": "tsx test/smoke.ts"
+  },
+  "dependencies": {
+    "@agent-hq/shared": "*",
+    "@anthropic-ai/claude-agent-sdk": "latest",
+    "ws": "^8.18.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
