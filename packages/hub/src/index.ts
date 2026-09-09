@@ -113,9 +113,11 @@ if (isMain) {
   const args = process.argv.slice(2);
   const portFlag = args.indexOf('--port');
   const engineFlag = args.indexOf('--engine');
+  const demo = args.includes('--demo');
   void startHub({
-    demo: args.includes('--demo') || engineFlag === -1,
-    engine: engineFlag !== -1 ? (args[engineFlag + 1] as 'claude' | 'mock') : null,
+    demo,
+    // Real agents are the default; the scripted demo is strictly opt-in.
+    engine: demo ? null : engineFlag !== -1 ? (args[engineFlag + 1] as 'claude' | 'mock') : 'claude',
     port: portFlag !== -1 ? Number(args[portFlag + 1]) : undefined,
   });
 }

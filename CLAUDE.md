@@ -27,9 +27,9 @@ https://claude.ai/code/artifact/2ca3a0e6-562e-4184-a465-0eeab90b2d1f
 
 ```
 npm install            # once, at the repo root
-npm run hub            # hub in demo mode (mockup scenario, no usage spent)
-npm run hub:engine     # hub running REAL Claude agents (spends usage)
-npm run dev:mock -w @agent-hq/hub   # orchestrator with deterministic mock engine (offline dev)
+npm run hub            # the hub — REAL Claude agents (default; empty until tasks are submitted)
+npm run hub:demo       # scripted showcase scenario (no real agents, no usage) — opt-in only
+npm run hub:mock       # orchestrator with deterministic mock engine (offline dev)
 npm run desktop        # office UI on http://localhost:5173
 npm run smoke          # e2e smokes: demo hub + orchestrator (mock engine, no usage)
 npx tsx test/engine.live.ts   # (from packages/hub) LIVE Claude-engine validation — spends usage

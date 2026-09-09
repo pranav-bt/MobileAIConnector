@@ -11,16 +11,18 @@ Concept mockups: https://claude.ai/code/artifact/2ca3a0e6-562e-4184-a465-0eeab90
 
 ```bash
 npm install
-npm run hub        # terminal 1 — hub in demo mode (no usage spent)
-npm run desktop    # terminal 2 — open http://localhost:5173
+npm run hub        # terminal 1 — the hub, running REAL agents (empty until you submit work)
+npm run desktop    # terminal 2 — open http://localhost:5173 (or `npm run shell` for the native window)
 ```
 
-The demo replays the concept-canvas scenario live: type a task into the
-composer, approve the `npm install playwright` request when Worker C-3
-raises a hand, and watch it resume.
+The office starts empty except for the master and the team leads standing
+by. Type a task into the composer: the master routes it to a team, a worker
+runs it (permission requests raise a hand for your approval), and the
+lead's reviewed synopsis lands in History. Nothing spends usage until you
+submit a task.
 
-`npm run hub:engine` swaps the demo for the real Claude Agent SDK engine —
-tasks you submit then run actual agents in this repo (and spend usage).
+`npm run hub:demo` runs a scripted showcase scenario instead (no real
+agents, no usage) — useful for a tour of the UI, never the default.
 
 ## Structure
 

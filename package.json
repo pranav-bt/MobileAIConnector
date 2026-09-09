@@ -9,8 +9,9 @@
   "scripts": {
     "build": "npm run build -w @agent-hq/shared -w @agent-hq/hub -w @agent-hq/desktop",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "hub": "npm run dev:demo -w @agent-hq/hub",
-    "hub:engine": "npm run dev:engine -w @agent-hq/hub",
+    "hub": "npm run dev -w @agent-hq/hub",
+    "hub:demo": "npm run dev:demo -w @agent-hq/hub",
+    "hub:mock": "npm run dev:mock -w @agent-hq/hub",
     "desktop": "npm run dev -w @agent-hq/desktop",
     "shell": "npm run shell:dev -w @agent-hq/desktop",
     "smoke": "npm run smoke -w @agent-hq/hub"
