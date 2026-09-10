@@ -61,6 +61,9 @@ class MainActivity : FragmentActivity() {
             Toast.makeText(this, "No speech recognition service on this device", Toast.LENGTH_SHORT).show()
             return
         }
+        // Silence Jarvis before the mic opens — otherwise the recognizer
+        // transcribes the synopsis it was reading out.
+        dev.neureal.agenthq.voice.VoiceFeedback.hush()
         try {
             android.media.ToneGenerator(android.media.AudioManager.STREAM_NOTIFICATION, 80)
                 .startTone(android.media.ToneGenerator.TONE_PROP_ACK, 120)

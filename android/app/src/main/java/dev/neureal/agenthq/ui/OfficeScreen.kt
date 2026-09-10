@@ -308,7 +308,11 @@ private fun VoiceOverlay(modifier: Modifier) {
                 "dismiss",
                 color = HQ.faint, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
                 modifier = Modifier
-                    .clickable { dev.neureal.agenthq.voice.VoiceSession.clear() }
+                    .clickable {
+                        // Dismiss silences Jarvis too — mid-sentence included.
+                        dev.neureal.agenthq.voice.VoiceFeedback.hush()
+                        dev.neureal.agenthq.voice.VoiceSession.clear()
+                    }
                     .padding(4.dp),
             )
         }

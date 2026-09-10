@@ -6,7 +6,7 @@ import type { Team } from '@agent-hq/shared';
 // inserting a record here — the office UI adds the room on the team.updated
 // event, nothing else needs to change.
 
-const DEFAULT_TEAMS: Omit<Team, 'createdAt' | 'memoryDir'>[] = [
+const DEFAULT_TEAMS: Omit<Team, 'createdAt' | 'memoryDir' | 'mcpServers'>[] = [
   {
     id: 'coding',
     name: 'Coding team',
@@ -56,10 +56,16 @@ export class TeamRegistry {
   init(): void {
     if (existsSync(this.#filePath)) {
       const stored = JSON.parse(readFileSync(this.#filePath, 'utf8')) as Team[];
-      for (const team of stored) this.#teams.set(team.id, team);
+      // Records written before mcpServers existed get the empty default.
+      for (const team of stored) this.#teams.set(team.id, { ...team, mcpServers: team.mcpServers ?? {} });
     } else {
       for (const base of DEFAULT_TEAMS) {
-        this.#teams.set(base.id, { ...base, memoryDir: join(this.#teamsDir, base.id), createdAt: Date.now() });
+        this.#teams.set(base.id, {
+          ...base,
+          mcpServers: {},
+          memoryDir: join(this.#teamsDir, base.id),
+          createdAt: Date.now(),
+        });
       }
       this.#save();
     }
@@ -92,6 +98,7 @@ export class TeamRegistry {
     workerModel?: Team['workerModel'];
     quotaSharePct?: number;
     charter?: string;
+    mcpServers?: Record<string, unknown>;
   }): Team | null {
     const current = this.#teams.get(input.teamId);
     if (!current) return null;
@@ -101,6 +108,7 @@ export class TeamRegistry {
       workerModel: input.workerModel ?? current.workerModel,
       quotaSharePct: input.quotaSharePct ?? current.quotaSharePct,
       charter: input.charter ?? current.charter,
+      mcpServers: input.mcpServers ?? current.mcpServers ?? {},
     };
     this.#teams.set(team.id, team);
     this.#save();
@@ -142,6 +150,7 @@ export class TeamRegistry {
     blockedTools: string[];
     workerModel?: Team['workerModel'];
     quotaSharePct?: number;
+    mcpServers?: Record<string, unknown>;
   }): Team {
     const id =
       input.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `team-${Date.now()}`;
@@ -156,6 +165,7 @@ export class TeamRegistry {
       maxConcurrentWorkers: 2,
       quotaSharePct: input.quotaSharePct ?? 10,
       memoryDir: join(this.#teamsDir, id),
+      mcpServers: input.mcpServers ?? {},
       createdAt: Date.now(),
     };
     this.#teams.set(id, team);

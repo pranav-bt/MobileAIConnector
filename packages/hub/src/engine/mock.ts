@@ -5,6 +5,25 @@ import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './
 // keyword, "installs" trigger a permission request, everything resolves fast.
 export class MockEngine implements OrchestratorEngine {
   async complete(args: { prompt: string; model: ModelTier }): Promise<{ text: string; tokens: number }> {
+    // Coordination prompts expect {"dispatch": [...]} — checked before the
+    // routing branch because their format line also mentions "teamId".
+    if (args.prompt.includes('"dispatch"')) {
+      if (args.prompt.includes('handoff-test')) {
+        return {
+          text: JSON.stringify({
+            dispatch: [
+              {
+                teamId: 'design',
+                title: 'Produce the icon set',
+                instruction: 'Produce the icon set the coding team still needs.',
+              },
+            ],
+          }),
+          tokens: 7,
+        };
+      }
+      return { text: JSON.stringify({ dispatch: [] }), tokens: 7 };
+    }
     if (args.prompt.includes('"teamId"')) {
       const teamIds = [...args.prompt.matchAll(/^- id: ([a-z0-9-]+)/gm)].map((match) => match[1] ?? '');
       const projectIds = [...args.prompt.matchAll(/^\* project: ([a-z0-9-]+)/gm)].map((match) => match[1] ?? '');
@@ -55,11 +74,14 @@ export class MockEngine implements OrchestratorEngine {
       const memoryNote = args.prompt.toLowerCase().includes('remember') ? 'Mock lesson: remember this.' : null;
       // Carry the remediation marker through the review so a [QA] task's
       // synopsis can trip the verdict step — but only on its first QA round
-      // ([fix] work reviews clean, ending the loop).
+      // ([fix] work reviews clean, ending the loop). "handoff-test" reviews
+      // into a report that explicitly hands work to the design team.
       const synopsis =
         args.prompt.includes('remediate-me') && args.prompt.includes('[QA]') && !args.prompt.includes('[fix')
           ? 'ISSUES: QA found the remediate-me bug in the feature.'
-          : 'Mock lead review: work checked, looks complete.';
+          : args.prompt.includes('handoff-test') && !args.prompt.includes('[QA]')
+            ? 'Done, but the icon set still needs the design team (handoff-test).'
+            : 'Mock lead review: work checked, looks complete.';
       return {
         text: JSON.stringify({ synopsis, memoryNote }),
         tokens: 9,

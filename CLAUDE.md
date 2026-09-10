@@ -59,6 +59,17 @@ npm run typecheck      # tsc across workspaces
   are honored only from local clients.
 - Teams are config records — creating one must always work as a single
   command (`team.create`), and the office UI renders rooms from the registry.
+  A team record may carry per-team MCP server grants (`mcpServers`): its
+  workers get exactly those connections (e.g. Roblox Studio for QA and the
+  Game Engine team). Teams chartered for web work (`web` in allowedTools)
+  browse without permission cards in auto mode. Roster setup lives in
+  `tools/setup-teams.mjs` (idempotent, talks to the running hub).
+- Interdisciplinary flow is master-driven: after every completed report the
+  master runs a coordination pass (haiku) and may dispatch follow-up tasks to
+  other teams (leads huddle in the Meeting room); QA reports get a verdict
+  instead — real issues spawn a `[fix]` task back to the source team, capped
+  at two rounds before escalating to the owner. Both are depth-capped so
+  follow-ups can't cascade.
 - Projects are config records too (`data/projects.json`): a workspace dir +
   token ledger. Workers run inside their task's project workspace and see
   only that project's files, that project's recent synopses, and their

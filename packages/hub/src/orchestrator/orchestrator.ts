@@ -3,7 +3,7 @@ import type { Agent, ModelTier, PermissionRequest, Task, Team, Usage } from '@ag
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine } from '../engine/types.js';
-import { evaluateQaReport, reviewWorkerReport, routeTask, type PlanStep } from './master.js';
+import { coordinateFollowUp, evaluateQaReport, reviewWorkerReport, routeTask, type PlanStep } from './master.js';
 import { capturePcScreen, shareFile } from '../files.js';
 import { evaluatePermission } from './policy.js';
 import { delay } from './util.js';
@@ -33,6 +33,10 @@ export class Orchestrator implements CommandHandlers {
   #stopping = new Set<string>();
   #qaSource = new Map<string, string>(); // [QA] taskId -> source taskId
   #scaleAsked = new Set<string>(); // teams with an open scale-up card
+  // Follow-up generation per task (0 = user-submitted). QA passes, fixes,
+  // and master-dispatched handovers each add one; past MAX the master stops
+  // spawning and escalates to the owner instead of looping.
+  #taskDepth = new Map<string, number>();
   #routingCount = 0;
   #tokensByModel: Record<ModelTier, number> = { opus: 0, sonnet: 0, haiku: 0 };
 
@@ -443,7 +447,7 @@ export class Orchestrator implements CommandHandlers {
             }
           },
           onPermission: ({ toolName, command, reason }) => {
-            const verdict = evaluatePermission(toolName, command, this.#policy.mode);
+            const verdict = evaluatePermission(toolName, command, this.#policy.mode, team.allowedTools);
             if (verdict.decision === 'allow') return Promise.resolve('approve' as const);
             return this.#raisePermission(taskId, workerId, team, command, reason, verdict.flags);
           },
@@ -473,7 +477,10 @@ export class Orchestrator implements CommandHandlers {
 
       if (autoQa) this.#enqueueQa(taskId, team, review.synopsis);
       // A finished QA task gets a verdict: pass, or a remediation round.
+      // Everything else gets the master's coordination pass: does the report
+      // hand work to a different team?
       if (task.title.startsWith('[QA]')) void this.#handleQaOutcome(taskId, review.synopsis);
+      else if (autoQa) void this.#coordinate(taskId, team, review.synopsis);
     } catch (error) {
       if (this.#stopping.has(taskId)) {
         this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' });
@@ -534,13 +541,90 @@ export class Orchestrator implements CommandHandlers {
     this.#activity('master', taskId, `QA follow-up queued for: ${source.title.slice(0, 45)}`);
 
     this.#qaSource.set(taskId, sourceTaskId);
-    if ((this.#activeWorkers.get(qa.id) ?? 0) >= qa.maxConcurrentWorkers) {
-      const queue = this.#queues.get(qa.id) ?? [];
+    this.#taskDepth.set(taskId, (this.#taskDepth.get(sourceTaskId) ?? 0) + 1);
+    this.#startOrQueue(taskId, qa, false);
+  }
+
+  // Respect the team's cap: run now or join the FIFO queue (and maybe ask
+  // the owner for an extra worker).
+  #startOrQueue(taskId: string, team: Team, autoQa: boolean): void {
+    if ((this.#activeWorkers.get(team.id) ?? 0) >= team.maxConcurrentWorkers) {
+      this.#patchTask(taskId, { status: 'queued' });
+      const queue = this.#queues.get(team.id) ?? [];
       queue.push(taskId);
-      this.#queues.set(qa.id, queue);
-      this.#maybeAskToScale(qa);
+      this.#queues.set(team.id, queue);
+      this.#maybeAskToScale(team);
     } else {
-      void this.#runTask(taskId, qa, false);
+      void this.#runTask(taskId, team, autoQa);
+    }
+  }
+
+  // Two leads huddle in the Meeting room for a moment while a handover or
+  // remediation is arranged; the office renders whoever is in a meeting.
+  #holdMeeting(leadIds: string[], topic: string): void {
+    const meeting = `meeting: ${topic}`;
+    for (const leadId of leadIds) this.#patchAgent(leadId, { status: 'reporting', activity: meeting });
+    setTimeout(() => {
+      for (const leadId of leadIds) {
+        const lead = this.#bus.state.agents[leadId];
+        if (lead && lead.activity.startsWith('meeting:')) {
+          this.#patchAgent(leadId, { status: 'idle', activity: 'standing by' });
+        }
+      }
+    }, 10_000);
+  }
+
+  // The master's interdisciplinary pass, run on every completed task report:
+  // if the report explicitly hands work to a different team, the two leads
+  // meet and the master dispatches a follow-up task there. Depth-capped so
+  // follow-ups of follow-ups can't cascade forever.
+  async #coordinate(taskId: string, team: Team, synopsis: string): Promise<void> {
+    if (!synopsis) return;
+    const depth = this.#taskDepth.get(taskId) ?? 0;
+    if (depth >= 2) return;
+    const task = this.#bus.state.tasks[taskId];
+    if (!task) return;
+
+    const { dispatch, tokens } = await coordinateFollowUp(
+      this.#engine,
+      this.#registry.all(),
+      team,
+      task.title,
+      synopsis,
+    );
+    this.#recordTokens('haiku', tokens);
+
+    for (const item of dispatch) {
+      const target = this.#registry.get(item.teamId);
+      if (!target || target.id === team.id) continue;
+
+      this.#holdMeeting(
+        [`${team.id}-lead`, `${target.id}-lead`],
+        `handover: ${item.title.slice(0, 32)}`,
+      );
+      this.#activity('master', taskId, `${team.name} and ${target.name} leads are meeting over a handover`);
+
+      this.#taskCounter += 1;
+      const followId = `t-${now().toString(36)}-${this.#taskCounter}`;
+      this.#taskDepth.set(followId, depth + 1);
+      this.#publishTask({
+        id: followId,
+        title: item.title.slice(0, 60),
+        detail:
+          `${item.instruction}\n\n` +
+          `Handover from the ${team.name} ("${task.title}"): ${synopsis.replace(/\s+/g, ' ').slice(0, 600)}`,
+        projectId: task.projectId,
+        teamId: target.id,
+        status: 'queued',
+        progressPct: 0,
+        agentIds: [],
+        synopsis: null,
+        tokensUsed: 0,
+        createdAt: now(),
+        updatedAt: now(),
+      });
+      this.#activity('master', followId, `follow-up dispatched to ${target.name}: ${item.title.slice(0, 45)}`);
+      this.#startOrQueue(followId, target, true);
     }
   }
 
@@ -575,18 +659,8 @@ export class Orchestrator implements CommandHandlers {
     }
 
     // The leads huddle in the meeting room while the handover happens.
-    const meeting = `meeting: QA findings on "${rootTitle.slice(0, 32)}"`;
-    this.#patchAgent(`${qa.id}-lead`, { status: 'reporting', activity: meeting });
-    this.#patchAgent(`${sourceTeam.id}-lead`, { status: 'reporting', activity: meeting });
+    this.#holdMeeting([`${qa.id}-lead`, `${sourceTeam.id}-lead`], `QA findings on "${rootTitle.slice(0, 32)}"`);
     this.#activity('master', qaTaskId, `${qa.name} and ${sourceTeam.name} leads are meeting over QA findings`);
-    setTimeout(() => {
-      for (const leadId of [`${qa.id}-lead`, `${sourceTeam.id}-lead`]) {
-        const lead = this.#bus.state.agents[leadId];
-        if (lead && lead.activity.startsWith('meeting:')) {
-          this.#patchAgent(leadId, { status: 'idle', activity: 'standing by' });
-        }
-      }
-    }, 10_000);
 
     this.#taskCounter += 1;
     const fixId = `t-${now().toString(36)}-${this.#taskCounter}`;
@@ -609,15 +683,8 @@ export class Orchestrator implements CommandHandlers {
       updatedAt: now(),
     });
     this.#activity('master', fixId, `remediation assigned to ${sourceTeam.name}: ${fixTitle.slice(0, 45)}`);
-
-    if ((this.#activeWorkers.get(sourceTeam.id) ?? 0) >= sourceTeam.maxConcurrentWorkers) {
-      const queue = this.#queues.get(sourceTeam.id) ?? [];
-      queue.push(fixId);
-      this.#queues.set(sourceTeam.id, queue);
-      this.#maybeAskToScale(sourceTeam);
-    } else {
-      void this.#runTask(fixId, sourceTeam, true);
-    }
+    this.#taskDepth.set(fixId, (this.#taskDepth.get(qaTaskId) ?? 1) + 1);
+    this.#startOrQueue(fixId, sourceTeam, true);
   }
 
   // Backed-up team -> an approval card (reaches the phone too): approve to
@@ -740,6 +807,7 @@ export class Orchestrator implements CommandHandlers {
     blockedTools: string[];
     workerModel?: ModelTier;
     quotaSharePct?: number;
+    mcpServers?: Record<string, unknown>;
   }): void {
     const team = this.#registry.add(input);
     this.#bus.publish({ type: 'team.updated', team });
@@ -764,6 +832,7 @@ export class Orchestrator implements CommandHandlers {
     workerModel?: ModelTier;
     quotaSharePct?: number;
     charter?: string;
+    mcpServers?: Record<string, unknown>;
   }): void {
     const team = this.#registry.update(input);
     if (!team) return;

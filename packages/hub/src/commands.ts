@@ -15,6 +15,7 @@ export interface CommandHandlers {
     blockedTools: string[];
     workerModel?: 'opus' | 'sonnet' | 'haiku';
     quotaSharePct?: number;
+    mcpServers?: Record<string, unknown>;
   }): void;
   updateTeam(input: {
     teamId: string;
@@ -22,6 +23,7 @@ export interface CommandHandlers {
     workerModel?: 'opus' | 'sonnet' | 'haiku';
     quotaSharePct?: number;
     charter?: string;
+    mcpServers?: Record<string, unknown>;
   }): void;
   removeTeam(teamId: string): void;
   registerProject(input: { name: string; workspaceDir: string; description?: string; quotaTokens?: number }): void;

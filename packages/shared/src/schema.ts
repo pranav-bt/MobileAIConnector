@@ -75,6 +75,9 @@ export const TeamSchema = z.object({
   maxConcurrentWorkers: z.number().int().positive(),
   quotaSharePct: z.number().min(0).max(100),
   memoryDir: z.string(),
+  // Per-team MCP server grants (name -> SDK server config): the team's
+  // workers get exactly these connections (e.g. Roblox Studio for QA).
+  mcpServers: z.record(z.string(), z.unknown()).default({}),
   createdAt: z.number(),
 });
 export type Team = z.infer<typeof TeamSchema>;

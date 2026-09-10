@@ -22,10 +22,19 @@ const BASH_ESCALATIONS: Escalation[] = [
 
 export type PolicyVerdict = { decision: 'allow' } | { decision: 'ask'; flags: string[] };
 
-export function evaluatePermission(toolName: string, command: string, mode: PermissionMode): PolicyVerdict {
+export function evaluatePermission(
+  toolName: string,
+  command: string,
+  mode: PermissionMode,
+  teamAllowedTools: string[] = [],
+): PolicyVerdict {
   if (mode === 'strict') return { decision: 'ask', flags: [] };
   if (toolName === 'Write' || toolName === 'Edit' || toolName === 'NotebookEdit') return { decision: 'allow' };
-  if (toolName === 'WebFetch') return { decision: 'ask', flags: ['network access'] };
+  if (toolName === 'WebFetch') {
+    // Teams chartered for web work (e.g. Research) browse without asking.
+    if (teamAllowedTools.includes('web') || teamAllowedTools.includes('browser')) return { decision: 'allow' };
+    return { decision: 'ask', flags: ['network access'] };
+  }
   if (toolName === 'Bash') {
     const flags = [...new Set(BASH_ESCALATIONS.filter((rule) => rule.pattern.test(command)).map((rule) => rule.flag))];
     return flags.length > 0 ? { decision: 'ask', flags } : { decision: 'allow' };

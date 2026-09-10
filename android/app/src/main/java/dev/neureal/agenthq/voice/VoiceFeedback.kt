@@ -6,6 +6,7 @@ import dev.neureal.agenthq.net.HubClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -27,6 +28,16 @@ object VoiceFeedback {
         VoiceSession.jarvis(text)
         if (ready) tts?.speak(text.take(500), TextToSpeech.QUEUE_ADD, null, "hq-${System.nanoTime()}")
     }
+
+    // Shut up NOW: flush the current + queued utterances and stop following
+    // tasks. Used when the overlay is dismissed and before the mic opens, so
+    // the recognizer never hears Jarvis's own voice.
+    fun hush() {
+        try { tts?.stop() } catch (ignored: Exception) {}
+        scope.coroutineContext.cancelChildren()
+    }
+
+    fun isSpeaking(): Boolean = try { tts?.isSpeaking == true } catch (ignored: Exception) { false }
 
     // Follows a just-submitted task: announce routing, then read the synopsis.
     fun followTask(hub: HubClient, submittedText: String) {

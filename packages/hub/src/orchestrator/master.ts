@@ -133,6 +133,72 @@ export async function routeTask(
   }
 }
 
+// Master's coordination pass: after ANY team files a completed-task report,
+// the master reads it and decides whether a DIFFERENT team must pick work up
+// (a handover, a blocker, a missing piece outside the reporting team's
+// charter). This is the general mechanism behind interdisciplinary flow —
+// QA remediation is a specialized case with its own loop cap.
+export interface FollowUpDispatch {
+  teamId: string;
+  title: string;
+  instruction: string;
+}
+
+export async function coordinateFollowUp(
+  engine: OrchestratorEngine,
+  teams: Team[],
+  sourceTeam: Team,
+  taskTitle: string,
+  synopsis: string,
+): Promise<{ dispatch: FollowUpDispatch[]; tokens: number }> {
+  const teamLines = teams
+    .filter((team) => team.id !== sourceTeam.id)
+    .map((team) => `- ${team.id}: ${team.name} — ${team.charter}`)
+    .join('\n');
+  const prompt = [
+    'You are the master agent of Agent HQ, coordinating specialist teams.',
+    '',
+    'Other teams available:',
+    teamLines,
+    '',
+    `The ${sourceTeam.name} just completed the task "${taskTitle}". Their final report:`,
+    `"${synopsis}"`,
+    '',
+    'If — and ONLY if — the report explicitly states that work remains which a',
+    "DIFFERENT team must do (a handover, a blocker, a missing piece outside the reporting team's",
+    'charter), dispatch it to that team. Normal completions, notes, and suggestions dispatch',
+    'nothing — that is the common case. Never dispatch more than 2 items.',
+    '',
+    'Reply with ONLY JSON:',
+    '{"dispatch": [{"teamId": "<team id>", "title": "<imperative title, max 60 chars>", "instruction": "<what that team must do, with the context they need>"}]}',
+    'Use {"dispatch": []} when nothing is needed.',
+  ].join('\n');
+  try {
+    const { text, tokens } = await engine.complete({ prompt, model: 'haiku' });
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return { dispatch: [], tokens };
+    const parsed = JSON.parse(jsonMatch[0]) as { dispatch?: unknown };
+    if (!Array.isArray(parsed.dispatch)) return { dispatch: [], tokens };
+    const dispatch: FollowUpDispatch[] = [];
+    for (const raw of parsed.dispatch.slice(0, 2)) {
+      if (typeof raw !== 'object' || raw === null) continue;
+      const item = raw as { teamId?: unknown; title?: unknown; instruction?: unknown };
+      const team = teams.find((candidate) => candidate.id === item.teamId);
+      if (!team || team.id === sourceTeam.id) continue;
+      if (typeof item.instruction !== 'string' || !item.instruction.trim()) continue;
+      dispatch.push({
+        teamId: team.id,
+        title:
+          typeof item.title === 'string' && item.title.trim() ? item.title.trim().slice(0, 60) : `Follow up: ${taskTitle}`.slice(0, 60),
+        instruction: item.instruction.trim(),
+      });
+    }
+    return { dispatch, tokens };
+  } catch {
+    return { dispatch: [], tokens: 0 }; // coordination is best-effort, never fatal
+  }
+}
+
 // Master's read of a QA report: does it need a remediation round?
 export async function evaluateQaReport(
   engine: OrchestratorEngine,

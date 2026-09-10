@@ -29,6 +29,7 @@ function team(partial: Partial<Team> & Pick<Team, 'id' | 'name' | 'charter'>): T
     maxConcurrentWorkers: 2,
     quotaSharePct: 20,
     memoryDir: `teams/${partial.id}`,
+    mcpServers: {},
     createdAt: now(),
     ...partial,
   };

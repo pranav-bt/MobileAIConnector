@@ -85,7 +85,9 @@ class VoiceCommander(
                     }
                     if (filled < chunk.size) continue
                     val score = wakeEngine.processChunk(chunk)
-                    if (wakeEngine.isWake(score)) {
+                    // Ignore detections while Jarvis itself is talking — the
+                    // wake mic hears the phone's own TTS.
+                    if (wakeEngine.isWake(score) && !VoiceFeedback.isSpeaking()) {
                         capturing = true
                         mainHandler.post { onWake() }
                     }
@@ -102,6 +104,8 @@ class VoiceCommander(
     // Main thread: chirp, bring the app up (if allowed), hand the mic to the
     // platform recognizer, and follow the task so Jarvis talks back.
     private fun onWake() {
+        // Cut any speech (and stale task-following) before the mic opens.
+        VoiceFeedback.hush()
         try {
             ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80).startTone(ToneGenerator.TONE_PROP_ACK, 120)
         } catch (ignored: Exception) {}

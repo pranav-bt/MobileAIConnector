@@ -51,6 +51,7 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     blockedTools: z.array(z.string()),
     workerModel: ModelTierSchema.optional(),
     quotaSharePct: z.number().min(0).max(100).optional(),
+    mcpServers: z.record(z.string(), z.unknown()).optional(),
   }),
   // Scaling a team's subagents up/down is one command: change the cap.
   z.object({
@@ -60,6 +61,7 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     workerModel: ModelTierSchema.optional(),
     quotaSharePct: z.number().min(0).max(100).optional(),
     charter: z.string().optional(),
+    mcpServers: z.record(z.string(), z.unknown()).optional(),
   }),
   z.object({ type: z.literal('team.remove'), teamId: z.string() }),
   z.object({

@@ -322,6 +322,38 @@ try {
   );
   console.log('scale-up ask ok: card raised at 2 queued, approval lifted the cap, queue drained');
 
+  // 14. General master coordination: ANY completed report that hands work to
+  // a different team makes the master hold a meeting and dispatch a follow-up
+  // there — not just the QA case.
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding: handoff-test build the settings screen' }));
+  await waitFor(
+    'handoff-test coding task done',
+    (e) => e.type === 'task.updated' && e.task.detail.startsWith('coding: handoff-test') && e.task.status === 'done',
+    20000,
+  );
+  await waitFor(
+    'coding + design leads meet over the handover',
+    (e) => e.type === 'agent.updated' && e.agent.id === 'design-lead' && e.agent.activity.startsWith('meeting: handover'),
+    15000,
+  );
+  const followUp = await waitFor(
+    'dispatched follow-up done on design',
+    (e) => e.type === 'task.updated' && e.task.title === 'Produce the icon set' && e.task.status === 'done',
+    15000,
+  );
+  if (followUp.type !== 'task.updated' || followUp.task.teamId !== 'design') {
+    fail('the dispatched follow-up should run on the design team');
+  }
+  if (!followUp.task.detail.includes('Handover from the Coding team')) {
+    fail('the follow-up is missing the handover context from the source report');
+  }
+  const iconTasks = events.filter(
+    (e) => e.type === 'task.updated' && e.task.title === 'Produce the icon set',
+  );
+  const distinctIconTaskIds = new Set(iconTasks.map((e) => (e.type === 'task.updated' ? e.task.id : '')));
+  if (distinctIconTaskIds.size > 1) fail('coordination dispatched the same follow-up more than once');
+  console.log('master coordination ok: handover meeting held, follow-up dispatched to design, no cascade');
+
   console.log('ORCH SMOKE PASS');
   ws.close();
   await hub.close();

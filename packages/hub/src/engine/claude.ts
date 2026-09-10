@@ -65,7 +65,7 @@ export class ClaudeEngine implements OrchestratorEngine {
 
   async runWorker(args: {
     prompt: string;
-    team: { blockedTools: string[]; charter: string };
+    team: { blockedTools: string[]; charter: string; mcpServers?: Record<string, unknown> };
     model: 'opus' | 'sonnet' | 'haiku';
     cwd: string;
     extraDirs?: string[];
@@ -83,6 +83,14 @@ export class ClaudeEngine implements OrchestratorEngine {
       else args.signal.addEventListener('abort', () => abortController.abort(), { once: true });
     }
 
+    // The team's MCP grants (e.g. Roblox Studio for QA/Game Engine teams)
+    // become the worker session's MCP servers — exactly these, nothing more.
+    type QueryOptions = NonNullable<Parameters<typeof query>[0]['options']>;
+    const mcpServers =
+      args.team.mcpServers && Object.keys(args.team.mcpServers).length > 0
+        ? (args.team.mcpServers as QueryOptions['mcpServers'])
+        : undefined;
+
     const stream = query({
       prompt: args.prompt,
       options: {
@@ -90,6 +98,7 @@ export class ClaudeEngine implements OrchestratorEngine {
         model: MODEL_IDS[args.model],
         cwd: args.cwd,
         additionalDirectories: args.extraDirs ?? [],
+        ...(mcpServers ? { mcpServers } : {}),
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',
