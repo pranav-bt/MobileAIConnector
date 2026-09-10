@@ -152,6 +152,16 @@ export class MockEngine implements OrchestratorEngine {
     }
     if (signal?.aborted) throw new Error('aborted');
     callbacks.onTokens(42);
+    // "report-test" produces a long text deliverable (exercises the
+    // full-report delivery path for no-bash teams).
+    if (taskText.includes('report-test')) {
+      return {
+        synopsis:
+          'Mock findings: ' +
+          'the papaya market is growing steadily and the best export cultivar is Red Lady. '.repeat(6),
+        tokens: 42,
+      };
+    }
     return { synopsis: 'Mock worker: completed the task as described.', tokens: 42 };
   }
 }

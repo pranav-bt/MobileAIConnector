@@ -167,7 +167,9 @@ export async function coordinateFollowUp(
     'If — and ONLY if — the report explicitly states that work remains which a',
     "DIFFERENT team must do (a handover, a blocker, a missing piece outside the reporting team's",
     'charter), dispatch it to that team. Normal completions, notes, and suggestions dispatch',
-    'nothing — that is the common case. Never dispatch more than 2 items.',
+    'nothing — that is the common case. A report that ANSWERS the task (research findings, a',
+    'brief, a comparison) is COMPLETE: the answer reaches the owner directly — never dispatch',
+    'another team to re-package, document, or verify it. Never dispatch more than 2 items.',
     '',
     'Reply with ONLY JSON:',
     '{"dispatch": [{"teamId": "<team id>", "title": "<imperative title, max 60 chars>", "instruction": "<what that team must do, with the context they need>"}]}',
@@ -244,8 +246,14 @@ export async function reviewWorkerReport(
     `Task: ${taskTitle}`,
     `Worker report: ${workerSynopsis || '(the worker returned no report)'}`,
     '',
+    'How to write the synopsis: if the deliverable is work done elsewhere (code, files, a build),',
+    '1-3 plain sentences — what was done, anything the owner should double-check. But if the',
+    "deliverable IS information (research, an answer, a comparison, a plan), the synopsis IS the",
+    'deliverable: carry the actual findings — key facts, numbers, links, and the recommendation —',
+    'in up to ~10 sentences. Never reduce findings to "research was completed".',
+    '',
     'Reply with ONLY a JSON object, no other text:',
-    '{"synopsis": "<1-3 plain sentences — what was done, anything the owner should double-check>", "memoryNote": "<one short lesson, or null>"}',
+    '{"synopsis": "<see above>", "memoryNote": "<one short lesson, or null>"}',
   ].join('\n');
   try {
     const { text, tokens } = await engine.complete({ prompt, model: team.leadModel });

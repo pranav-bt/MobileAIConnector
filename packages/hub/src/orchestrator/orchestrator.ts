@@ -1,4 +1,5 @@
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Agent, ModelTier, PermissionRequest, Task, Team, Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
@@ -389,6 +390,13 @@ export class Orchestrator implements CommandHandlers {
         `Files the owner sent from their phone are in: ${this.#inboxDir} — when the task mentions a sent/attached/shared file or image, look there (newest first).`,
       );
     }
+    // Text-producing teams (no shell): the words ARE the product.
+    if (task.teamId && !(this.#registry.get(task.teamId)?.allowedTools.includes('bash') ?? true)) {
+      sections.push(
+        'Your final message IS the deliverable the owner reads: include the complete findings/answer ' +
+          '(with sources and links where relevant), never just a note that you finished.',
+      );
+    }
     return sections.join('\n');
   }
 
@@ -482,6 +490,12 @@ export class Orchestrator implements CommandHandlers {
       this.#patchTask(taskId, { status: 'done', progressPct: 100, synopsis: review.synopsis || null });
       this.#activity(`${team.id}-lead`, taskId, `report filed: ${task.title.slice(0, 50)}`);
       outcome = review.synopsis || '';
+
+      // Text work (research, briefs, docs): the full report is the product —
+      // save it permanently and push a copy to the phone via the outbox.
+      if (!team.allowedTools.includes('bash') && result.synopsis.trim().length > 300) {
+        this.#deliverReport(task, team, result.synopsis, review.synopsis);
+      }
 
       if (autoQa) this.#enqueueQa(taskId, team, review.synopsis);
       // A finished QA task gets a verdict: pass, or a remediation round.
@@ -695,6 +709,30 @@ export class Orchestrator implements CommandHandlers {
     this.#activity('master', fixId, `remediation assigned to ${sourceTeam.name}: ${fixTitle.slice(0, 45)}`);
     this.#taskDepth.set(fixId, (this.#taskDepth.get(qaTaskId) ?? 1) + 1);
     this.#startOrQueue(fixId, sourceTeam, true);
+  }
+
+  // The findings themselves must reach the owner: full report to
+  // data/reports/ (permanent) and a copy into the outbox (auto-pushed to the
+  // phone), announced in the activity feed.
+  #deliverReport(task: Task, team: Team, workerReport: string, leadSynopsis: string): void {
+    if (!this.#outboxDir) return;
+    try {
+      const reportsDir = join(this.#outboxDir, '..', 'reports');
+      mkdirSync(reportsDir, { recursive: true });
+      const slug =
+        task.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50) || task.id;
+      const name = `${slug}.md`;
+      const body =
+        `# ${task.title}\n\n` +
+        `_${team.name} · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} · task ${task.id}_\n\n` +
+        `${leadSynopsis ? `**Lead's summary:** ${leadSynopsis}\n\n---\n\n` : ''}` +
+        `${workerReport.trim()}\n`;
+      writeFileSync(join(reportsDir, `${Date.now().toString(36)}-${name}`), body);
+      writeFileSync(join(this.#outboxDir, `report-${name}`), body); // watcher pushes + removes
+      this.#activity('master', task.id, `full report saved to data/reports and sent to your phone: ${name}`);
+    } catch (error) {
+      this.#activity('master', task.id, `report delivery failed: ${error instanceof Error ? error.message : error}`);
+    }
   }
 
   // Backed-up team -> an approval card (reaches the phone too): approve to

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
@@ -431,6 +431,28 @@ try {
     (e) => e.type === 'task.updated' && e.task.id === sensitiveAsk.request.taskId && e.task.status === 'done',
   );
   console.log('sensitive-read gate ok: card raised, denial honored, task completed');
+
+  // 18. Findings reach the owner: a text team's long report is saved to
+  // data/reports AND pushed to the phone via the outbox.
+  ws.send(encodeCommand({ type: 'task.submit', text: 'notes-team report-test full brief on the papaya market' }));
+  await waitFor(
+    'full report saved + announced',
+    (e) => e.type === 'activity' && e.entry.message.startsWith('full report saved'),
+    15000,
+  );
+  const reportFiles = readdirSync(join(dataDir, 'reports'));
+  if (reportFiles.length === 0) fail('no file in data/reports');
+  const reportBody = readFileSync(join(dataDir, 'reports', reportFiles[0]!), 'utf8');
+  if (!reportBody.includes('Mock findings')) fail('report file is missing the worker findings');
+  const pushed = await waitFor(
+    'report pushed to the phone via outbox',
+    (e) => e.type === 'file.shared' && e.file.name.startsWith('report-'),
+    20000,
+  );
+  if (pushed.type !== 'file.shared' || !Buffer.from(pushed.file.bytesB64, 'base64').toString().includes('Mock findings')) {
+    fail('pushed report does not carry the findings');
+  }
+  console.log('report delivery ok: findings saved to data/reports and pushed to the phone');
 
   console.log('ORCH SMOKE PASS');
   ws.close();
