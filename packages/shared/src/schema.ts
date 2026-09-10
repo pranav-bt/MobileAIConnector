@@ -175,6 +175,9 @@ export const HubInfoSchema = z.object({
   version: z.string(),
   // The only places projects/files may live; registration outside is refused.
   workspaceRoots: z.array(WorkspaceRootSchema),
+  // auto: routine work runs, only installs/network/destructive/pushes ask.
+  // strict: every gated tool asks.
+  permissionMode: z.enum(['auto', 'strict']),
 });
 export type HubInfo = z.infer<typeof HubInfoSchema>;
 

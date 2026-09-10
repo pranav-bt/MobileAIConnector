@@ -180,6 +180,42 @@ try {
   }
   console.log('workspace-roots policy ok: out-of-roots registration refused');
 
+  // 8. Permission policy — auto (default): plain edits run without asking…
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding: edit-test tweak the readme' }));
+  const autoEdit = await waitFor(
+    'auto-mode edit-test task done',
+    (e) => e.type === 'task.updated' && e.task.detail.includes('edit-test tweak') && e.task.status === 'done',
+  );
+  if (autoEdit.type !== 'task.updated') fail('unreachable');
+  if (
+    events.some(
+      (e) => e.type === 'permission.updated' && e.request.taskId === autoEdit.task.id,
+    )
+  ) {
+    fail('auto mode raised a permission card for a plain edit');
+  }
+  console.log('auto policy ok: edit ran silently (install still asked earlier)');
+
+  // …strict: the same edit asks.
+  ws.send(encodeCommand({ type: 'permissions.set', mode: 'strict' }));
+  await waitFor('strict mode set', (e) => e.type === 'hub.updated' && e.info.permissionMode === 'strict');
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding: edit-test again strictly' }));
+  const strictPending = await waitFor(
+    'strict-mode edit asks',
+    (e) => e.type === 'permission.updated' && e.request.status === 'pending' && e.request.command === 'Edit mock-file.ts',
+  );
+  if (strictPending.type !== 'permission.updated') fail('unreachable');
+  ws.send(
+    encodeCommand({ type: 'permission.respond', requestId: strictPending.request.id, decision: 'approve', scope: 'once' }),
+  );
+  await waitFor(
+    'strict-mode edit task done',
+    (e) => e.type === 'task.updated' && e.task.id === strictPending.request.taskId && e.task.status === 'done',
+  );
+  ws.send(encodeCommand({ type: 'permissions.set', mode: 'auto' }));
+  await waitFor('auto mode restored', (e) => e.type === 'hub.updated' && e.info.permissionMode === 'auto');
+  console.log('strict policy ok: edit asked, approval completed, auto restored');
+
   console.log('ORCH SMOKE PASS');
   ws.close();
   await hub.close();

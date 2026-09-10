@@ -31,6 +31,12 @@ export function SettingsPage(props: { state: HubState }): JSX.Element {
         {row('Workspace (where tasks run)', info.workspaceDir || '—')}
         {row('Data directory', info.dataDir || '—')}
         {row('Version', info.version || '—')}
+        {row(
+          'Permissions',
+          info.permissionMode === 'auto'
+            ? 'auto — routine work runs; installs / network / pushes / destructive ask'
+            : 'strict — every gated tool asks',
+        )}
         {info.workspaceRoots.length > 0 && (
           <div style={{ marginTop: 12 }}>
             <div className="sect">Workspace roots (the only places projects live)</div>

@@ -26,6 +26,7 @@ export interface CommandHandlers {
   removeTeam(teamId: string): void;
   registerProject(input: { name: string; workspaceDir: string; description?: string; quotaTokens?: number }): void;
   removeProject(projectId: string): void;
+  setPermissionMode(mode: 'auto' | 'strict'): void;
 }
 
 export function dispatchCommand(handlers: CommandHandlers, command: ClientCommand): void {
@@ -48,6 +49,8 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
       return handlers.registerProject(command);
     case 'project.remove':
       return handlers.removeProject(command.projectId);
+    case 'permissions.set':
+      return handlers.setPermissionMode(command.mode);
     case 'pairing.start':
     case 'pairing.cancel':
     case 'device.revoke':

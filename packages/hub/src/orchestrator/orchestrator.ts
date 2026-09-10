@@ -3,6 +3,8 @@ import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine } from '../engine/types.js';
 import { reviewWorkerReport, routeTask } from './master.js';
+import { evaluatePermission } from './policy.js';
+import type { PermissionMode } from '../config.js';
 import type { TeamRegistry } from './teams.js';
 import type { ProjectRegistry } from './projects.js';
 
@@ -30,6 +32,8 @@ export class Orchestrator implements CommandHandlers {
   #tokensByModel: Record<ModelTier, number> = { opus: 0, sonnet: 0, haiku: 0 };
 
   #projects: ProjectRegistry;
+  #policy: { mode: PermissionMode };
+  #onPermissionModeChange: (mode: PermissionMode) => void;
 
   constructor(
     bus: HubBus,
@@ -37,12 +41,16 @@ export class Orchestrator implements CommandHandlers {
     registry: TeamRegistry,
     projects: ProjectRegistry,
     workspaceDir: string,
+    policy: { mode: PermissionMode } = { mode: 'auto' },
+    onPermissionModeChange: (mode: PermissionMode) => void = () => {},
   ) {
     this.#bus = bus;
     this.#engine = engine;
     this.#registry = registry;
     this.#projects = projects;
     this.#workspaceDir = workspaceDir;
+    this.#policy = policy;
+    this.#onPermissionModeChange = onPermissionModeChange;
   }
 
   init(): void {
@@ -334,7 +342,11 @@ export class Orchestrator implements CommandHandlers {
               }
             }
           },
-          onPermission: ({ command, reason }) => this.#raisePermission(taskId, workerId, team, command, reason),
+          onPermission: ({ toolName, command, reason }) => {
+            const verdict = evaluatePermission(toolName, command, this.#policy.mode);
+            if (verdict.decision === 'allow') return Promise.resolve('approve' as const);
+            return this.#raisePermission(taskId, workerId, team, command, reason, verdict.flags);
+          },
         },
       });
 
@@ -406,6 +418,7 @@ export class Orchestrator implements CommandHandlers {
     team: Team,
     command: string,
     reason: string,
+    flags: string[] = [],
   ): Promise<'approve' | 'deny'> {
     const requestId = `perm-${now().toString(36)}-${workerId}`;
     const request: PermissionRequest = {
@@ -414,7 +427,7 @@ export class Orchestrator implements CommandHandlers {
       agentId: workerId,
       teamId: team.id,
       command,
-      flags: [],
+      flags,
       reason,
       status: 'pending',
       scope: 'once',
@@ -514,6 +527,19 @@ export class Orchestrator implements CommandHandlers {
       const message = error instanceof Error ? error.message : String(error);
       this.#activity('master', null, `project "${input.name}" ${message}`);
     }
+  }
+
+  setPermissionMode(mode: PermissionMode): void {
+    if (this.#policy.mode === mode) return;
+    this.#policy.mode = mode;
+    this.#onPermissionModeChange(mode);
+    this.#activity(
+      'master',
+      null,
+      mode === 'auto'
+        ? 'permissions: auto — routine work runs; installs, network, pushes, and destructive commands still ask'
+        : 'permissions: strict — every gated tool asks',
+    );
   }
 
   removeProject(projectId: string): void {

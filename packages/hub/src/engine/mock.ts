@@ -42,8 +42,20 @@ export class MockEngine implements OrchestratorEngine {
     signal?: AbortSignal;
   }): Promise<WorkerRunResult> {
     const { callbacks, signal } = args;
+    // Keyword triggers must fire on the task itself, not on the appended
+    // background-context section (project history can mention "install").
+    const taskText = (args.prompt.split('\n---\n')[0] ?? args.prompt).toLowerCase();
     callbacks.onActivity('mock: examining the task');
-    if (args.prompt.toLowerCase().includes('install')) {
+    // "edit-test" exercises the Edit permission path (auto-allowed by policy).
+    if (taskText.includes('edit-test')) {
+      const decision = await callbacks.onPermission({
+        toolName: 'Edit',
+        command: 'Edit mock-file.ts',
+        reason: 'mock worker wants to edit a file',
+      });
+      callbacks.onActivity(decision === 'approve' ? 'mock: file edited' : 'mock: edit denied');
+    }
+    if (taskText.includes('install')) {
       const decision = await callbacks.onPermission({
         toolName: 'Bash',
         command: 'npm install mock-package',

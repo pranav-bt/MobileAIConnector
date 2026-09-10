@@ -14,7 +14,7 @@ import { ProjectRegistry } from './orchestrator/projects.js';
 import { PairingManager } from './security/pairing.js';
 import { SecurityController } from './security/controller.js';
 import { startLimitsPoller } from './usage/limits.js';
-import { loadHubConfig, type WorkspaceRoot } from './config.js';
+import { loadHubConfig, savePermissionMode, type PermissionMode, type WorkspaceRoot } from './config.js';
 import type { CommandHandlers } from './commands.js';
 
 export interface HubOptions {
@@ -58,7 +58,9 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   const cwd = options.cwd ?? findRepoRoot(process.cwd());
   const dataDir = options.dataDir ?? resolve(cwd, 'data');
 
-  const workspaceRoots = options.workspaceRoots ?? loadHubConfig(dataDir).workspaceRoots;
+  const config = loadHubConfig(dataDir);
+  const workspaceRoots = options.workspaceRoots ?? config.workspaceRoots;
+  const permissionPolicy: { mode: PermissionMode } = { mode: config.permissionMode };
 
   const bus = new HubBus();
   const stopLog = startEventLog(bus, dataDir);
@@ -78,7 +80,10 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     registry.init();
     const projects = new ProjectRegistry(dataDir, workspaceRoots);
     projects.init(cwd);
-    const orchestrator = new Orchestrator(bus, engine, registry, projects, cwd);
+    const orchestrator = new Orchestrator(bus, engine, registry, projects, cwd, permissionPolicy, (mode) => {
+      savePermissionMode(dataDir, mode);
+      bus.publish({ type: 'hub.updated', info: makeInfo() });
+    });
     orchestrator.init();
 
     // Task history and usage survive restarts; anything mid-flight when the
@@ -104,7 +109,15 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     console.log('[hub] demo mode: replaying the mockup scenario, no usage spent');
   }
 
-  bus.publish({ type: 'hub.updated', info: { mode, workspaceDir: cwd, dataDir, version: getHubVersion(), workspaceRoots } });
+  const makeInfo = () => ({
+    mode,
+    workspaceDir: cwd,
+    dataDir,
+    version: getHubVersion(),
+    workspaceRoots,
+    permissionMode: permissionPolicy.mode,
+  });
+  bus.publish({ type: 'hub.updated', info: makeInfo() });
 
   // Real subscription meters (5h window / weekly, incl. chat usage) — only
   // when running real agents; demo seeds fake meters and mock stays offline.

@@ -33,7 +33,7 @@ export function emptySecurity(): SecurityState {
 }
 
 export function emptyInfo(): HubInfo {
-  return { mode: 'demo', workspaceDir: '', dataDir: '', version: '', workspaceRoots: [] };
+  return { mode: 'demo', workspaceDir: '', dataDir: '', version: '', workspaceRoots: [], permissionMode: 'auto' };
 }
 
 export function emptyUsage(): Usage {

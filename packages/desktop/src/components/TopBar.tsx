@@ -3,7 +3,7 @@ import type { ClientCommand, HubState, WorkspaceRoot } from '@agent-hq/shared';
 import { isActive } from '../status';
 
 const HELP =
-  '/project new <name> [personal|work|ai] · /project add <name> <path> · /project remove <project> · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team>';
+  '/project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /permissions auto|strict';
 
 function slug(ref: string): string {
   return ref.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -59,6 +59,14 @@ function parseSlashCommand(
   match = text.match(/^\/project remove (\S+)$/i);
   if (match && match[1]) {
     return { command: { type: 'project.remove', projectId: slug(match[1]) }, note: `removing project ${match[1]}` };
+  }
+  match = text.match(/^\/permissions (auto|strict)$/i);
+  if (match && match[1]) {
+    const mode = match[1].toLowerCase() as 'auto' | 'strict';
+    return {
+      command: { type: 'permissions.set', mode },
+      note: mode === 'auto' ? 'permissions: auto — only risky commands ask' : 'permissions: strict — everything asks',
+    };
   }
   return { hint: HELP };
 }

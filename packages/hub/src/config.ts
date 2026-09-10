@@ -11,8 +11,11 @@ export interface WorkspaceRoot {
   label: string;
 }
 
+export type PermissionMode = 'auto' | 'strict';
+
 export interface HubConfig {
   workspaceRoots: WorkspaceRoot[];
+  permissionMode: PermissionMode;
 }
 
 const DEFAULT_CONFIG: HubConfig = {
@@ -21,6 +24,7 @@ const DEFAULT_CONFIG: HubConfig = {
     { key: 'work', path: 'D:\\Work', label: 'Work projects' },
     { key: 'ai', path: 'D:\\AI', label: 'Misc — tools, temp projects, anything else (subdirs ok)' },
   ],
+  permissionMode: 'auto',
 };
 
 export function loadHubConfig(dataDir: string): HubConfig {
@@ -29,13 +33,23 @@ export function loadHubConfig(dataDir: string): HubConfig {
   if (existsSync(configPath)) {
     try {
       const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as Partial<HubConfig>;
-      if (Array.isArray(parsed.workspaceRoots) && parsed.workspaceRoots.length > 0) {
-        return { workspaceRoots: parsed.workspaceRoots };
-      }
+      return {
+        workspaceRoots:
+          Array.isArray(parsed.workspaceRoots) && parsed.workspaceRoots.length > 0
+            ? parsed.workspaceRoots
+            : DEFAULT_CONFIG.workspaceRoots,
+        permissionMode: parsed.permissionMode === 'strict' ? 'strict' : 'auto',
+      };
     } catch {
       /* unreadable — fall through to defaults */
     }
   }
   writeFileSync(configPath, JSON.stringify(DEFAULT_CONFIG, null, 2));
   return DEFAULT_CONFIG;
+}
+
+export function savePermissionMode(dataDir: string, mode: PermissionMode): void {
+  const configPath = join(dataDir, 'config.json');
+  const config = loadHubConfig(dataDir);
+  writeFileSync(configPath, JSON.stringify({ ...config, permissionMode: mode }, null, 2));
 }

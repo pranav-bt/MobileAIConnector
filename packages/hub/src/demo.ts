@@ -282,6 +282,10 @@ export function startDemo(bus: HubBus, options: DemoOptions = {}): {
       if (!bus.state.projects[projectId]) return;
       bus.publish({ type: 'project.removed', projectId });
     },
+
+    setPermissionMode() {
+      // demo mode has no real permission gate to configure
+    },
   };
 
   return {

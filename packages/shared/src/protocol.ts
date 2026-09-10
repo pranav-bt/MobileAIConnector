@@ -70,6 +70,7 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     quotaTokens: z.number().positive().optional(),
   }),
   z.object({ type: z.literal('project.remove'), projectId: z.string() }),
+  z.object({ type: z.literal('permissions.set'), mode: z.enum(['auto', 'strict']) }),
   // Security commands — the hub only honors these from trusted local
   // clients, never from a device session.
   z.object({ type: z.literal('pairing.start') }),
