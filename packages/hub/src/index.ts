@@ -1,5 +1,5 @@
 import { dirname, join, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_HUB_PORT } from '@agent-hq/shared';
 import { HubBus } from './bus.js';
@@ -33,6 +33,11 @@ export interface RunningHub {
   pairing: PairingManager;
   security: SecurityController;
   close(): Promise<void>;
+}
+
+function getHubVersion(): string {
+  const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+  return JSON.parse(readFileSync(pkgPath, 'utf8')).version;
 }
 
 // npm runs workspace scripts with cwd = packages/hub; anchor the hub's data
@@ -99,7 +104,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     console.log('[hub] demo mode: replaying the mockup scenario, no usage spent');
   }
 
-  bus.publish({ type: 'hub.updated', info: { mode, workspaceDir: cwd, dataDir, version: '0.1.0', workspaceRoots } });
+  bus.publish({ type: 'hub.updated', info: { mode, workspaceDir: cwd, dataDir, version: getHubVersion(), workspaceRoots } });
 
   // Real subscription meters (5h window / weekly, incl. chat usage) — only
   // when running real agents; demo seeds fake meters and mock stays offline.
@@ -138,6 +143,10 @@ const isMain = (() => {
 
 if (isMain) {
   const args = process.argv.slice(2);
+  if (args.includes('--version') || args.includes('-v')) {
+    console.log(getHubVersion());
+    process.exit(0);
+  }
   const portFlag = args.indexOf('--port');
   const engineFlag = args.indexOf('--engine');
   const demo = args.includes('--demo');
