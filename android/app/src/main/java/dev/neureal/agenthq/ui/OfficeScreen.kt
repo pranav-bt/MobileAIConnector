@@ -192,6 +192,7 @@ fun MainScreen(
     onRespond: (PermissionRequest, String) -> Unit,
     onSubmitTask: (String) -> Unit,
     onVoice: () -> Unit,
+    onSendFile: () -> Unit,
     onUnpair: () -> Unit,
 ) {
     var tab by rememberSaveable { mutableStateOf(0) }
@@ -251,7 +252,7 @@ fun MainScreen(
                 0 -> OfficeTab(snapshot, connected, pending, onRespond)
                 1 -> TasksTab(snapshot, connected, onSubmitTask)
                 2 -> HistoryTab(snapshot)
-                else -> LinkTab(snapshot, connected, pairedHost, backgroundEnabled, onToggleBackground, jarvisEnabled, onToggleJarvis, onUnpair)
+                else -> LinkTab(snapshot, connected, pairedHost, backgroundEnabled, onToggleBackground, jarvisEnabled, onToggleJarvis, onSendFile, onUnpair)
             }
             VoiceOverlay(Modifier.align(Alignment.BottomCenter))
         }
@@ -493,6 +494,7 @@ private fun LinkTab(
     onToggleBackground: (Boolean) -> Unit,
     jarvisEnabled: Boolean,
     onToggleJarvis: (Boolean) -> Unit,
+    onSendFile: () -> Unit,
     onUnpair: () -> Unit,
 ) {
     val usage = snapshot.usage
@@ -531,6 +533,22 @@ private fun LinkTab(
                     if (connected) "linked to ${pairedHost ?: "?"} · end-to-end encrypted, keys pinned" else "reconnecting to ${pairedHost ?: "?"}…",
                     color = HQ.text2, fontSize = 12.sp, lineHeight = 17.sp,
                 )
+            }
+        }
+
+        item {
+            Card {
+                SectionLabel("Send to the PC")
+                Text(
+                    "images and files land in the hub's inbox for the teams to use — or share to Agent HQ from any app's share sheet",
+                    color = HQ.text2, fontSize = 11.sp, lineHeight = 15.sp,
+                )
+                OutlinedButton(
+                    onClick = onSendFile,
+                    enabled = connected,
+                    modifier = Modifier.fillMaxWidth().height(40.dp),
+                    shape = RoundedCornerShape(10.dp),
+                ) { Text("Choose a file…", color = if (connected) HQ.accent else HQ.ghost, fontSize = 12.sp) }
             }
         }
 

@@ -29,7 +29,7 @@ export interface CommandHandlers {
   registerProject(input: { name: string; workspaceDir: string; description?: string; quotaTokens?: number }): void;
   removeProject(projectId: string): void;
   setPermissionMode(mode: 'auto' | 'strict'): void;
-  sendFile(name: string, mimeType: string, bytesB64: string): void;
+  sendFile(name: string, mimeType: string, bytesB64: string, from?: string): void;
   captureScreen(): void;
 }
 
@@ -56,7 +56,7 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
     case 'permissions.set':
       return handlers.setPermissionMode(command.mode);
     case 'file.send':
-      return handlers.sendFile(command.name, command.mimeType, command.bytesB64);
+      return handlers.sendFile(command.name, command.mimeType, command.bytesB64, command.from);
     case 'screen.capture':
       return handlers.captureScreen();
     case 'pairing.start':

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { DEFAULT_HUB_PORT } from '@agent-hq/shared';
 import { HubBus } from './bus.js';
 import { loadPriorState, startEventLog, startSnapshotWriter } from './persist.js';
-import { startOutboxWatcher } from './files.js';
+import { ensureInboxDir, startOutboxWatcher } from './files.js';
 import { startServer, type HubServer } from './server.js';
 import { startDemo } from './demo.js';
 import { ClaudeEngine } from './engine/claude.js';
@@ -66,6 +66,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   const bus = new HubBus();
   const stopLog = startEventLog(bus, dataDir);
   const outbox = startOutboxWatcher(bus, dataDir);
+  const inboxDir = ensureInboxDir(dataDir);
 
   const pairing = new PairingManager(dataDir);
   await pairing.init();
@@ -94,6 +95,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
         bus.publish({ type: 'hub.updated', info: makeInfo() });
       },
       outbox.outboxDir,
+      inboxDir,
     );
     orchestrator.init();
 

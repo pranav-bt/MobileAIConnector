@@ -4,7 +4,7 @@ import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine } from '../engine/types.js';
 import { coordinateFollowUp, evaluateQaReport, reviewWorkerReport, routeTask, type PlanStep } from './master.js';
-import { capturePcScreen, shareFile } from '../files.js';
+import { capturePcScreen, saveIncomingFile, shareFile } from '../files.js';
 import { evaluatePermission } from './policy.js';
 import { delay } from './util.js';
 import type { PermissionMode } from '../config.js';
@@ -44,6 +44,7 @@ export class Orchestrator implements CommandHandlers {
   #policy: { mode: PermissionMode };
   #onPermissionModeChange: (mode: PermissionMode) => void;
   #outboxDir: string;
+  #inboxDir: string;
 
   constructor(
     bus: HubBus,
@@ -54,6 +55,7 @@ export class Orchestrator implements CommandHandlers {
     policy: { mode: PermissionMode } = { mode: 'auto' },
     onPermissionModeChange: (mode: PermissionMode) => void = () => {},
     outboxDir = '',
+    inboxDir = '',
   ) {
     this.#bus = bus;
     this.#engine = engine;
@@ -63,6 +65,7 @@ export class Orchestrator implements CommandHandlers {
     this.#policy = policy;
     this.#onPermissionModeChange = onPermissionModeChange;
     this.#outboxDir = outboxDir;
+    this.#inboxDir = inboxDir;
   }
 
   // Every completed code task gets a QA follow-up; make sure a QA team exists.
@@ -379,6 +382,11 @@ export class Orchestrator implements CommandHandlers {
     if (this.#outboxDir) {
       sections.push(
         `To send a file or screenshot to the owner's phone, copy it into: ${this.#outboxDir} (it is pushed automatically and removed).`,
+      );
+    }
+    if (this.#inboxDir) {
+      sections.push(
+        `Files the owner sent from their phone are in: ${this.#inboxDir} — when the task mentions a sent/attached/shared file or image, look there (newest first).`,
       );
     }
     return sections.join('\n');
@@ -872,9 +880,16 @@ export class Orchestrator implements CommandHandlers {
     }
   }
 
-  sendFile(name: string, mimeType: string, bytesB64: string): void {
+  sendFile(name: string, mimeType: string, bytesB64: string, from = 'desktop'): void {
     try {
-      shareFile(this.#bus, { name, mimeType, bytes: Buffer.from(bytesB64, 'base64'), from: 'desktop' });
+      const bytes = Buffer.from(bytesB64, 'base64');
+      // Phone -> PC: land the file in the inbox on disk for teams to use.
+      if (from === 'phone' && this.#inboxDir) {
+        saveIncomingFile(this.#bus, this.#inboxDir, { name, bytes });
+        return;
+      }
+      // Desktop -> phone: broadcast over the link (existing direction).
+      shareFile(this.#bus, { name, mimeType, bytes, from: 'desktop' });
     } catch (error) {
       this.#activity('master', null, `file "${name}" could not be shared: ${error instanceof Error ? error.message : error}`);
     }

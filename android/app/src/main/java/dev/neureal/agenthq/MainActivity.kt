@@ -35,6 +35,9 @@ import dev.neureal.agenthq.ui.AgentHqTheme
 import dev.neureal.agenthq.ui.MainScreen
 import dev.neureal.agenthq.ui.PairScreen
 
+// Mirrors the hub's MAX_SHARED_FILE_BYTES cap on the file channel.
+private const val MAX_SEND_BYTES = 6 * 1024 * 1024
+
 // FragmentActivity (not ComponentActivity) so BiometricPrompt works.
 class MainActivity : FragmentActivity() {
 
@@ -112,6 +115,106 @@ class MainActivity : FragmentActivity() {
         )
     }
 
+    // --- phone -> PC file channel -------------------------------------------
+
+    private val filePicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) sendUriToPc(uri)
+    }
+
+    // Share sheet ("share to Agent HQ" from Gallery, Gemini, anywhere) and the
+    // in-app picker both end here: read, shrink oversized images, send.
+    private fun handleShareIntent(intent: Intent?) {
+        if (intent == null || (intent.action != Intent.ACTION_SEND && intent.action != Intent.ACTION_SEND_MULTIPLE)) return
+        val uris: List<android.net.Uri> = when (intent.action) {
+            Intent.ACTION_SEND -> listOfNotNull(
+                if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+                else @Suppress("DEPRECATION") (intent.getParcelableExtra(Intent.EXTRA_STREAM) as? android.net.Uri),
+            )
+            else -> (
+                if (Build.VERSION.SDK_INT >= 33) intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+                else @Suppress("DEPRECATION") intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+                )?.filterNotNull() ?: emptyList()
+        }
+        val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
+        intent.action = Intent.ACTION_MAIN // consumed — never re-send on recreation
+
+        if (uris.isEmpty() && !sharedText.isNullOrBlank()) {
+            // Text shares (an answer, a link) become a note in the inbox.
+            hub.sendFile("note-${System.currentTimeMillis().toString(36)}.txt", "text/plain", sharedText.toByteArray()) { error ->
+                runOnUiThread { Toast.makeText(this, error ?: "Note sent to the PC inbox", Toast.LENGTH_LONG).show() }
+            }
+            return
+        }
+        if (uris.size > 8) Toast.makeText(this, "Sending the first 8 files", Toast.LENGTH_SHORT).show()
+        uris.take(8).forEach { sendUriToPc(it) }
+    }
+
+    private fun sendUriToPc(uri: android.net.Uri) {
+        Thread {
+            try {
+                val resolver = contentResolver
+                val mime = resolver.getType(uri) ?: "application/octet-stream"
+                var name = "shared-${System.currentTimeMillis().toString(36)}"
+                resolver.query(uri, null, null, null, null)?.use { cursor ->
+                    val column = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (column >= 0 && cursor.moveToFirst()) cursor.getString(column)?.let { name = it }
+                }
+                var bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
+                var outMime = mime
+                var outName = name
+                // The link caps files at 6MB; oversized images are recompressed.
+                if (bytes.size > MAX_SEND_BYTES && mime.startsWith("image/")) {
+                    val shrunk = shrinkImage(bytes)
+                    if (shrunk != null) {
+                        bytes = shrunk
+                        outMime = "image/jpeg"
+                        outName = (name.substringBeforeLast('.', name)) + ".jpg"
+                    }
+                }
+                if (bytes.isEmpty() || bytes.size > MAX_SEND_BYTES) {
+                    runOnUiThread {
+                        Toast.makeText(
+                            this,
+                            if (bytes.isEmpty()) "Couldn't read that file" else "Too large — the link caps files at 6MB",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                    return@Thread
+                }
+                hub.sendFile(outName, outMime, bytes) { error ->
+                    runOnUiThread { Toast.makeText(this, error ?: "Sent to the PC inbox: $outName", Toast.LENGTH_LONG).show() }
+                }
+            } catch (error: Exception) {
+                runOnUiThread { Toast.makeText(this, "Send failed: ${error.message}", Toast.LENGTH_LONG).show() }
+            }
+        }.start()
+    }
+
+    // Downsample to <=2048px on the long side, then walk JPEG quality down
+    // until the image fits under the link's 6MB cap.
+    private fun shrinkImage(bytes: ByteArray): ByteArray? = try {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 2048) sample *= 2
+        val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+        val bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+        if (bitmap == null) null
+        else {
+            var quality = 90
+            var out: ByteArray
+            do {
+                val stream = java.io.ByteArrayOutputStream()
+                bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, stream)
+                out = stream.toByteArray()
+                quality -= 15
+            } while (out.size > MAX_SEND_BYTES && quality >= 30)
+            if (out.size > MAX_SEND_BYTES) null else out
+        }
+    } catch (error: Exception) {
+        null
+    }
+
     private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) enableBackground() else {
             Toast.makeText(this, "Notifications denied — background alerts stay off", Toast.LENGTH_SHORT).show()
@@ -169,9 +272,17 @@ class MainActivity : FragmentActivity() {
             try { String(Base64.decode(it, Base64.DEFAULT)) } catch (e: Exception) { "" }
         } ?: ""
 
+        handleShareIntent(intent)
+
         setContent {
             AgentHqTheme { Root(prefill) }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleShareIntent(intent)
     }
 
     @Composable
@@ -233,6 +344,7 @@ class MainActivity : FragmentActivity() {
                 onRespond = { request, decision -> respondWithBiometric(request, decision) },
                 onSubmitTask = { text -> hub.sendCommand(Commands.submitTask(text)) },
                 onVoice = { startVoiceCapture() },
+                onSendFile = { filePicker.launch("*/*") },
                 onUnpair = {
                     disableBackground()
                     hub.unpair()

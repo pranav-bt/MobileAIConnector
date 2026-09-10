@@ -171,6 +171,15 @@ object Commands {
         put("type", "screen.capture")
     }
 
+    // Phone -> PC: the hub lands this in its data/inbox for the teams.
+    fun sendFile(name: String, mimeType: String, bytesB64: String): JsonObject = buildJsonObject {
+        put("type", "file.send")
+        put("name", name)
+        put("mimeType", mimeType)
+        put("bytesB64", bytesB64)
+        put("from", "phone")
+    }
+
     fun respondPermission(requestId: String, decision: String, signatureB64: String): JsonObject = buildJsonObject {
         put("type", "permission.respond")
         put("requestId", requestId)

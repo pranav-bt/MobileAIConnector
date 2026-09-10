@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
@@ -16,10 +16,11 @@ function fail(message: string): never {
   process.exit(1);
 }
 
+const dataDir = mkdtempSync(join(tmpdir(), 'agent-hq-orch-'));
 const hub = await startHub({
   engine: 'mock',
   port: PORT,
-  dataDir: mkdtempSync(join(tmpdir(), 'agent-hq-orch-')),
+  dataDir,
   // Tests sandbox the workspace-roots policy to the temp dir.
   workspaceRoots: [{ key: 'tmp', path: tmpdir(), label: 'test sandbox' }],
 });
@@ -353,6 +354,28 @@ try {
   const distinctIconTaskIds = new Set(iconTasks.map((e) => (e.type === 'task.updated' ? e.task.id : '')));
   if (distinctIconTaskIds.size > 1) fail('coordination dispatched the same follow-up more than once');
   console.log('master coordination ok: handover meeting held, follow-up dispatched to design, no cascade');
+
+  // 15. Phone -> PC: a file sent from the phone lands in data/inbox on disk
+  // (the reverse of the outbox), announced in the activity feed.
+  ws.send(
+    encodeCommand({
+      type: 'file.send',
+      name: 'ref-art.png',
+      mimeType: 'image/png',
+      bytesB64: Buffer.from('phone-bytes').toString('base64'),
+      from: 'phone',
+    }),
+  );
+  await waitFor(
+    'phone file announced in activity',
+    (e) => e.type === 'activity' && e.entry.message.startsWith('file from your phone: ref-art.png'),
+  );
+  const landed = readFileSync(join(dataDir, 'inbox', 'ref-art.png'), 'utf8');
+  if (landed !== 'phone-bytes') fail('inbox file content did not round-trip');
+  if (events.some((e) => e.type === 'file.shared' && e.file.name === 'ref-art.png')) {
+    fail('a phone-origin file must not be broadcast back out to the phone');
+  }
+  console.log('phone inbox ok: file landed in data/inbox, no echo broadcast');
 
   console.log('ORCH SMOKE PASS');
   ws.close();

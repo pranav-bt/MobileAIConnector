@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MAX_SHARED_FILE_BYTES, type SharedFile } from '@agent-hq/shared';
@@ -62,6 +62,53 @@ export function shareFile(
     },
   });
   return true;
+}
+
+// The INBOX (data/inbox/) is the reverse direction: files the owner sends
+// from the phone land here on disk, and workers are told the path. Names are
+// sanitized and deduped; the file stays until someone uses or removes it.
+export function ensureInboxDir(dataDir: string): string {
+  const inboxDir = join(dataDir, 'inbox');
+  mkdirSync(inboxDir, { recursive: true });
+  return inboxDir;
+}
+
+export function saveIncomingFile(
+  bus: HubBus,
+  inboxDir: string,
+  args: { name: string; bytes: Buffer },
+): string | null {
+  if (args.bytes.length === 0 || args.bytes.length > MAX_SHARED_FILE_BYTES) {
+    bus.publish({
+      type: 'activity',
+      entry: {
+        agentId: 'master',
+        taskId: null,
+        message: `file "${args.name}" from your phone rejected — ${args.bytes.length === 0 ? 'empty' : 'larger than 6MB'}`,
+        at: Date.now(),
+      },
+    });
+    return null;
+  }
+  // Keep only a safe basename; dedupe with a timestamp infix if it exists.
+  const base = args.name.replace(/[\\/:*?"<>|]/g, '_').replace(/^\.+/, '').slice(0, 100) || 'file';
+  let target = join(inboxDir, base);
+  if (existsSync(target)) {
+    const dot = base.lastIndexOf('.');
+    const stamp = Date.now().toString(36);
+    target = join(inboxDir, dot > 0 ? `${base.slice(0, dot)}-${stamp}${base.slice(dot)}` : `${base}-${stamp}`);
+  }
+  writeFileSync(target, args.bytes);
+  bus.publish({
+    type: 'activity',
+    entry: {
+      agentId: 'master',
+      taskId: null,
+      message: `file from your phone: ${base} (${Math.max(1, Math.round(args.bytes.length / 1024))} KB) → inbox`,
+      at: Date.now(),
+    },
+  });
+  return target;
 }
 
 // Polling watcher (fs.watch is unreliable on Windows): a file is shared once

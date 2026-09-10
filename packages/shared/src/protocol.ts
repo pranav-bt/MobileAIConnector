@@ -73,12 +73,15 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('project.remove'), projectId: z.string() }),
   z.object({ type: z.literal('permissions.set'), mode: z.enum(['auto', 'strict']) }),
-  // Push a file to the phone (from the desktop UI).
+  // Move a file across the link. From the desktop (default) it broadcasts
+  // out to the phone; from: 'phone' routes it INTO the hub's inbox on disk,
+  // where workers can pick it up.
   z.object({
     type: z.literal('file.send'),
     name: z.string().min(1),
     mimeType: z.string(),
     bytesB64: z.string().min(1),
+    from: z.string().max(40).optional(),
   }),
   // Phone asks the hub for a screenshot of the PC screen.
   z.object({ type: z.literal('screen.capture') }),

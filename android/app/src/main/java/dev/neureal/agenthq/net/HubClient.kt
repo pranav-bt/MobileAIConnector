@@ -235,6 +235,25 @@ class HubClient(private val store: KV, private val deviceName: String) {
         val signature = identity.signApproval(decision, requestId)
         sendCommand(dev.neureal.agenthq.model.Commands.respondPermission(requestId, decision, signature))
     }
+
+    // Send a file to the PC's inbox. sendCommand silently drops when no
+    // session is up, so this waits briefly for the link before sealing.
+    fun sendFile(name: String, mimeType: String, bytes: ByteArray, onResult: (String?) -> Unit) {
+        ensureConnected()
+        scope.launch {
+            var waited = 0
+            while (linkState.value !is LinkState.Connected && waited < 12_000) {
+                delay(250)
+                waited += 250
+            }
+            if (linkState.value !is LinkState.Connected) {
+                onResult("Not connected to the PC — is the hub running?")
+                return@launch
+            }
+            sendCommand(dev.neureal.agenthq.model.Commands.sendFile(name, mimeType, b64(bytes)))
+            onResult(null)
+        }
+    }
 }
 
 // One HubClient per process: activity recreation (folding a flip phone,
