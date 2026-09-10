@@ -5,8 +5,11 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.speech.RecognizerIntent
+import android.speech.tts.TextToSpeech
 import android.util.Base64
 import android.widget.Toast
+import java.util.Locale
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
@@ -37,6 +40,39 @@ class MainActivity : FragmentActivity() {
 
     private lateinit var hub: HubClient
     private var backgroundState: ((Boolean) -> Unit)? = null
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+
+    // Push-to-talk: the platform speech dialog transcribes, the transcript
+    // becomes a task for the master. Hands-free "hey Jarvis" (openWakeWord)
+    // is the follow-up milestone.
+    private val speechLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val spoken = result.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            ?.trim()
+        if (!spoken.isNullOrEmpty()) {
+            hub.sendCommand(Commands.submitTask(spoken))
+            speak("On it. Sent to the master agent.")
+            Toast.makeText(this, "Task sent: $spoken", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun speak(text: String) {
+        if (ttsReady) tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "hq")
+    }
+
+    private fun startVoiceCapture() {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            .putExtra(RecognizerIntent.EXTRA_PROMPT, "Give the master agent a task")
+        try {
+            speechLauncher.launch(intent)
+        } catch (error: Exception) {
+            Toast.makeText(this, "No speech recognizer available on this device", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) enableBackground() else {
@@ -51,6 +87,7 @@ class MainActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
         hub = HubHolder.get(applicationContext)
         hub.ensureConnected()
+        tts = TextToSpeech(this) { status -> ttsReady = status == TextToSpeech.SUCCESS }
         if (uiPrefs().getBoolean("bgService", false)) {
             ContextCompat.startForegroundService(this, Intent(this, LinkService::class.java))
         }
@@ -110,12 +147,18 @@ class MainActivity : FragmentActivity() {
                 },
                 onRespond = { request, decision -> respondWithBiometric(request, decision) },
                 onSubmitTask = { text -> hub.sendCommand(Commands.submitTask(text)) },
+                onVoice = { startVoiceCapture() },
                 onUnpair = {
                     disableBackground()
                     hub.unpair()
                 },
             )
         }
+    }
+
+    override fun onDestroy() {
+        tts?.shutdown()
+        super.onDestroy()
     }
 
     private fun requestBackgroundOrEnable() {

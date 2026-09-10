@@ -186,6 +186,7 @@ fun MainScreen(
     onToggleBackground: (Boolean) -> Unit,
     onRespond: (PermissionRequest, String) -> Unit,
     onSubmitTask: (String) -> Unit,
+    onVoice: () -> Unit,
     onUnpair: () -> Unit,
 ) {
     var tab by rememberSaveable { mutableStateOf(0) }
@@ -193,6 +194,19 @@ fun MainScreen(
 
     Scaffold(
         containerColor = HQ.bg,
+        floatingActionButton = {
+            androidx.compose.material3.FloatingActionButton(
+                onClick = onVoice,
+                containerColor = HQ.accentSolid,
+                contentColor = HQ.accentInk,
+            ) {
+                Icon(
+                    androidx.compose.ui.res.painterResource(dev.neureal.agenthq.R.drawable.ic_mic),
+                    contentDescription = "Speak a task",
+                    tint = Color.Unspecified,
+                )
+            }
+        },
         bottomBar = {
             NavigationBar(containerColor = HQ.panel, contentColor = HQ.muted) {
                 val items = listOf(
