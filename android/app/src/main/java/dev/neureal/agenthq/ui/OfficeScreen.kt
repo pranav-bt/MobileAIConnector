@@ -423,11 +423,33 @@ private fun LinkTab(
     onUnpair: () -> Unit,
 ) {
     val usage = snapshot.usage
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var crash by remember { mutableStateOf(dev.neureal.agenthq.App.lastCrash(context)) }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize().background(HQ.bg).padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         item { Spacer(Modifier.height(4.dp)); Header(connected) }
+
+        if (crash != null) {
+            item {
+                Column(
+                    modifier = Modifier.fillMaxWidth()
+                        .background(HQ.panel, RoundedCornerShape(11.dp))
+                        .border(1.dp, HQ.red.copy(alpha = 0.5f), RoundedCornerShape(11.dp))
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    SectionLabel("Last crash — screenshot this for the developer", HQ.red)
+                    Text(crash ?: "", color = HQ.text2, fontSize = 9.sp, lineHeight = 12.sp, fontFamily = FontFamily.Monospace, maxLines = 24)
+                    OutlinedButton(onClick = {
+                        dev.neureal.agenthq.App.clearCrash(context)
+                        crash = null
+                    }) { Text("Dismiss", color = HQ.muted, fontSize = 12.sp) }
+                }
+            }
+        }
 
         item {
             Card {

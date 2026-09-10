@@ -55,12 +55,36 @@ class LinkService : Service() {
             PackageManager.PERMISSION_GRANTED
         val jarvisOn = jarvisWanted && micGranted
 
-        var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-        if (jarvisOn) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-        if (Build.VERSION.SDK_INT >= 29) {
-            ServiceCompat.startForeground(this, 1, persistentNotification(jarvisOn), types)
-        } else {
-            startForeground(1, persistentNotification(jarvisOn))
+        // Foreground-service types keep tightening across Android versions;
+        // try the precise declaration first and degrade gracefully.
+        val notification = persistentNotification(jarvisOn)
+        val attempts = buildList {
+            if (Build.VERSION.SDK_INT >= 34) {
+                var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                if (jarvisOn) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                add(types)
+            }
+            if (Build.VERSION.SDK_INT >= 30 && jarvisOn) add(ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            if (Build.VERSION.SDK_INT >= 30) add(ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        }
+        var started = false
+        for (types in attempts) {
+            try {
+                ServiceCompat.startForeground(this, 1, notification, types)
+                started = true
+                break
+            } catch (error: Exception) {
+                android.util.Log.w("AgentHQ", "startForeground type=$types failed: $error")
+            }
+        }
+        if (!started) {
+            try {
+                startForeground(1, notification)
+            } catch (error: Exception) {
+                android.util.Log.e("AgentHQ", "startForeground failed entirely: $error")
+                stopSelf()
+                return START_NOT_STICKY
+            }
         }
 
         val hub = HubHolder.get(applicationContext)

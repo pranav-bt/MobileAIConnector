@@ -95,15 +95,13 @@ class MainActivity : FragmentActivity() {
         jarvisState?.invoke(true)
         backgroundState?.invoke(true)
         // (Re)start so the service picks up the microphone foreground type.
-        ContextCompat.startForegroundService(this, Intent(this, LinkService::class.java))
+        startLinkService()
     }
 
     private fun disableJarvis() {
         uiPrefs().edit().putBoolean("jarvis", false).apply()
         jarvisState?.invoke(false)
-        if (uiPrefs().getBoolean("bgService", false)) {
-            ContextCompat.startForegroundService(this, Intent(this, LinkService::class.java))
-        }
+        if (uiPrefs().getBoolean("bgService", false)) startLinkService()
     }
 
     private fun uiPrefs() = getSharedPreferences("agenthq-ui", MODE_PRIVATE)
@@ -113,9 +111,7 @@ class MainActivity : FragmentActivity() {
         hub = HubHolder.get(applicationContext)
         hub.ensureConnected()
         tts = TextToSpeech(this) { status -> ttsReady = status == TextToSpeech.SUCCESS }
-        if (uiPrefs().getBoolean("bgService", false)) {
-            ContextCompat.startForegroundService(this, Intent(this, LinkService::class.java))
-        }
+        if (uiPrefs().getBoolean("bgService", false)) startLinkService()
 
         // Debug convenience: adb shell am start ... -e payload_b64 <base64 of QR json>
         val prefill = intent.getStringExtra("payload_b64")?.let {
@@ -208,7 +204,15 @@ class MainActivity : FragmentActivity() {
     private fun enableBackground() {
         uiPrefs().edit().putBoolean("bgService", true).apply()
         backgroundState?.invoke(true)
-        ContextCompat.startForegroundService(this, Intent(this, LinkService::class.java))
+        startLinkService()
+    }
+
+    private fun startLinkService() {
+        try {
+            ContextCompat.startForegroundService(this, Intent(this, LinkService::class.java))
+        } catch (error: Exception) {
+            Toast.makeText(this, "Background service refused: ${error.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun disableBackground() {

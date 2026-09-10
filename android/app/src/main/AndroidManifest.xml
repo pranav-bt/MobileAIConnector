@@ -1,6 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Android 11+ package visibility: without this the system speech
+         recognizer is invisible to the app (ActivityNotFound / unavailable). -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -8,8 +19,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application
+        android:name=".App"
         android:label="Agent HQ"
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.AgentHQ"
@@ -32,6 +45,10 @@
         <service
             android:name=".net.LinkService"
             android:exported="false"
-            android:foregroundServiceType="dataSync|microphone" />
+            android:foregroundServiceType="specialUse|dataSync|microphone">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Maintains an encrypted link to the user's own PC so their AI agents can request approvals; optional on-device wake word." />
+        </service>
     </application>
 </manifest>
