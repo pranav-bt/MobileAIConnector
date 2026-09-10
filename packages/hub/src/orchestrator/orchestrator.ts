@@ -266,6 +266,13 @@ export class Orchestrator implements CommandHandlers {
       }
       if (teamMemory) sections.push('Team notes:', teamMemory);
     }
+    if (this.#projects.roots.length > 0) {
+      sections.push(
+        'File locations policy: keep all new files inside this project\'s workspace. Brand-new projects or standalone tools belong ONLY under: ' +
+          this.#projects.roots.map((root) => `${root.path} (${root.label})`).join(' · ') +
+          '.',
+      );
+    }
     return sections.join('\n');
   }
 
@@ -499,9 +506,14 @@ export class Orchestrator implements CommandHandlers {
   }
 
   registerProject(input: { name: string; workspaceDir: string; description?: string; quotaTokens?: number }): void {
-    const project = this.#projects.register(input);
-    this.#bus.publish({ type: 'project.updated', project });
-    this.#activity('master', null, `project registered: ${project.name} → ${project.workspaceDir}`);
+    try {
+      const project = this.#projects.register(input);
+      this.#bus.publish({ type: 'project.updated', project });
+      this.#activity('master', null, `project registered: ${project.name} → ${project.workspaceDir}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.#activity('master', null, `project "${input.name}" ${message}`);
+    }
   }
 
   removeProject(projectId: string): void {

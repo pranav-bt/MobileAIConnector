@@ -14,6 +14,7 @@ import { ProjectRegistry } from './orchestrator/projects.js';
 import { PairingManager } from './security/pairing.js';
 import { SecurityController } from './security/controller.js';
 import { startLimitsPoller } from './usage/limits.js';
+import { loadHubConfig, type WorkspaceRoot } from './config.js';
 import type { CommandHandlers } from './commands.js';
 
 export interface HubOptions {
@@ -23,6 +24,7 @@ export interface HubOptions {
   engine?: 'claude' | 'mock' | null;
   dataDir?: string;
   cwd?: string;
+  workspaceRoots?: WorkspaceRoot[]; // tests override; defaults from data/config.json
 }
 
 export interface RunningHub {
@@ -51,6 +53,8 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   const cwd = options.cwd ?? findRepoRoot(process.cwd());
   const dataDir = options.dataDir ?? resolve(cwd, 'data');
 
+  const workspaceRoots = options.workspaceRoots ?? loadHubConfig(dataDir).workspaceRoots;
+
   const bus = new HubBus();
   const stopLog = startEventLog(bus, dataDir);
 
@@ -67,7 +71,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     const engine = mode === 'claude' ? new ClaudeEngine() : new MockEngine();
     const registry = new TeamRegistry(dataDir);
     registry.init();
-    const projects = new ProjectRegistry(dataDir);
+    const projects = new ProjectRegistry(dataDir, workspaceRoots);
     projects.init(cwd);
     const orchestrator = new Orchestrator(bus, engine, registry, projects, cwd);
     orchestrator.init();
@@ -95,7 +99,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     console.log('[hub] demo mode: replaying the mockup scenario, no usage spent');
   }
 
-  bus.publish({ type: 'hub.updated', info: { mode, workspaceDir: cwd, dataDir, version: '0.1.0' } });
+  bus.publish({ type: 'hub.updated', info: { mode, workspaceDir: cwd, dataDir, version: '0.1.0', workspaceRoots } });
 
   // Real subscription meters (5h window / weekly, incl. chat usage) — only
   // when running real agents; demo seeds fake meters and mock stays offline.

@@ -31,6 +31,17 @@ export function SettingsPage(props: { state: HubState }): JSX.Element {
         {row('Workspace (where tasks run)', info.workspaceDir || '—')}
         {row('Data directory', info.dataDir || '—')}
         {row('Version', info.version || '—')}
+        {info.workspaceRoots.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div className="sect">Workspace roots (the only places projects live)</div>
+            {info.workspaceRoots.map((root) => (
+              <div key={root.key} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginTop: 6 }}>
+                <span className="mono" style={{ fontSize: 11.5 }}>{root.path}</span>
+                <span className="act">{root.label} · key: {root.key}</span>
+              </div>
+            ))}
+          </div>
+        )}
         {info.mode === 'demo' && (
           <div className="act" style={{ marginTop: 10, color: 'var(--amber)' }}>
             demo mode is scripted theater — restart the hub with `npm run hub:engine` for real agents

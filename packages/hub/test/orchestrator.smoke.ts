@@ -20,6 +20,8 @@ const hub = await startHub({
   engine: 'mock',
   port: PORT,
   dataDir: mkdtempSync(join(tmpdir(), 'agent-hq-orch-')),
+  // Tests sandbox the workspace-roots policy to the temp dir.
+  workspaceRoots: [{ key: 'tmp', path: tmpdir(), label: 'test sandbox' }],
 });
 
 const ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
@@ -164,6 +166,19 @@ try {
   ws.send(encodeCommand({ type: 'project.remove', projectId: 'sandbox' }));
   await waitFor('sandbox project removed', (e) => e.type === 'project.removed' && e.projectId === 'sandbox');
   console.log('team scaling + team/project removal ok');
+
+  // 7. Workspace-roots policy: registration outside the roots is refused.
+  ws.send(
+    encodeCommand({ type: 'project.register', name: 'Escapee', workspaceDir: 'C:\\Windows\\definitely-not-allowed' }),
+  );
+  await waitFor(
+    'out-of-roots registration refused',
+    (e) => e.type === 'activity' && e.entry.message.includes('outside the allowed workspace roots'),
+  );
+  if (events.some((e) => e.type === 'project.updated' && e.project.id === 'escapee')) {
+    fail('out-of-roots project was registered anyway');
+  }
+  console.log('workspace-roots policy ok: out-of-roots registration refused');
 
   console.log('ORCH SMOKE PASS');
   ws.close();

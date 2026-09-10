@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
-import type { Project } from '@agent-hq/shared';
+import { basename, join, resolve, sep } from 'node:path';
+import type { Project, WorkspaceRoot } from '@agent-hq/shared';
 
 // Projects are config records (data/projects.json): a workspace directory a
 // worker runs inside plus a token ledger. The hub's own workspace is always
@@ -16,9 +16,27 @@ export class ProjectRegistry {
   #filePath: string;
   #projects = new Map<string, Project>();
   #defaultId = '';
+  #roots: WorkspaceRoot[];
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, workspaceRoots: WorkspaceRoot[]) {
     this.#filePath = join(dataDir, 'projects.json');
+    this.#roots = workspaceRoots;
+  }
+
+  get roots(): WorkspaceRoot[] {
+    return this.#roots;
+  }
+
+  // Windows-friendly containment check: the dir must sit inside one of the
+  // configured roots. Only user registrations are checked; the hub's own
+  // workspace (the default project) is exempt.
+  isAllowed(dir: string): boolean {
+    if (this.#roots.length === 0) return true;
+    const resolved = resolve(dir).toLowerCase();
+    return this.#roots.some((root) => {
+      const rootResolved = resolve(root.path).toLowerCase();
+      return resolved === rootResolved || resolved.startsWith(rootResolved + sep);
+    });
   }
 
   init(defaultWorkspaceDir: string): void {
@@ -82,6 +100,10 @@ export class ProjectRegistry {
   }
 
   register(input: { name: string; workspaceDir: string; description?: string; quotaTokens?: number }): Project {
+    if (!this.isAllowed(input.workspaceDir)) {
+      const allowed = this.#roots.map((root) => `${root.path} (${root.label})`).join(' · ');
+      throw new Error(`refused: "${input.workspaceDir}" is outside the allowed workspace roots — ${allowed}`);
+    }
     mkdirSync(input.workspaceDir, { recursive: true });
     const project = this.#build(input);
     this.#projects.set(project.id, project);

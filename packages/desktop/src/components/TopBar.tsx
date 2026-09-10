@@ -1,9 +1,9 @@
 import { useRef, useState } from 'react';
-import type { ClientCommand, HubState } from '@agent-hq/shared';
+import type { ClientCommand, HubState, WorkspaceRoot } from '@agent-hq/shared';
 import { isActive } from '../status';
 
 const HELP =
-  '/team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /project add <name> <path> [description] · /project remove <project>';
+  '/project new <name> [personal|work|ai] · /project add <name> <path> · /project remove <project> · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team>';
 
 function slug(ref: string): string {
   return ref.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -11,8 +11,25 @@ function slug(ref: string): string {
 
 // Composer slash-commands: deterministic, no model call. Everything else in
 // the composer is a task for the master.
-function parseSlashCommand(text: string): { command: ClientCommand; note: string } | { hint: string } | null {
+function parseSlashCommand(
+  text: string,
+  roots: WorkspaceRoot[],
+): { command: ClientCommand; note: string } | { hint: string } | null {
   if (!text.startsWith('/')) return null;
+  // "/project new BeatBox personal" creates the folder under the right root.
+  const projNew = text.match(/^\/project new (\S+)(?:\s+(\S+))?$/i);
+  if (projNew && projNew[1]) {
+    const rootKey = (projNew[2] ?? 'ai').toLowerCase();
+    const root = roots.find((candidate) => candidate.key === rootKey);
+    if (!root) {
+      return { hint: `unknown root "${rootKey}" — use one of: ${roots.map((candidate) => candidate.key).join(' | ')}` };
+    }
+    const name = projNew[1];
+    return {
+      command: { type: 'project.register', name, workspaceDir: `${root.path}\\${name}` },
+      note: `project "${name}" → ${root.path}\\${name}`,
+    };
+  }
   let match = text.match(/^\/team add ([^:]+):\s*(.+)$/i);
   if (match && match[1] && match[2]) {
     const name = match[1].trim();
@@ -66,7 +83,7 @@ export function TopBar(props: {
   const submit = () => {
     const trimmed = text.trim();
     if (!trimmed) return;
-    const slash = parseSlashCommand(trimmed);
+    const slash = parseSlashCommand(trimmed, props.state.info.workspaceRoots);
     if (slash) {
       if ('command' in slash) {
         props.send(slash.command);

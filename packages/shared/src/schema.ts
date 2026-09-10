@@ -161,11 +161,20 @@ export type ActivityEntry = z.infer<typeof ActivityEntrySchema>;
 // detail views and history have something to show.
 export const ACTIVITY_LOG_CAP = 200;
 
+export const WorkspaceRootSchema = z.object({
+  key: z.string(),
+  path: z.string(),
+  label: z.string(),
+});
+export type WorkspaceRoot = z.infer<typeof WorkspaceRootSchema>;
+
 export const HubInfoSchema = z.object({
   mode: z.enum(['demo', 'claude', 'mock']),
   workspaceDir: z.string(),
   dataDir: z.string(),
   version: z.string(),
+  // The only places projects/files may live; registration outside is refused.
+  workspaceRoots: z.array(WorkspaceRootSchema),
 });
 export type HubInfo = z.infer<typeof HubInfoSchema>;
 
