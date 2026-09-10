@@ -101,9 +101,9 @@ export function startDemo(bus: HubBus, options: DemoOptions = {}): {
 
   // --- Seed: projects, tasks, usage -------------------------------------
   for (const p of [
-    { id: 'p-api', name: 'Mobile API auth', quotaTokens: 3_600_000, usedTokens: 2_100_000, alerted75: false },
-    { id: 'p-beatbox', name: 'BeatBox', quotaTokens: 2_700_000, usedTokens: 1_100_000, alerted75: false },
-    { id: 'p-ops', name: 'Ops & chores', quotaTokens: 1_000_000, usedTokens: 860_000, alerted75: true },
+    { id: 'p-api', name: 'Mobile API auth', description: 'demo project', workspaceDir: '', quotaTokens: 3_600_000, usedTokens: 2_100_000, alerted75: false },
+    { id: 'p-beatbox', name: 'BeatBox', description: 'demo project', workspaceDir: '', quotaTokens: 2_700_000, usedTokens: 1_100_000, alerted75: false },
+    { id: 'p-ops', name: 'Ops & chores', description: 'demo project', workspaceDir: '', quotaTokens: 1_000_000, usedTokens: 860_000, alerted75: true },
   ]) {
     bus.publish({ type: 'project.updated', project: p });
   }
@@ -242,6 +242,46 @@ export function startDemo(bus: HubBus, options: DemoOptions = {}): {
       });
     },
 
+    updateTeam(input) {
+      const current = bus.state.teams[input.teamId];
+      if (!current) return;
+      bus.publish({
+        type: 'team.updated',
+        team: {
+          ...current,
+          maxConcurrentWorkers: input.maxConcurrentWorkers ?? current.maxConcurrentWorkers,
+          workerModel: input.workerModel ?? current.workerModel,
+          quotaSharePct: input.quotaSharePct ?? current.quotaSharePct,
+          charter: input.charter ?? current.charter,
+        },
+      });
+    },
+
+    removeTeam(teamId) {
+      if (!bus.state.teams[teamId]) return;
+      bus.publish({ type: 'team.removed', teamId });
+      bus.publish({ type: 'agent.removed', agentId: `${teamId}-lead` });
+    },
+
+    registerProject(input) {
+      bus.publish({
+        type: 'project.updated',
+        project: {
+          id: input.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') || `p-${now()}`,
+          name: input.name,
+          description: input.description ?? '',
+          workspaceDir: input.workspaceDir,
+          quotaTokens: input.quotaTokens ?? 5_000_000,
+          usedTokens: 0,
+          alerted75: false,
+        },
+      });
+    },
+
+    removeProject(projectId) {
+      if (!bus.state.projects[projectId]) return;
+      bus.publish({ type: 'project.removed', projectId });
+    },
   };
 
   return {

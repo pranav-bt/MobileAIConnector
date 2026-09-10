@@ -16,6 +16,16 @@ export interface CommandHandlers {
     workerModel?: 'opus' | 'sonnet' | 'haiku';
     quotaSharePct?: number;
   }): void;
+  updateTeam(input: {
+    teamId: string;
+    maxConcurrentWorkers?: number;
+    workerModel?: 'opus' | 'sonnet' | 'haiku';
+    quotaSharePct?: number;
+    charter?: string;
+  }): void;
+  removeTeam(teamId: string): void;
+  registerProject(input: { name: string; workspaceDir: string; description?: string; quotaTokens?: number }): void;
+  removeProject(projectId: string): void;
 }
 
 export function dispatchCommand(handlers: CommandHandlers, command: ClientCommand): void {
@@ -30,6 +40,14 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
       return handlers.respondPermission(command.requestId, command.decision, command.scope);
     case 'team.create':
       return handlers.createTeam(command);
+    case 'team.update':
+      return handlers.updateTeam(command);
+    case 'team.remove':
+      return handlers.removeTeam(command.teamId);
+    case 'project.register':
+      return handlers.registerProject(command);
+    case 'project.remove':
+      return handlers.removeProject(command.projectId);
     case 'pairing.start':
     case 'pairing.cancel':
     case 'device.revoke':

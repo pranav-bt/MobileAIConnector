@@ -52,6 +52,24 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     workerModel: ModelTierSchema.optional(),
     quotaSharePct: z.number().min(0).max(100).optional(),
   }),
+  // Scaling a team's subagents up/down is one command: change the cap.
+  z.object({
+    type: z.literal('team.update'),
+    teamId: z.string(),
+    maxConcurrentWorkers: z.number().int().min(1).max(8).optional(),
+    workerModel: ModelTierSchema.optional(),
+    quotaSharePct: z.number().min(0).max(100).optional(),
+    charter: z.string().optional(),
+  }),
+  z.object({ type: z.literal('team.remove'), teamId: z.string() }),
+  z.object({
+    type: z.literal('project.register'),
+    name: z.string().min(1),
+    workspaceDir: z.string().min(1),
+    description: z.string().optional(),
+    quotaTokens: z.number().positive().optional(),
+  }),
+  z.object({ type: z.literal('project.remove'), projectId: z.string() }),
   // Security commands — the hub only honors these from trusted local
   // clients, never from a device session.
   z.object({ type: z.literal('pairing.start') }),

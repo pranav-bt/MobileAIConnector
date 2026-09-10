@@ -110,10 +110,14 @@ export const PermissionRequestSchema = z.object({
 });
 export type PermissionRequest = z.infer<typeof PermissionRequestSchema>;
 
-// Quotas are token shares of the subscription limits — never dollars.
+// A project = a workspace + a ledger. Workers run inside workspaceDir and
+// only see that project's files and history. Quotas are token shares of the
+// subscription limits — never dollars.
 export const ProjectSchema = z.object({
   id: z.string(),
   name: z.string(),
+  description: z.string(),
+  workspaceDir: z.string(),
   quotaTokens: z.number(),
   usedTokens: z.number(),
   alerted75: z.boolean(),
@@ -183,9 +187,11 @@ export const HubEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('agent.updated'), agent: AgentSchema }),
   z.object({ type: z.literal('agent.removed'), agentId: z.string() }),
   z.object({ type: z.literal('team.updated'), team: TeamSchema }),
+  z.object({ type: z.literal('team.removed'), teamId: z.string() }),
   z.object({ type: z.literal('task.updated'), task: TaskSchema }),
   z.object({ type: z.literal('permission.updated'), request: PermissionRequestSchema }),
   z.object({ type: z.literal('project.updated'), project: ProjectSchema }),
+  z.object({ type: z.literal('project.removed'), projectId: z.string() }),
   z.object({ type: z.literal('usage.updated'), usage: UsageSchema }),
   z.object({ type: z.literal('security.updated'), security: SecurityStateSchema }),
   z.object({ type: z.literal('hub.updated'), info: HubInfoSchema }),

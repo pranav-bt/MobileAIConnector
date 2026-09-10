@@ -15,6 +15,7 @@ function TaskRow(props: {
   const { state, task } = props;
   const status = TASK_STATUS_LABELS[task.status] ?? { label: task.status, color: 'var(--muted)' };
   const team = task.teamId ? state.teams[task.teamId]?.name ?? task.teamId : 'unrouted';
+  const project = task.projectId ? state.projects[task.projectId]?.name ?? task.projectId : null;
   const activity = state.activityLog.filter((entry) => entry.taskId === task.id).slice(-12);
 
   return (
@@ -24,7 +25,8 @@ function TaskRow(props: {
         <span className="act" style={{ color: status.color }}>{status.label}</span>
       </div>
       <div className="act" style={{ marginTop: 3 }}>
-        {team} · {formatTokens(task.tokensUsed)} tokens · started {new Date(task.createdAt).toLocaleTimeString()}
+        {team}{project ? ` · ${project}` : ''} · {formatTokens(task.tokensUsed)} tokens · started{' '}
+        {new Date(task.createdAt).toLocaleTimeString()}
       </div>
       {['in_flight', 'awaiting_permission', 'review'].includes(task.status) && (
         <div className="track">

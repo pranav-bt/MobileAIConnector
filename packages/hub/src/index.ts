@@ -1,4 +1,5 @@
-import { resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_HUB_PORT } from '@agent-hq/shared';
 import { HubBus } from './bus.js';
@@ -9,6 +10,7 @@ import { ClaudeEngine } from './engine/claude.js';
 import { MockEngine } from './engine/mock.js';
 import { Orchestrator } from './orchestrator/orchestrator.js';
 import { TeamRegistry } from './orchestrator/teams.js';
+import { ProjectRegistry } from './orchestrator/projects.js';
 import { PairingManager } from './security/pairing.js';
 import { SecurityController } from './security/controller.js';
 import { startLimitsPoller } from './usage/limits.js';
@@ -31,10 +33,23 @@ export interface RunningHub {
   close(): Promise<void>;
 }
 
+// npm runs workspace scripts with cwd = packages/hub; anchor the hub's data
+// and default workspace at the repo root instead.
+function findRepoRoot(start: string): string {
+  let dir = start;
+  for (let depth = 0; depth < 10; depth++) {
+    if (existsSync(join(dir, '.git'))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return start;
+}
+
 export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   const port = options.port ?? DEFAULT_HUB_PORT;
-  const dataDir = options.dataDir ?? resolve('data');
-  const cwd = options.cwd ?? process.cwd();
+  const cwd = options.cwd ?? findRepoRoot(process.cwd());
+  const dataDir = options.dataDir ?? resolve(cwd, 'data');
 
   const bus = new HubBus();
   const stopLog = startEventLog(bus, dataDir);
@@ -52,7 +67,9 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     const engine = mode === 'claude' ? new ClaudeEngine() : new MockEngine();
     const registry = new TeamRegistry(dataDir);
     registry.init();
-    const orchestrator = new Orchestrator(bus, engine, registry, cwd);
+    const projects = new ProjectRegistry(dataDir);
+    projects.init(cwd);
+    const orchestrator = new Orchestrator(bus, engine, registry, projects, cwd);
     orchestrator.init();
 
     // Task history and usage survive restarts; anything mid-flight when the

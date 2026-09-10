@@ -22,7 +22,9 @@ export function HistoryPage(props: { state: HubState }): JSX.Element {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {finished.map((task) => {
           const status = TASK_STATUS_LABELS[task.status] ?? { label: task.status, color: 'var(--muted)' };
-          const team = task.teamId ? props.state.teams[task.teamId]?.name ?? task.teamId : 'unrouted';
+          const teamName = task.teamId ? props.state.teams[task.teamId]?.name ?? task.teamId : 'unrouted';
+          const projectName = task.projectId ? props.state.projects[task.projectId]?.name ?? task.projectId : null;
+          const team = projectName ? `${teamName} · ${projectName}` : teamName;
           return (
             <div key={task.id} className="tcard">
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>

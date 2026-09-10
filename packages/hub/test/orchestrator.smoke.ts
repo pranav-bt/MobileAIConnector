@@ -130,6 +130,41 @@ try {
   );
   console.log('task.stop ok: permission expired, task paused');
 
+  // 5. Projects: default auto-registered; register, pin with @, remove.
+  if (snapshot.snapshot.projects.length < 1) fail('expected the default project in the snapshot');
+  ws.send(
+    encodeCommand({
+      type: 'project.register',
+      name: 'Sandbox',
+      workspaceDir: join(tmpdir(), `agent-hq-sandbox-${Date.now()}`),
+      description: 'smoke-test project',
+    }),
+  );
+  await waitFor('sandbox project registered', (e) => e.type === 'project.updated' && e.project.id === 'sandbox');
+  ws.send(encodeCommand({ type: 'task.submit', text: '@sandbox design the welcome screen' }));
+  const pinned = await waitFor(
+    'pinned task done in sandbox project via design team',
+    (e) =>
+      e.type === 'task.updated' &&
+      e.task.projectId === 'sandbox' &&
+      e.task.teamId === 'design' &&
+      e.task.status === 'done',
+  );
+  if (pinned.type !== 'task.updated') fail('unreachable');
+  console.log('project pinning ok: @sandbox task ran in the sandbox workspace');
+
+  // 6. Scaling subagents and removing teams/projects — each one command.
+  ws.send(encodeCommand({ type: 'team.update', teamId: 'coding', maxConcurrentWorkers: 3 }));
+  await waitFor(
+    'coding cap raised to 3',
+    (e) => e.type === 'team.updated' && e.team.id === 'coding' && e.team.maxConcurrentWorkers === 3,
+  );
+  ws.send(encodeCommand({ type: 'team.remove', teamId: 'research' }));
+  await waitFor('research team removed', (e) => e.type === 'team.removed' && e.teamId === 'research');
+  ws.send(encodeCommand({ type: 'project.remove', projectId: 'sandbox' }));
+  await waitFor('sandbox project removed', (e) => e.type === 'project.removed' && e.projectId === 'sandbox');
+  console.log('team scaling + team/project removal ok');
+
   console.log('ORCH SMOKE PASS');
   ws.close();
   await hub.close();

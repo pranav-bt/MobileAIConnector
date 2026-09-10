@@ -6,17 +6,28 @@ import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './
 export class MockEngine implements OrchestratorEngine {
   async complete(args: { prompt: string; model: ModelTier }): Promise<{ text: string; tokens: number }> {
     if (args.prompt.includes('"teamId"')) {
-      const ids = [...args.prompt.matchAll(/^- id: ([a-z0-9-]+)/gm)].map((match) => match[1] ?? '');
+      const teamIds = [...args.prompt.matchAll(/^- id: ([a-z0-9-]+)/gm)].map((match) => match[1] ?? '');
+      const projectIds = [...args.prompt.matchAll(/^\* project: ([a-z0-9-]+)/gm)].map((match) => match[1] ?? '');
       const taskMatch = args.prompt.match(/Task: "([\s\S]*?)"\n/);
       const text = (taskMatch?.[1] ?? '').toLowerCase();
-      const teamId = ids.find((id) => id && text.includes(id)) ?? ids[0] ?? 'coding';
+      const teamId = teamIds.find((id) => id && text.includes(id)) ?? teamIds[0] ?? 'coding';
+      const projectId = projectIds.find((id) => id && text.includes(id)) ?? projectIds[0] ?? '';
       return {
         text: JSON.stringify({
           teamId,
+          projectId,
           title: (taskMatch?.[1] ?? 'task').slice(0, 60),
           reason: 'mock routing by keyword',
         }),
         tokens: 12,
+      };
+    }
+    // Lead-review prompts expect JSON {synopsis, memoryNote}.
+    if (args.prompt.includes('"synopsis"')) {
+      const memoryNote = args.prompt.toLowerCase().includes('remember') ? 'Mock lesson: remember this.' : null;
+      return {
+        text: JSON.stringify({ synopsis: 'Mock lead review: work checked, looks complete.', memoryNote }),
+        tokens: 9,
       };
     }
     return { text: 'Mock lead review: work checked, looks complete.', tokens: 9 };

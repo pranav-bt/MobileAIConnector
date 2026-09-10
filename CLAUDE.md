@@ -55,3 +55,12 @@ npm run typecheck      # tsc across workspaces
   are honored only from local clients.
 - Teams are config records — creating one must always work as a single
   command (`team.create`), and the office UI renders rooms from the registry.
+- Projects are config records too (`data/projects.json`): a workspace dir +
+  token ledger. Workers run inside their task's project workspace and see
+  only that project's files, that project's recent synopses, and their
+  team's MEMORY.md — never another project's context. The hub workspace is
+  always registered as the default project.
+- Composer slash-commands (parsed client-side, deterministic): /team add
+  <name>: <charter> · /team workers <team> <n> · /team remove <team> ·
+  /project add <name> <path> [description] · /project remove <project>.
+  Prefixing a task with @<project> pins it to that project.

@@ -6,7 +6,8 @@ import { formatResetDay, formatResetTime, formatTokens, usageColor } from '../st
 const TIER_COLORS = { sonnet: '#14A38B', opus: '#7B66E8', haiku: '#BE8A2D' } as const;
 
 export function ResourcesPage(props: { state: HubState }): JSX.Element {
-  const { usage, tasks, teams } = props.state;
+  const { usage, tasks, teams, projects } = props.state;
+  const projectList = Object.values(projects).sort((a, b) => b.usedTokens - a.usedTokens);
   const mix = usage.modelMixPct;
   const hasMix = mix.opus + mix.sonnet + mix.haiku > 0;
 
@@ -76,6 +77,36 @@ export function ResourcesPage(props: { state: HubState }): JSX.Element {
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 8 }}>
           <span className="mono" style={{ fontSize: 24, fontWeight: 600 }}>{formatTokens(usage.tokensToday)}</span>
           <span className="act">HQ's own share of the meters above (persists over restarts)</span>
+        </div>
+      </div>
+
+      <div className="tcard" style={{ padding: 16, gridColumn: '1 / -1' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+          <div className="sect">Projects</div>
+          <span className="act" style={{ color: 'var(--faint)' }}>/project add &lt;name&gt; &lt;path&gt; · @&lt;project&gt; in a task pins it</span>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}>
+          {projectList.map((project) => {
+            const pct = project.quotaTokens > 0 ? Math.min(100, Math.round((project.usedTokens / project.quotaTokens) * 100)) : 0;
+            return (
+              <div key={project.id}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 600 }}>
+                    {project.name} <span className="act" style={{ color: 'var(--ghost)' }}>@{project.id}</span>
+                  </span>
+                  <span className="act" style={{ color: pct >= 75 ? 'var(--amber)' : undefined }}>
+                    {formatTokens(project.usedTokens)} of {formatTokens(project.quotaTokens)} tokens
+                  </span>
+                </div>
+                {project.workspaceDir && (
+                  <div className="act" style={{ color: 'var(--faint)', marginTop: 2 }}>{project.workspaceDir}</div>
+                )}
+                <div className="track" style={{ marginTop: 5 }}>
+                  <div className="fill" style={{ width: `${pct}%`, background: usageColor(pct) }} />
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
 

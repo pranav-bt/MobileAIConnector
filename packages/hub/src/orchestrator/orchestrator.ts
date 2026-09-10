@@ -4,6 +4,7 @@ import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine } from '../engine/types.js';
 import { reviewWorkerReport, routeTask } from './master.js';
 import type { TeamRegistry } from './teams.js';
+import type { ProjectRegistry } from './projects.js';
 
 // The real thing: master intake -> team lead -> worker -> lead review ->
 // synopsis. Per-team concurrency respected; overflow queues. Every state
@@ -28,14 +29,26 @@ export class Orchestrator implements CommandHandlers {
   #routingCount = 0;
   #tokensByModel: Record<ModelTier, number> = { opus: 0, sonnet: 0, haiku: 0 };
 
-  constructor(bus: HubBus, engine: OrchestratorEngine, registry: TeamRegistry, workspaceDir: string) {
+  #projects: ProjectRegistry;
+
+  constructor(
+    bus: HubBus,
+    engine: OrchestratorEngine,
+    registry: TeamRegistry,
+    projects: ProjectRegistry,
+    workspaceDir: string,
+  ) {
     this.#bus = bus;
     this.#engine = engine;
     this.#registry = registry;
+    this.#projects = projects;
     this.#workspaceDir = workspaceDir;
   }
 
   init(): void {
+    for (const project of this.#projects.all()) {
+      this.#bus.publish({ type: 'project.updated', project });
+    }
     for (const team of this.#registry.all()) {
       this.#bus.publish({ type: 'team.updated', team });
       this.#publishAgent({
@@ -162,14 +175,26 @@ export class Orchestrator implements CommandHandlers {
     this.#activity('master', taskId, `task stopped by you: ${task.title.slice(0, 50)}`);
   }
 
-  async #intake(text: string): Promise<void> {
+  async #intake(rawText: string): Promise<void> {
+    // "@<project> do something" pins the task to a project explicitly.
+    let text = rawText.trim();
+    let forcedProjectId: string | null = null;
+    const atMatch = text.match(/^@(\S+)\s+([\s\S]+)$/);
+    if (atMatch && atMatch[1] && atMatch[2]) {
+      const forced = this.#projects.find(atMatch[1]);
+      if (forced) {
+        forcedProjectId = forced.id;
+        text = atMatch[2].trim();
+      }
+    }
+
     this.#taskCounter += 1;
     const taskId = `t-${now().toString(36)}-${this.#taskCounter}`;
     this.#publishTask({
       id: taskId,
       title: text.slice(0, 60),
       detail: text,
-      projectId: null,
+      projectId: forcedProjectId,
       teamId: null,
       status: 'routing',
       progressPct: 0,
@@ -183,7 +208,14 @@ export class Orchestrator implements CommandHandlers {
     this.#routingCount += 1;
     this.#patchAgent('master', { status: 'working', activity: `routing: ${text.slice(0, 50)}` });
 
-    const decision = await routeTask(this.#engine, this.#registry.all(), text);
+    const decision = await routeTask(
+      this.#engine,
+      this.#registry.all(),
+      this.#projects.all(),
+      this.#projects.defaultProject().id,
+      text,
+      forcedProjectId,
+    );
     this.#recordTokens('opus', decision.tokens);
     this.#routingCount -= 1;
 
@@ -194,11 +226,12 @@ export class Orchestrator implements CommandHandlers {
       return;
     }
 
-    this.#patchTask(taskId, { teamId: team.id, title: decision.title });
+    const project = this.#projects.get(decision.projectId) ?? this.#projects.defaultProject();
+    this.#patchTask(taskId, { teamId: team.id, projectId: project.id, title: decision.title });
     this.#activity(
       'master',
       taskId,
-      `routed "${decision.title}" → ${team.name}${decision.fallback ? ' (keyword fallback)' : ''}`,
+      `routed "${decision.title}" → ${team.name} · ${project.name}${decision.fallback ? ' (keyword fallback)' : ''}`,
     );
 
     const active = this.#activeWorkers.get(team.id) ?? 0;
@@ -213,9 +246,33 @@ export class Orchestrator implements CommandHandlers {
     this.#masterStatus();
   }
 
+  // The worker's context, cheapest layer first: task text, recent synopses
+  // from the SAME project only, and the team's durable notes. Projects never
+  // see each other's history; everything is capped so tokens stay flat.
+  #buildWorkerPrompt(task: Task): string {
+    const sections = [task.detail];
+    const history = Object.values(this.#bus.state.tasks)
+      .filter((t) => t.projectId === task.projectId && t.status === 'done' && t.id !== task.id && t.synopsis)
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, 3);
+    const teamMemory = task.teamId ? this.#registry.readMemory(task.teamId) : '';
+    if (history.length > 0 || teamMemory) {
+      sections.push('---', 'Background context (not part of the task itself):');
+      if (history.length > 0) {
+        sections.push(
+          'Recent work in this project:',
+          ...history.map((t) => `- ${t.title}: ${(t.synopsis ?? '').replace(/\s+/g, ' ').slice(0, 300)}`),
+        );
+      }
+      if (teamMemory) sections.push('Team notes:', teamMemory);
+    }
+    return sections.join('\n');
+  }
+
   async #runTask(taskId: string, team: Team): Promise<void> {
     const task = this.#bus.state.tasks[taskId];
     if (!task) return;
+    const project = (task.projectId ? this.#projects.get(task.projectId) : undefined) ?? this.#projects.defaultProject();
 
     this.#activeWorkers.set(team.id, (this.#activeWorkers.get(team.id) ?? 0) + 1);
     const workerNumber = (this.#workerCounters.get(team.id) ?? 0) + 1;
@@ -243,10 +300,10 @@ export class Orchestrator implements CommandHandlers {
 
     try {
       const result = await this.#engine.runWorker({
-        prompt: task.detail,
+        prompt: this.#buildWorkerPrompt(task),
         team,
         model: team.workerModel,
-        cwd: this.#workspaceDir,
+        cwd: project.workspaceDir || this.#workspaceDir,
         signal: controller.signal,
         callbacks: {
           onActivity: (message) => {
@@ -262,6 +319,13 @@ export class Orchestrator implements CommandHandlers {
             this.#patchAgent(workerId, { tokensUsed: totalTokens });
             this.#patchTask(taskId, { tokensUsed: totalTokens });
             this.#recordTokens(team.workerModel, totalTokens - previous);
+            const ledger = this.#projects.addTokens(project.id, totalTokens - previous);
+            if (ledger) {
+              this.#bus.publish({ type: 'project.updated', project: ledger.project });
+              if (ledger.crossed75) {
+                this.#activity('master', taskId, `project "${ledger.project.name}" crossed 75% of its token quota`);
+              }
+            }
           },
           onPermission: ({ command, reason }) => this.#raisePermission(taskId, workerId, team, command, reason),
         },
@@ -279,6 +343,10 @@ export class Orchestrator implements CommandHandlers {
       this.#patchAgent(`${team.id}-lead`, { status: 'working', activity: `reviewing: ${task.title.slice(0, 40)}` });
       const review = await reviewWorkerReport(this.#engine, team, task.title, result.synopsis);
       this.#recordTokens(team.leadModel, review.tokens);
+      if (review.memoryNote) {
+        this.#registry.appendMemory(team.id, review.memoryNote);
+        this.#activity(`${team.id}-lead`, taskId, `noted for the team: ${review.memoryNote.slice(0, 80)}`);
+      }
 
       this.#patchTask(taskId, { status: 'done', progressPct: 100, synopsis: review.synopsis || null });
       this.#activity(`${team.id}-lead`, taskId, `report filed: ${task.title.slice(0, 50)}`);
@@ -394,5 +462,63 @@ export class Orchestrator implements CommandHandlers {
       updatedAt: now(),
     });
     this.#activity('master', null, `new team created: ${team.name}`);
+  }
+
+  updateTeam(input: {
+    teamId: string;
+    maxConcurrentWorkers?: number;
+    workerModel?: ModelTier;
+    quotaSharePct?: number;
+    charter?: string;
+  }): void {
+    const team = this.#registry.update(input);
+    if (!team) return;
+    this.#bus.publish({ type: 'team.updated', team });
+    this.#activity(
+      'master',
+      null,
+      `team updated: ${team.name} — up to ${team.maxConcurrentWorkers} worker${team.maxConcurrentWorkers > 1 ? 's' : ''}, ${team.workerModel} tier`,
+    );
+    this.#drainQueue(team.id); // a raised cap can unblock queued tasks
+  }
+
+  removeTeam(teamId: string): void {
+    const team = this.#registry.get(teamId);
+    if (!team) return;
+    const busy = Object.values(this.#bus.state.tasks).some(
+      (task) => task.teamId === teamId && !['done', 'failed', 'paused'].includes(task.status),
+    );
+    if (busy) {
+      this.#activity('master', null, `cannot remove ${team.name} — it still has active tasks (stop them first)`);
+      return;
+    }
+    this.#registry.remove(teamId);
+    this.#bus.publish({ type: 'team.removed', teamId });
+    this.#bus.publish({ type: 'agent.removed', agentId: `${teamId}-lead` });
+    this.#activity('master', null, `team removed: ${team.name}`);
+  }
+
+  registerProject(input: { name: string; workspaceDir: string; description?: string; quotaTokens?: number }): void {
+    const project = this.#projects.register(input);
+    this.#bus.publish({ type: 'project.updated', project });
+    this.#activity('master', null, `project registered: ${project.name} → ${project.workspaceDir}`);
+  }
+
+  removeProject(projectId: string): void {
+    const project = this.#projects.get(projectId) ?? this.#projects.find(projectId);
+    if (!project) return;
+    const busy = Object.values(this.#bus.state.tasks).some(
+      (task) => task.projectId === project.id && !['done', 'failed', 'paused'].includes(task.status),
+    );
+    if (busy) {
+      this.#activity('master', null, `cannot remove ${project.name} — it still has active tasks`);
+      return;
+    }
+    if (!this.#projects.remove(project.id)) {
+      this.#activity('master', null, `cannot remove ${project.name} — the hub workspace stays registered`);
+      return;
+    }
+    this.#bus.publish({ type: 'project.removed', projectId: project.id });
+    this.#activity('master', null, `project removed: ${project.name} (its folder is untouched)`);
   }
 }

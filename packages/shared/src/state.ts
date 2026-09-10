@@ -106,6 +106,11 @@ export function applyEvent(state: HubState, event: HubEvent): HubState {
     }
     case 'team.updated':
       return { ...state, teams: { ...state.teams, [event.team.id]: event.team } };
+    case 'team.removed': {
+      const teams = { ...state.teams };
+      delete teams[event.teamId];
+      return { ...state, teams };
+    }
     case 'task.updated':
       return { ...state, tasks: { ...state.tasks, [event.task.id]: event.task } };
     case 'permission.updated':
@@ -115,6 +120,11 @@ export function applyEvent(state: HubState, event: HubEvent): HubState {
       };
     case 'project.updated':
       return { ...state, projects: { ...state.projects, [event.project.id]: event.project } };
+    case 'project.removed': {
+      const projects = { ...state.projects };
+      delete projects[event.projectId];
+      return { ...state, projects };
+    }
     case 'usage.updated':
       return { ...state, usage: event.usage };
     case 'security.updated':

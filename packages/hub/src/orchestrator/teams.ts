@@ -86,6 +86,55 @@ export class TeamRegistry {
     return this.#teams.get(id);
   }
 
+  update(input: {
+    teamId: string;
+    maxConcurrentWorkers?: number;
+    workerModel?: Team['workerModel'];
+    quotaSharePct?: number;
+    charter?: string;
+  }): Team | null {
+    const current = this.#teams.get(input.teamId);
+    if (!current) return null;
+    const team: Team = {
+      ...current,
+      maxConcurrentWorkers: input.maxConcurrentWorkers ?? current.maxConcurrentWorkers,
+      workerModel: input.workerModel ?? current.workerModel,
+      quotaSharePct: input.quotaSharePct ?? current.quotaSharePct,
+      charter: input.charter ?? current.charter,
+    };
+    this.#teams.set(team.id, team);
+    this.#save();
+    return team;
+  }
+
+  remove(teamId: string): boolean {
+    const removed = this.#teams.delete(teamId);
+    if (removed) this.#save();
+    return removed;
+  }
+
+  // Durable lessons per team, appended by leads after reviews.
+  appendMemory(teamId: string, note: string): void {
+    const team = this.#teams.get(teamId);
+    if (!team) return;
+    const memoryPath = join(team.memoryDir, 'MEMORY.md');
+    const existing = existsSync(memoryPath) ? readFileSync(memoryPath, 'utf8') : `# ${team.name} — notes\n`;
+    const lines = existing.split('\n').filter((line) => line.trim().length > 0);
+    lines.push(`- ${new Date().toISOString().slice(0, 10)}: ${note.replace(/\s+/g, ' ').trim().slice(0, 240)}`);
+    // Header + the most recent 40 notes.
+    const header = lines[0]?.startsWith('#') ? [lines[0]] : [`# ${team.name} — notes`];
+    const notes = lines.filter((line) => line.startsWith('- ')).slice(-40);
+    writeFileSync(memoryPath, [...header, ...notes].join('\n') + '\n');
+  }
+
+  readMemory(teamId: string): string {
+    const team = this.#teams.get(teamId);
+    if (!team) return '';
+    const memoryPath = join(team.memoryDir, 'MEMORY.md');
+    if (!existsSync(memoryPath)) return '';
+    return readFileSync(memoryPath, 'utf8').slice(0, 1500);
+  }
+
   add(input: {
     name: string;
     charter: string;
