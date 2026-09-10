@@ -285,7 +285,9 @@ private fun saveToDownloads(context: android.content.Context, name: String, mime
 private fun VoiceOverlay(modifier: Modifier) {
     val listening by dev.neureal.agenthq.voice.VoiceSession.listening.collectAsState()
     val lines by dev.neureal.agenthq.voice.VoiceSession.lines.collectAsState()
-    if (!listening && lines.isEmpty()) return
+    val draft by dev.neureal.agenthq.voice.VoiceSession.draft.collectAsState()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    if (!listening && lines.isEmpty() && draft == null) return
 
     Column(
         modifier = modifier
@@ -324,6 +326,31 @@ private fun VoiceOverlay(modifier: Modifier) {
                 fontSize = 12.sp, lineHeight = 16.sp,
                 maxLines = 4,
             )
+        }
+        // A drafted task waits here until confirmed — by voice ("send") or tap.
+        if (draft != null) {
+            Column(
+                modifier = Modifier.fillMaxWidth()
+                    .background(HQ.panel, RoundedCornerShape(9.dp))
+                    .border(1.dp, HQ.amber.copy(alpha = 0.5f), RoundedCornerShape(9.dp))
+                    .padding(9.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                Text("draft — not sent yet", color = HQ.amber, fontSize = 9.sp, letterSpacing = 1.2.sp, fontFamily = FontFamily.Monospace)
+                Text(draft ?: "", color = HQ.text, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 6)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { dev.neureal.agenthq.voice.TaskCapture.submitDraft(context) },
+                        modifier = Modifier.weight(1f).height(36.dp),
+                        shape = RoundedCornerShape(9.dp),
+                    ) { Text("Send", color = HQ.accent, fontSize = 12.sp) }
+                    OutlinedButton(
+                        onClick = { dev.neureal.agenthq.voice.TaskCapture.discardDraft() },
+                        modifier = Modifier.weight(1f).height(36.dp),
+                        shape = RoundedCornerShape(9.dp),
+                    ) { Text("Discard", color = HQ.muted, fontSize = 12.sp) }
+                }
+            }
         }
     }
 }

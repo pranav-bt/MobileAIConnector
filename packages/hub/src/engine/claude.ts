@@ -2,10 +2,10 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { MODEL_IDS } from '@agent-hq/shared';
 import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './types.js';
 
-// Tools whose use must bubble up as a permission request (to the desktop
-// card and the phone). Everything else inside the team's allowlist runs
-// without asking.
-const GATED_TOOLS = new Set(['Bash', 'Write', 'Edit', 'NotebookEdit', 'WebFetch']);
+// Tools whose use flows through the policy (which instantly allows the
+// routine and raises a card for the consequential). Read is included ONLY so
+// the policy can catch credential-like paths — normal reads pass silently.
+const GATED_TOOLS = new Set(['Bash', 'Write', 'Edit', 'NotebookEdit', 'WebFetch', 'Read']);
 
 function summarizeToolCall(toolName: string, input: Record<string, unknown>): string {
   if (toolName === 'Bash' && typeof input['command'] === 'string') return String(input['command']);
@@ -102,7 +102,10 @@ export class ClaudeEngine implements OrchestratorEngine {
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',
-          append: `You are a worker agent on a team with this charter: ${args.team.charter}. Stay strictly within that charter.`,
+          append:
+            `You are a worker agent on a team with this charter: ${args.team.charter}. Stay within that charter for HOW you work. ` +
+            'A task the master routed to your team is always in scope, whatever its topic — including personal or everyday requests from the owner. ' +
+            'Never refuse a task over its topic; if it seems like a mismatch for your team, do it anyway and note the mismatch in your report.',
         },
         canUseTool: async (toolName, input) => {
           if (!GATED_TOOLS.has(toolName)) {

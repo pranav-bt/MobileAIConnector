@@ -101,17 +101,9 @@ class VoiceCommander(
         }
     }
 
-    // Main thread: chirp, bring the app up (if allowed), hand the mic to the
-    // platform recognizer, and follow the task so Jarvis talks back.
+    // Main thread: bring the app up (if allowed) and run the shared
+    // draft-and-confirm capture — nothing is sent without a "send".
     private fun onWake() {
-        // Cut any speech (and stale task-following) before the mic opens.
-        VoiceFeedback.hush()
-        try {
-            ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80).startTone(ToneGenerator.TONE_PROP_ACK, 120)
-        } catch (ignored: Exception) {}
-
-        VoiceSession.listening.value = true
-
         // Opening an activity from the background needs the overlay grant;
         // headless voice still works without it.
         try {
@@ -123,48 +115,8 @@ class VoiceCommander(
             }
         } catch (ignored: Exception) {}
 
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            VoiceFeedback.speak("No speech recognizer on this phone.")
-            VoiceSession.listening.value = false
-            capturing = false
-            return
-        }
-
         mainHandler.postDelayed({
-            val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
-            recognizer.setRecognitionListener(object : RecognitionListener {
-                override fun onResults(results: Bundle) {
-                    val text = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
-                    recognizer.destroy()
-                    VoiceSession.listening.value = false
-                    if (!text.isNullOrEmpty()) {
-                        VoiceSession.you(text)
-                        hub.sendCommand(Commands.submitTask(text))
-                        VoiceFeedback.speak("On it.")
-                        VoiceFeedback.followTask(hub, text)
-                    }
-                    capturing = false
-                }
-
-                override fun onError(error: Int) {
-                    recognizer.destroy()
-                    VoiceSession.listening.value = false
-                    capturing = false
-                }
-
-                override fun onReadyForSpeech(params: Bundle?) {}
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {}
-                override fun onPartialResults(partialResults: Bundle?) {}
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            })
-            recognizer.startListening(
-                Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-                    .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault()),
-            )
+            TaskCapture.begin(context) { capturing = false }
         }, 250)
     }
 }

@@ -9,6 +9,9 @@ object VoiceSession {
 
     val listening = MutableStateFlow(false)
     val lines = MutableStateFlow<List<Line>>(emptyList())
+    // A spoken task waiting for confirmation ("send") — shown in the overlay
+    // with Send/Discard buttons; never submitted without a confirm.
+    val draft = MutableStateFlow<String?>(null)
 
     fun you(text: String) = add(Line(fromYou = true, text = text))
     fun jarvis(text: String) = add(Line(fromYou = false, text = text))
@@ -20,5 +23,6 @@ object VoiceSession {
     fun clear() {
         lines.value = emptyList()
         listening.value = false
+        draft.value = null // dismissing the overlay discards a pending draft
     }
 }

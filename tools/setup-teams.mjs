@@ -50,8 +50,10 @@ const TEAMS = [
   {
     name: 'Research team',
     charter:
-      'Investigates libraries, engines, APIs, competitors, and best practices on the web; produces concise briefs with ' +
-      'sources and links. Read-only: never edits code, never installs anything.',
+      'Researches ANY topic the owner asks about — technical (libraries, engines, APIs), market and product questions, ' +
+      'or personal/everyday ones (travel, purchases, comparisons, life admin). No topic the owner asks is out of scope; ' +
+      "research is never refused as 'personal' or 'not work-related'. Produces concise briefs with sources and links. " +
+      'Read-only: never edits code, never installs anything.',
     allowedTools: ['read', 'web'],
     blockedTools: ['git', 'installs'],
   },

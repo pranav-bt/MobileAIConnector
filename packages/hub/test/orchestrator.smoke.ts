@@ -377,6 +377,61 @@ try {
   }
   console.log('phone inbox ok: file landed in data/inbox, no echo broadcast');
 
+  // 16. Research-style teams (no bash): reading the web is silent in auto
+  // mode, and text-producing work gets NO QA follow-up.
+  ws.send(
+    encodeCommand({
+      type: 'team.create',
+      name: 'Notes team',
+      charter: 'Writes notes and briefs. No code, no shell.',
+      allowedTools: ['read', 'edit', 'web'],
+      blockedTools: ['git', 'installs'],
+    }),
+  );
+  await waitFor('notes team created', (e) => e.type === 'team.updated' && e.team.id === 'notes-team');
+  ws.send(encodeCommand({ type: 'task.submit', text: 'notes-team webfetch-test research the papaya market' }));
+  const notesDone = await waitFor(
+    'notes research task done',
+    (e) => e.type === 'task.updated' && e.task.detail.includes('papaya market') && e.task.status === 'done',
+  );
+  if (notesDone.type !== 'task.updated' || notesDone.task.teamId !== 'notes-team') fail('notes task ran on the wrong team');
+  if (events.some((e) => e.type === 'permission.updated' && e.request.taskId === notesDone.task.id)) {
+    fail('reading the web raised a permission card in auto mode');
+  }
+  await waitFor(
+    'web page actually read',
+    (e) => e.type === 'activity' && e.entry.message === 'mock: page read',
+  );
+  await new Promise((resolve) => setTimeout(resolve, 400)); // give any QA spawn a beat
+  if (events.some((e) => e.type === 'task.updated' && e.task.title.includes('[QA]') && e.task.title.includes('papaya'))) {
+    fail('a no-bash team task spawned a QA follow-up');
+  }
+  console.log('research policy ok: web read silent, no QA for text-only work');
+
+  // 17. Credential-like reads always raise a card (flag: reads sensitive data).
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding: sensitive-test inspect the deploy setup' }));
+  const sensitiveAsk = await waitFor(
+    'sensitive read asks',
+    (e) =>
+      e.type === 'permission.updated' &&
+      e.request.status === 'pending' &&
+      e.request.flags.includes('reads sensitive data'),
+  );
+  if (sensitiveAsk.type !== 'permission.updated') fail('unreachable');
+  if (!sensitiveAsk.request.command.includes('id_rsa')) fail('sensitive card is not about the ssh key');
+  ws.send(
+    encodeCommand({ type: 'permission.respond', requestId: sensitiveAsk.request.id, decision: 'deny', scope: 'once' }),
+  );
+  await waitFor(
+    'sensitive read denied, worker adjusted',
+    (e) => e.type === 'activity' && e.entry.message === 'mock: sensitive read denied',
+  );
+  await waitFor(
+    'sensitive-test task still completes',
+    (e) => e.type === 'task.updated' && e.task.id === sensitiveAsk.request.taskId && e.task.status === 'done',
+  );
+  console.log('sensitive-read gate ok: card raised, denial honored, task completed');
+
   console.log('ORCH SMOKE PASS');
   ws.close();
   await hub.close();

@@ -44,10 +44,6 @@ class MainActivity : FragmentActivity() {
     private lateinit var hub: HubClient
     private var backgroundState: ((Boolean) -> Unit)? = null
 
-    // Push-to-talk uses the service-based SpeechRecognizer (what Samsung and
-    // Google actually implement) rather than the optional dialog activity.
-    private var activeRecognizer: android.speech.SpeechRecognizer? = null
-
     private val voiceMicPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) listenForTask()
         else Toast.makeText(this, "Microphone denied — voice input unavailable", Toast.LENGTH_SHORT).show()
@@ -60,59 +56,9 @@ class MainActivity : FragmentActivity() {
     }
 
     private fun listenForTask() {
-        if (!android.speech.SpeechRecognizer.isRecognitionAvailable(this)) {
-            Toast.makeText(this, "No speech recognition service on this device", Toast.LENGTH_SHORT).show()
-            return
-        }
-        // Silence Jarvis before the mic opens — otherwise the recognizer
-        // transcribes the synopsis it was reading out.
-        dev.neureal.agenthq.voice.VoiceFeedback.hush()
-        try {
-            android.media.ToneGenerator(android.media.AudioManager.STREAM_NOTIFICATION, 80)
-                .startTone(android.media.ToneGenerator.TONE_PROP_ACK, 120)
-        } catch (ignored: Exception) {}
-        dev.neureal.agenthq.voice.VoiceSession.listening.value = true
-
-        activeRecognizer?.destroy()
-        val recognizer = android.speech.SpeechRecognizer.createSpeechRecognizer(this)
-        activeRecognizer = recognizer
-        recognizer.setRecognitionListener(object : android.speech.RecognitionListener {
-            override fun onResults(results: Bundle) {
-                val spoken = results.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()?.trim()
-                recognizer.destroy()
-                activeRecognizer = null
-                dev.neureal.agenthq.voice.VoiceSession.listening.value = false
-                if (!spoken.isNullOrEmpty()) {
-                    dev.neureal.agenthq.voice.VoiceSession.you(spoken)
-                    hub.sendCommand(Commands.submitTask(spoken))
-                    dev.neureal.agenthq.voice.VoiceFeedback.speak("On it.")
-                    dev.neureal.agenthq.voice.VoiceFeedback.followTask(hub, spoken)
-                }
-            }
-
-            override fun onError(error: Int) {
-                recognizer.destroy()
-                activeRecognizer = null
-                dev.neureal.agenthq.voice.VoiceSession.listening.value = false
-                if (error != android.speech.SpeechRecognizer.ERROR_CLIENT) {
-                    Toast.makeText(this@MainActivity, "Didn't catch that (code $error) — try again", Toast.LENGTH_SHORT).show()
-                }
-            }
-
-            override fun onReadyForSpeech(params: Bundle?) {}
-            override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(rmsdB: Float) {}
-            override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {}
-            override fun onPartialResults(partialResults: Bundle?) {}
-            override fun onEvent(eventType: Int, params: Bundle?) {}
-        })
-        recognizer.startListening(
-            Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-                .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault()),
-        )
+        // Capture goes through the draft-and-confirm flow: nothing is sent to
+        // the master until the user says "send" (or taps Send in the overlay).
+        dev.neureal.agenthq.voice.TaskCapture.begin(this)
     }
 
     // --- phone -> PC file channel -------------------------------------------
@@ -354,7 +300,6 @@ class MainActivity : FragmentActivity() {
     }
 
     override fun onDestroy() {
-        activeRecognizer?.destroy()
         super.onDestroy()
     }
 

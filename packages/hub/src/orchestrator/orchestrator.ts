@@ -455,7 +455,7 @@ export class Orchestrator implements CommandHandlers {
             }
           },
           onPermission: ({ toolName, command, reason }) => {
-            const verdict = evaluatePermission(toolName, command, this.#policy.mode, team.allowedTools);
+            const verdict = evaluatePermission(toolName, command, this.#policy.mode);
             if (verdict.decision === 'allow') return Promise.resolve('approve' as const);
             return this.#raisePermission(taskId, workerId, team, command, reason, verdict.flags);
           },
@@ -523,8 +523,10 @@ export class Orchestrator implements CommandHandlers {
     const source = this.#bus.state.tasks[sourceTaskId];
     if (!qa || !source) return;
     if (sourceTeam.id === qa.id || source.title.startsWith('[QA]')) return;
-    // Only work that can have touched code/system state needs QA.
-    if (!sourceTeam.allowedTools.some((tool) => tool === 'edit' || tool === 'bash')) return;
+    // QA runs REAL tests in a real environment — that only makes sense for
+    // teams that build/run things (bash). Research, docs, and assistant work
+    // (read/edit/web) produces text, not testable systems: no QA follow-up.
+    if (!sourceTeam.allowedTools.includes('bash')) return;
 
     this.#taskCounter += 1;
     const taskId = `t-${now().toString(36)}-${this.#taskCounter}`;

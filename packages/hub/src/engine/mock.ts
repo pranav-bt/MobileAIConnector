@@ -113,6 +113,24 @@ export class MockEngine implements OrchestratorEngine {
       });
       callbacks.onActivity(decision === 'approve' ? 'mock: file edited' : 'mock: edit denied');
     }
+    // "webfetch-test" exercises the read-the-web path (auto-allowed for all).
+    if (taskText.includes('webfetch-test')) {
+      const decision = await callbacks.onPermission({
+        toolName: 'WebFetch',
+        command: 'WebFetch https://example.com/reference',
+        reason: 'mock research fetch',
+      });
+      callbacks.onActivity(decision === 'approve' ? 'mock: page read' : 'mock: fetch denied');
+    }
+    // "sensitive-test" exercises the credentials-read gate.
+    if (taskText.includes('sensitive-test')) {
+      const decision = await callbacks.onPermission({
+        toolName: 'Read',
+        command: 'Read C:\\Users\\prana\\.ssh\\id_rsa',
+        reason: 'mock sensitive read',
+      });
+      callbacks.onActivity(decision === 'approve' ? 'mock: secret read' : 'mock: sensitive read denied');
+    }
     if (taskText.includes('install')) {
       const decision = await callbacks.onPermission({
         toolName: 'Bash',
