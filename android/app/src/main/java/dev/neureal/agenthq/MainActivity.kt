@@ -81,6 +81,31 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    private var jarvisState: ((Boolean) -> Unit)? = null
+
+    private val micPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) enableJarvis() else {
+            Toast.makeText(this, "Microphone denied — hands-free stays off", Toast.LENGTH_SHORT).show()
+            jarvisState?.invoke(false)
+        }
+    }
+
+    private fun enableJarvis() {
+        uiPrefs().edit().putBoolean("jarvis", true).putBoolean("bgService", true).apply()
+        jarvisState?.invoke(true)
+        backgroundState?.invoke(true)
+        // (Re)start so the service picks up the microphone foreground type.
+        ContextCompat.startForegroundService(this, Intent(this, LinkService::class.java))
+    }
+
+    private fun disableJarvis() {
+        uiPrefs().edit().putBoolean("jarvis", false).apply()
+        jarvisState?.invoke(false)
+        if (uiPrefs().getBoolean("bgService", false)) {
+            ContextCompat.startForegroundService(this, Intent(this, LinkService::class.java))
+        }
+    }
+
     private fun uiPrefs() = getSharedPreferences("agenthq-ui", MODE_PRIVATE)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -109,6 +134,8 @@ class MainActivity : FragmentActivity() {
         var pairError by remember { mutableStateOf<String?>(null) }
         var backgroundEnabled by remember { mutableStateOf(uiPrefs().getBoolean("bgService", false)) }
         backgroundState = { value -> backgroundEnabled = value }
+        var jarvisEnabled by remember { mutableStateOf(uiPrefs().getBoolean("jarvis", false)) }
+        jarvisState = { value -> jarvisEnabled = value }
 
         when (link) {
             is LinkState.Unpaired, is LinkState.PairingInFlight -> PairScreen(
@@ -145,6 +172,17 @@ class MainActivity : FragmentActivity() {
                     backgroundEnabled = enabled
                     if (enabled) requestBackgroundOrEnable() else disableBackground()
                 },
+                jarvisEnabled = jarvisEnabled,
+                onToggleJarvis = { enabled ->
+                    jarvisEnabled = enabled
+                    if (enabled) {
+                        val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+                            PackageManager.PERMISSION_GRANTED
+                        if (granted) enableJarvis() else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                    } else {
+                        disableJarvis()
+                    }
+                },
                 onRespond = { request, decision -> respondWithBiometric(request, decision) },
                 onSubmitTask = { text -> hub.sendCommand(Commands.submitTask(text)) },
                 onVoice = { startVoiceCapture() },
@@ -174,7 +212,8 @@ class MainActivity : FragmentActivity() {
     }
 
     private fun disableBackground() {
-        uiPrefs().edit().putBoolean("bgService", false).apply()
+        uiPrefs().edit().putBoolean("bgService", false).putBoolean("jarvis", false).apply()
+        jarvisState?.invoke(false)
         stopService(Intent(this, LinkService::class.java))
     }
 

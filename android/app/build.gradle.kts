@@ -69,6 +69,10 @@ dependencies {
     // Biometric gate on approvals.
     implementation("androidx.biometric:biometric:1.1.0")
 
+    // Hands-free "hey Jarvis": openWakeWord ONNX models (Apache-2.0, offline).
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
+
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303") // real org.json for JVM unit tests (android.jar stubs throw)
+    testImplementation("com.microsoft.onnxruntime:onnxruntime:1.19.2") // desktop natives for JVM wake-word tests
 }

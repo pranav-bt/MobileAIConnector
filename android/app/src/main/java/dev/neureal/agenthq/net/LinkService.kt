@@ -7,9 +7,15 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.os.Build
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import dev.neureal.agenthq.MainActivity
 import dev.neureal.agenthq.R
+import dev.neureal.agenthq.voice.VoiceCommander
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -23,6 +29,8 @@ class LinkService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val seen = HashSet<String>()
+    private var voice: VoiceCommander? = null
+    private var collecting = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -42,10 +50,31 @@ class LinkService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(1, persistentNotification())
+        val jarvisWanted = getSharedPreferences("agenthq-ui", MODE_PRIVATE).getBoolean("jarvis", false)
+        val micGranted = ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        val jarvisOn = jarvisWanted && micGranted
+
+        var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        if (jarvisOn) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        if (Build.VERSION.SDK_INT >= 29) {
+            ServiceCompat.startForeground(this, 1, persistentNotification(jarvisOn), types)
+        } else {
+            startForeground(1, persistentNotification(jarvisOn))
+        }
+
         val hub = HubHolder.get(applicationContext)
         hub.ensureConnected()
 
+        if (jarvisOn && voice == null) {
+            voice = VoiceCommander(applicationContext, hub).also { it.start() }
+        } else if (!jarvisOn && voice != null) {
+            voice?.stop()
+            voice = null
+        }
+
+        if (collecting) return START_STICKY
+        collecting = true
         scope.launch {
             hub.snapshotFlow.collect { snapshot ->
                 val pending = snapshot.permissions.filter { it.status == "pending" }
@@ -77,6 +106,8 @@ class LinkService : Service() {
     }
 
     override fun onDestroy() {
+        voice?.stop()
+        voice = null
         scope.cancel()
         super.onDestroy()
     }
@@ -88,11 +119,11 @@ class LinkService : Service() {
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 
-    private fun persistentNotification(): Notification =
+    private fun persistentNotification(jarvis: Boolean): Notification =
         NotificationCompat.Builder(this, CHANNEL_LINK)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("Agent HQ linked")
-            .setContentText("Watching for approvals from your agents")
+            .setContentTitle(if (jarvis) "Agent HQ linked · \"hey Jarvis\" armed" else "Agent HQ linked")
+            .setContentText(if (jarvis) "Listening on-device · watching for approvals" else "Watching for approvals from your agents")
             .setOngoing(true)
             .setContentIntent(openAppIntent())
             .build()

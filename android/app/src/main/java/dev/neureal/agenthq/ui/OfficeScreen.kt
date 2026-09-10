@@ -184,6 +184,8 @@ fun MainScreen(
     pairedHost: String?,
     backgroundEnabled: Boolean,
     onToggleBackground: (Boolean) -> Unit,
+    jarvisEnabled: Boolean,
+    onToggleJarvis: (Boolean) -> Unit,
     onRespond: (PermissionRequest, String) -> Unit,
     onSubmitTask: (String) -> Unit,
     onVoice: () -> Unit,
@@ -246,7 +248,7 @@ fun MainScreen(
                 0 -> OfficeTab(snapshot, connected, pending, onRespond)
                 1 -> TasksTab(snapshot, connected, onSubmitTask)
                 2 -> HistoryTab(snapshot)
-                else -> LinkTab(snapshot, connected, pairedHost, backgroundEnabled, onToggleBackground, onUnpair)
+                else -> LinkTab(snapshot, connected, pairedHost, backgroundEnabled, onToggleBackground, jarvisEnabled, onToggleJarvis, onUnpair)
             }
         }
     }
@@ -416,6 +418,8 @@ private fun LinkTab(
     pairedHost: String?,
     backgroundEnabled: Boolean,
     onToggleBackground: (Boolean) -> Unit,
+    jarvisEnabled: Boolean,
+    onToggleJarvis: (Boolean) -> Unit,
     onUnpair: () -> Unit,
 ) {
     val usage = snapshot.usage
@@ -448,6 +452,25 @@ private fun LinkTab(
                     Switch(
                         checked = backgroundEnabled,
                         onCheckedChange = onToggleBackground,
+                        colors = SwitchDefaults.colors(checkedTrackColor = HQ.accentSolid, checkedThumbColor = HQ.accentInk),
+                    )
+                }
+            }
+        }
+
+        item {
+            Card {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("\"Hey Jarvis\" (hands-free)", color = HQ.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "on-device wake word (openWakeWord) — say it, then speak the task; keeps background mode on",
+                            color = HQ.muted, fontSize = 10.5.sp, lineHeight = 14.sp,
+                        )
+                    }
+                    Switch(
+                        checked = jarvisEnabled,
+                        onCheckedChange = onToggleJarvis,
                         colors = SwitchDefaults.colors(checkedTrackColor = HQ.accentSolid, checkedThumbColor = HQ.accentInk),
                     )
                 }
