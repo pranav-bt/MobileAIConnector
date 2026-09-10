@@ -3,6 +3,9 @@ dist/
 data/
 packages/desktop/src-tauri/target/
 packages/desktop/src-tauri/gen/
+android/.gradle/
+android/**/build/
+android/local.properties
 *.log
 .env
 .env.*

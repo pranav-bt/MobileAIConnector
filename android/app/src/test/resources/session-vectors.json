@@ -1,0 +1,18 @@
+{
+  "pcStaticPrivateRawB64": "QEgEazn2EwuksImasbopPS45Jt1bwEWq/VdU9dkq1VE=",
+  "pcStaticPublicRawB64": "UWUzK4hioIslZ5Vj+avouoOVnrLbPOvs46nrJUyfTg8=",
+  "deviceStaticPrivateRawB64": "KGucoPrKQ4T3ExN/Iu1VU5NFnYh/R7r+0o8lL8ywykI=",
+  "deviceStaticPublicRawB64": "HThcguYWBztGf+CZdgp6lOwAEoko7z4BAlPPoCW+jwA=",
+  "pcEphemeralPublicRawB64": "Po90+H+2SroSAZ0GIE5G3+PwNd1Cszb+e8S/7/uyMHs=",
+  "deviceEphemeralPrivateRawB64": "SPN02xKU4wq7O1pLKjfpe7lAQv7+jdt3TuCf37peMnw=",
+  "deviceEphemeralPublicRawB64": "GE1nzLr52cG6NALB+GjTRhkWMoal8JHNQlEKg/qmuXY=",
+  "saltB64": "6o05dZ0/eyLHjFbmVQZEZnlm8FVsuih8chA9c/ThaLY=",
+  "clientToServerKeyB64": "mjM83fh51aqwHgqj52OFanmkwrFPG6zXlUIostlHxKM=",
+  "serverToClientKeyB64": "zLlT9hYutSwb7kMo+Y0MPRVHMHOBMc1ez6PbK5VNuNM=",
+  "serverPlaintext": "{\"hello\":\"from the hub\",\"n\":1}",
+  "serverFrameN": "AAAAAAAAAAAAAAAA",
+  "serverFrameC": "LZIll4gVtQMjT0GPUnjMh3LXU3DL8Fer5Wh+V+RqVWO52jmQt6eSemmQjhLmpA==",
+  "clientPlaintext": "{\"type\":\"hello\",\"client\":\"mobile\",\"name\":\"vector-test\"}",
+  "expectedClientFrameN": "AAAAAAAAAAAAAAAA",
+  "expectedClientFrameC": "5ZpjoXlVu4+xarmvAp7ev3kjIBBj1MuIXbsiPnr16bMAxRuMJ4gRhrG69oAUHujFKUn++xtyXYq/6FtIAGgwOUCMZBHCxp8="
+}

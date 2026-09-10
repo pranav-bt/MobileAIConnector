@@ -21,7 +21,11 @@ https://claude.ai/code/artifact/2ca3a0e6-562e-4184-a465-0eeab90b2d1f
   `npm run shell:dev -w @agent-hq/desktop`) which adds the native window,
   tray (close hides, Quit exits), and the global Ctrl+Shift+K kill hotkey.
   Building the shell needs the Rust toolchain (`~/.cargo/bin`) + MSVC.
-- `android/` — Kotlin companion app (not scaffolded yet; see its README).
+- `android/` — Kotlin + Compose companion app: QR pairing, encrypted session
+  (crypto interop-tested against hub vectors — regenerate via
+  `npx tsx test/gen-session-vectors.ts` in packages/hub), biometric-signed
+  approvals, task submission. Build: `cd android && gradlew.bat assembleDebug`
+  (JDK 17 at C:\Program Files\Microsoft\jdk-17*, SDK via local.properties).
 
 ## Commands
 
