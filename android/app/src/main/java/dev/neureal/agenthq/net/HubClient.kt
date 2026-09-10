@@ -56,7 +56,13 @@ class HubClient(private val store: KV, private val deviceName: String) {
     val snapshotFlow: StateFlow<Snapshot> get() = stateFlow
     private val stateFlow = MutableStateFlow(Snapshot())
     // Files pushed from the PC (screenshots, worker outputs) — last few kept.
+    // They live ONLY in memory: read them in-app and dismiss; nothing touches
+    // storage unless the user explicitly saves.
     val filesFlow = MutableStateFlow<List<SharedFile>>(emptyList())
+
+    fun dismissFile(id: String) {
+        filesFlow.value = filesFlow.value.filter { it.id != id }
+    }
 
     private var socket: WebSocket? = null
     private var crypto: FrameCrypto? = null

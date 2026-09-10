@@ -11,9 +11,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -599,12 +603,17 @@ private fun LinkTab(
                 }
                 if (files.isEmpty()) {
                     Text(
-                        "screenshots and files sent by the PC or the agents appear here",
+                        "screenshots, reports, and files sent by the PC appear here — read them in place and dismiss; nothing is stored unless you save",
                         color = HQ.ghost, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
                     )
                 }
+                // Which file is open for in-place reading (text reports etc.).
+                var openFileId by remember { mutableStateOf<String?>(null) }
                 files.reversed().forEach { file ->
                     val bytes = remember(file.id) { try { dev.neureal.agenthq.crypto.unb64(file.bytesB64) } catch (e: Exception) { ByteArray(0) } }
+                    val isText = file.mimeType.startsWith("text/") ||
+                        file.mimeType == "application/json" ||
+                        listOf(".md", ".txt", ".json", ".log", ".csv").any { file.name.lowercase().endsWith(it) }
                     Column(
                         modifier = Modifier.fillMaxWidth().background(HQ.panel2, RoundedCornerShape(8.dp)).padding(9.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -626,9 +635,18 @@ private fun LinkTab(
                                 Text(file.name, color = HQ.text, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                                 Text("${file.from} · ${bytes.size / 1024} KB", color = HQ.muted, fontSize = 9.5.sp, fontFamily = FontFamily.Monospace)
                             }
+                            if (isText && bytes.isNotEmpty()) {
+                                Text(
+                                    if (openFileId == file.id) "close" else "read",
+                                    color = HQ.accent, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                                    modifier = Modifier
+                                        .clickable { openFileId = if (openFileId == file.id) null else file.id }
+                                        .padding(6.dp),
+                                )
+                            }
                             Text(
                                 "save",
-                                color = HQ.accent, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                                color = HQ.muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
                                 modifier = Modifier
                                     .clickable {
                                         val saved = saveToDownloads(context, file.name, file.mimeType, bytes)
@@ -636,6 +654,33 @@ private fun LinkTab(
                                     }
                                     .padding(6.dp),
                             )
+                            Text(
+                                "dismiss",
+                                color = HQ.muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                                modifier = Modifier
+                                    .clickable {
+                                        if (openFileId == file.id) openFileId = null
+                                        hub.dismissFile(file.id) // memory only — gone for good
+                                    }
+                                    .padding(6.dp),
+                            )
+                        }
+                        // In-place reader: the whole report, scrollable and
+                        // copyable, straight from memory — no download needed.
+                        if (openFileId == file.id && isText) {
+                            val text = remember(file.id) { try { String(bytes, Charsets.UTF_8) } catch (e: Exception) { "(couldn't decode)" } }
+                            SelectionContainer {
+                                Text(
+                                    text,
+                                    color = HQ.text2, fontSize = 11.5.sp, lineHeight = 16.sp,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 420.dp)
+                                        .background(HQ.bg, RoundedCornerShape(7.dp))
+                                        .padding(9.dp)
+                                        .verticalScroll(rememberScrollState()),
+                                )
+                            }
                         }
                     }
                 }
