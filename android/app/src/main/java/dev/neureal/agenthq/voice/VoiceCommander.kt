@@ -11,10 +11,10 @@ import android.media.ToneGenerator
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
 import dev.neureal.agenthq.model.Commands
 import dev.neureal.agenthq.net.HubClient
 import java.util.Locale
@@ -31,15 +31,13 @@ class VoiceCommander(
     @Volatile private var running = false
     @Volatile private var capturing = false
     private var thread: Thread? = null
-    private var tts: TextToSpeech? = null
-    private var ttsReady = false
     private val mainHandler = Handler(Looper.getMainLooper())
     private var engine: WakeWordEngine? = null
 
     fun start() {
         if (running) return
         running = true
-        tts = TextToSpeech(context) { status -> ttsReady = status == TextToSpeech.SUCCESS }
+        VoiceFeedback.init(context)
         thread = Thread {
             try {
                 val assets = context.assets
@@ -57,8 +55,6 @@ class VoiceCommander(
 
     fun stop() {
         running = false
-        tts?.shutdown()
-        tts = null
     }
 
     @SuppressLint("MissingPermission") // RECORD_AUDIO is granted before start()
@@ -103,14 +99,29 @@ class VoiceCommander(
         }
     }
 
-    // Main thread: chirp, then hand the mic to the platform recognizer.
+    // Main thread: chirp, bring the app up (if allowed), hand the mic to the
+    // platform recognizer, and follow the task so Jarvis talks back.
     private fun onWake() {
         try {
             ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80).startTone(ToneGenerator.TONE_PROP_ACK, 120)
         } catch (ignored: Exception) {}
 
+        VoiceSession.listening.value = true
+
+        // Opening an activity from the background needs the overlay grant;
+        // headless voice still works without it.
+        try {
+            if (Settings.canDrawOverlays(context)) {
+                context.startActivity(
+                    Intent(context, Class.forName("dev.neureal.agenthq.MainActivity"))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
+                )
+            }
+        } catch (ignored: Exception) {}
+
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            speak("No speech recognizer on this phone.")
+            VoiceFeedback.speak("No speech recognizer on this phone.")
+            VoiceSession.listening.value = false
             capturing = false
             return
         }
@@ -121,15 +132,19 @@ class VoiceCommander(
                 override fun onResults(results: Bundle) {
                     val text = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
                     recognizer.destroy()
+                    VoiceSession.listening.value = false
                     if (!text.isNullOrEmpty()) {
+                        VoiceSession.you(text)
                         hub.sendCommand(Commands.submitTask(text))
-                        speak("On it. Sent to the master agent.")
+                        VoiceFeedback.speak("On it.")
+                        VoiceFeedback.followTask(hub, text)
                     }
                     capturing = false
                 }
 
                 override fun onError(error: Int) {
                     recognizer.destroy()
+                    VoiceSession.listening.value = false
                     capturing = false
                 }
 
@@ -147,9 +162,5 @@ class VoiceCommander(
                     .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault()),
             )
         }, 250)
-    }
-
-    private fun speak(text: String) {
-        if (ttsReady) tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "hq-voice")
     }
 }

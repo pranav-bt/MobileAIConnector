@@ -40,8 +40,6 @@ class MainActivity : FragmentActivity() {
 
     private lateinit var hub: HubClient
     private var backgroundState: ((Boolean) -> Unit)? = null
-    private var tts: TextToSpeech? = null
-    private var ttsReady = false
 
     // Push-to-talk uses the service-based SpeechRecognizer (what Samsung and
     // Google actually implement) rather than the optional dialog activity.
@@ -50,10 +48,6 @@ class MainActivity : FragmentActivity() {
     private val voiceMicPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) listenForTask()
         else Toast.makeText(this, "Microphone denied — voice input unavailable", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun speak(text: String) {
-        if (ttsReady) tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "hq")
     }
 
     private fun startVoiceCapture() {
@@ -71,7 +65,7 @@ class MainActivity : FragmentActivity() {
             android.media.ToneGenerator(android.media.AudioManager.STREAM_NOTIFICATION, 80)
                 .startTone(android.media.ToneGenerator.TONE_PROP_ACK, 120)
         } catch (ignored: Exception) {}
-        Toast.makeText(this, "Listening…", Toast.LENGTH_SHORT).show()
+        dev.neureal.agenthq.voice.VoiceSession.listening.value = true
 
         activeRecognizer?.destroy()
         val recognizer = android.speech.SpeechRecognizer.createSpeechRecognizer(this)
@@ -82,16 +76,19 @@ class MainActivity : FragmentActivity() {
                     ?.firstOrNull()?.trim()
                 recognizer.destroy()
                 activeRecognizer = null
+                dev.neureal.agenthq.voice.VoiceSession.listening.value = false
                 if (!spoken.isNullOrEmpty()) {
+                    dev.neureal.agenthq.voice.VoiceSession.you(spoken)
                     hub.sendCommand(Commands.submitTask(spoken))
-                    speak("On it. Sent to the master agent.")
-                    Toast.makeText(this@MainActivity, "Task sent: $spoken", Toast.LENGTH_SHORT).show()
+                    dev.neureal.agenthq.voice.VoiceFeedback.speak("On it.")
+                    dev.neureal.agenthq.voice.VoiceFeedback.followTask(hub, spoken)
                 }
             }
 
             override fun onError(error: Int) {
                 recognizer.destroy()
                 activeRecognizer = null
+                dev.neureal.agenthq.voice.VoiceSession.listening.value = false
                 if (error != android.speech.SpeechRecognizer.ERROR_CLIENT) {
                     Toast.makeText(this@MainActivity, "Didn't catch that (code $error) — try again", Toast.LENGTH_SHORT).show()
                 }
@@ -134,6 +131,19 @@ class MainActivity : FragmentActivity() {
         backgroundState?.invoke(true)
         // (Re)start so the service picks up the microphone foreground type.
         startLinkService()
+        // With the overlay grant, "hey Jarvis" can bring the app up from the
+        // background; without it, voice still works headless.
+        if (!android.provider.Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Allow 'display over other apps' so Jarvis can open the app when called", Toast.LENGTH_LONG).show()
+            try {
+                startActivity(
+                    Intent(
+                        android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        android.net.Uri.parse("package:$packageName"),
+                    ),
+                )
+            } catch (ignored: Exception) {}
+        }
     }
 
     private fun disableJarvis() {
@@ -148,7 +158,7 @@ class MainActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
         hub = HubHolder.get(applicationContext)
         hub.ensureConnected()
-        tts = TextToSpeech(this) { status -> ttsReady = status == TextToSpeech.SUCCESS }
+        dev.neureal.agenthq.voice.VoiceFeedback.init(this)
         if (uiPrefs().getBoolean("bgService", false)) startLinkService()
 
         // Debug convenience: adb shell am start ... -e payload_b64 <base64 of QR json>
@@ -230,7 +240,6 @@ class MainActivity : FragmentActivity() {
 
     override fun onDestroy() {
         activeRecognizer?.destroy()
-        tts?.shutdown()
         super.onDestroy()
     }
 

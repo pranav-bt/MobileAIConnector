@@ -2,6 +2,7 @@ package dev.neureal.agenthq.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,6 +39,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -250,6 +252,52 @@ fun MainScreen(
                 2 -> HistoryTab(snapshot)
                 else -> LinkTab(snapshot, connected, pairedHost, backgroundEnabled, onToggleBackground, jarvisEnabled, onToggleJarvis, onUnpair)
             }
+            VoiceOverlay(Modifier.align(Alignment.BottomCenter))
+        }
+    }
+}
+
+// The visible half of a Jarvis exchange: what was heard, what Jarvis said
+// (routing, approvals needed, and the synopsis when the task completes).
+@Composable
+private fun VoiceOverlay(modifier: Modifier) {
+    val listening by dev.neureal.agenthq.voice.VoiceSession.listening.collectAsState()
+    val lines by dev.neureal.agenthq.voice.VoiceSession.lines.collectAsState()
+    if (!listening && lines.isEmpty()) return
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp)
+            .background(HQ.panel2, RoundedCornerShape(14.dp))
+            .border(1.dp, HQ.accent.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(7.dp).background(if (listening) HQ.accent else HQ.ghost, CircleShape))
+            Spacer(Modifier.width(7.dp))
+            Text(
+                if (listening) "JARVIS — LISTENING" else "JARVIS",
+                color = HQ.accent, fontSize = 10.sp, letterSpacing = 1.5.sp,
+                fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                "dismiss",
+                color = HQ.faint, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .clickable { dev.neureal.agenthq.voice.VoiceSession.clear() }
+                    .padding(4.dp),
+            )
+        }
+        lines.takeLast(4).forEach { line ->
+            Text(
+                (if (line.fromYou) "you: " else "jarvis: ") + line.text,
+                color = if (line.fromYou) HQ.text else HQ.text2,
+                fontSize = 12.sp, lineHeight = 16.sp,
+                maxLines = 4,
+            )
         }
     }
 }
