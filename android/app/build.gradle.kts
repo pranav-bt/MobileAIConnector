@@ -66,8 +66,12 @@ dependencies {
     // no activity of our own, the scan UI is rendered by Play services.
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
 
-    // Biometric gate on approvals.
+    // Biometric gate on approvals. NOTE: biometric:1.1.0 transitively pins
+    // fragment 1.2.x, whose 16-bit requestCode check crashes the modern
+    // ActivityResult permission API — the explicit fragment-ktx pin below is
+    // load-bearing, do not remove it.
     implementation("androidx.biometric:biometric:1.1.0")
+    implementation("androidx.fragment:fragment-ktx:1.8.5")
 
     // Hands-free "hey Jarvis": openWakeWord ONNX models (Apache-2.0, offline).
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")

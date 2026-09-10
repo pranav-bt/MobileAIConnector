@@ -43,19 +43,13 @@ class MainActivity : FragmentActivity() {
     private var tts: TextToSpeech? = null
     private var ttsReady = false
 
-    // Push-to-talk: the platform speech dialog transcribes, the transcript
-    // becomes a task for the master. Hands-free "hey Jarvis" (openWakeWord)
-    // is the follow-up milestone.
-    private val speechLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        val spoken = result.data
-            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-            ?.firstOrNull()
-            ?.trim()
-        if (!spoken.isNullOrEmpty()) {
-            hub.sendCommand(Commands.submitTask(spoken))
-            speak("On it. Sent to the master agent.")
-            Toast.makeText(this, "Task sent: $spoken", Toast.LENGTH_SHORT).show()
-        }
+    // Push-to-talk uses the service-based SpeechRecognizer (what Samsung and
+    // Google actually implement) rather than the optional dialog activity.
+    private var activeRecognizer: android.speech.SpeechRecognizer? = null
+
+    private val voiceMicPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) listenForTask()
+        else Toast.makeText(this, "Microphone denied — voice input unavailable", Toast.LENGTH_SHORT).show()
     }
 
     private fun speak(text: String) {
@@ -63,15 +57,59 @@ class MainActivity : FragmentActivity() {
     }
 
     private fun startVoiceCapture() {
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-            .putExtra(RecognizerIntent.EXTRA_PROMPT, "Give the master agent a task")
-        try {
-            speechLauncher.launch(intent)
-        } catch (error: Exception) {
-            Toast.makeText(this, "No speech recognizer available on this device", Toast.LENGTH_SHORT).show()
+        val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (granted) listenForTask() else voiceMicPermission.launch(Manifest.permission.RECORD_AUDIO)
+    }
+
+    private fun listenForTask() {
+        if (!android.speech.SpeechRecognizer.isRecognitionAvailable(this)) {
+            Toast.makeText(this, "No speech recognition service on this device", Toast.LENGTH_SHORT).show()
+            return
         }
+        try {
+            android.media.ToneGenerator(android.media.AudioManager.STREAM_NOTIFICATION, 80)
+                .startTone(android.media.ToneGenerator.TONE_PROP_ACK, 120)
+        } catch (ignored: Exception) {}
+        Toast.makeText(this, "Listening…", Toast.LENGTH_SHORT).show()
+
+        activeRecognizer?.destroy()
+        val recognizer = android.speech.SpeechRecognizer.createSpeechRecognizer(this)
+        activeRecognizer = recognizer
+        recognizer.setRecognitionListener(object : android.speech.RecognitionListener {
+            override fun onResults(results: Bundle) {
+                val spoken = results.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()?.trim()
+                recognizer.destroy()
+                activeRecognizer = null
+                if (!spoken.isNullOrEmpty()) {
+                    hub.sendCommand(Commands.submitTask(spoken))
+                    speak("On it. Sent to the master agent.")
+                    Toast.makeText(this@MainActivity, "Task sent: $spoken", Toast.LENGTH_SHORT).show()
+                }
+            }
+
+            override fun onError(error: Int) {
+                recognizer.destroy()
+                activeRecognizer = null
+                if (error != android.speech.SpeechRecognizer.ERROR_CLIENT) {
+                    Toast.makeText(this@MainActivity, "Didn't catch that (code $error) — try again", Toast.LENGTH_SHORT).show()
+                }
+            }
+
+            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onPartialResults(partialResults: Bundle?) {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        recognizer.startListening(
+            Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault()),
+        )
     }
 
     private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -191,6 +229,7 @@ class MainActivity : FragmentActivity() {
     }
 
     override fun onDestroy() {
+        activeRecognizer?.destroy()
         tts?.shutdown()
         super.onDestroy()
     }
