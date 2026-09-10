@@ -46,77 +46,99 @@ for (let i = 0; i < args.length; i++) {
 
 const key = apiKey();
 
+// NOTE: after a fetch, exit via process.exitCode + return — process.exit()
+// trips a libuv assertion on Windows while the socket is still closing.
 if (flags.has('--list-models')) {
   const response = await fetch(`${BASE}/models?pageSize=200`, { headers: { 'x-goog-api-key': key } });
   const body = await response.json();
   if (!response.ok) {
     console.error(`model listing failed (HTTP ${response.status}): ${JSON.stringify(body).slice(0, 300)}`);
-    process.exit(1);
+    process.exitCode = 1;
+  } else {
+    const names = (body.models ?? [])
+      .map((model) => model.name?.replace(/^models\//, ''))
+      .filter((name) => /image|imagen/i.test(name ?? ''));
+    console.log(names.length ? names.join('\n') : '(no image-capable models visible to this key)');
   }
-  const names = (body.models ?? [])
-    .map((model) => model.name?.replace(/^models\//, ''))
-    .filter((name) => /image|imagen/i.test(name ?? ''));
-  console.log(names.length ? names.join('\n') : '(no image-capable models visible to this key)');
-  process.exit(0);
-}
+} else {
 
-const [prompt, outPath] = positional;
-if (!prompt || !outPath) {
-  console.error('usage: node tools/generate-image.mjs "<prompt>" <out.png> [--in <image.png>] [--model <name>]');
-  process.exit(2);
-}
-
-const parts = [{ text: prompt }];
-if (flags.has('--in')) {
-  const inputPath = flags.get('--in');
-  const ext = inputPath.toLowerCase().split('.').pop();
-  const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : ext === 'webp' ? 'image/webp' : 'image/png';
-  parts.push({ inlineData: { mimeType: mime, data: readFileSync(inputPath).toString('base64') } });
-}
-
-async function generate(model, withModalities) {
-  const body = { contents: [{ parts }] };
-  if (withModalities) body.generationConfig = { responseModalities: ['TEXT', 'IMAGE'] };
-  const response = await fetch(`${BASE}/models/${model}:generateContent`, {
-    method: 'POST',
-    headers: { 'x-goog-api-key': key, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const json = await response.json().catch(() => ({}));
-  return { status: response.status, json };
-}
-
-const tried = [];
-const modelList = flags.has('--model') ? [flags.get('--model')] : MODELS;
-for (const model of modelList) {
-  for (const withModalities of [false, true]) {
-    const { status, json } = await generate(model, withModalities);
-    if (status === 404) {
-      tried.push(`${model}: not available to this key`);
-      break; // no point retrying the same missing model with a config tweak
-    }
-    if (status === 429) {
-      console.error(`quota exhausted on ${model} (free-tier daily/minute limit) — try again later.`);
-      process.exit(4);
-    }
-    if (status !== 200) {
-      tried.push(`${model}${withModalities ? ' (+modalities)' : ''}: HTTP ${status} ${JSON.stringify(json).slice(0, 200)}`);
-      continue;
-    }
-    const responseParts = json.candidates?.[0]?.content?.parts ?? [];
-    const image = responseParts.find((part) => part.inlineData?.data);
-    if (!image) {
-      tried.push(`${model}${withModalities ? ' (+modalities)' : ''}: 200 but no image in response`);
-      continue;
-    }
-    writeFileSync(outPath, Buffer.from(image.inlineData.data, 'base64'));
-    const text = responseParts.find((part) => part.text)?.text?.trim();
-    console.log(`saved ${outPath} (model: ${model})${text ? `\nmodel note: ${text.slice(0, 200)}` : ''}`);
-    process.exit(0);
+  const [prompt, outPath] = positional;
+  if (!prompt || !outPath) {
+    console.error('usage: node tools/generate-image.mjs "<prompt>" <out.png> [--in <image.png>] [--model <name>]');
+    process.exit(2);
   }
-}
 
-console.error('image generation failed on every model tried:');
-for (const line of tried) console.error(`  - ${line}`);
-console.error('run with --list-models to see what this key can access.');
-process.exit(1);
+  const parts = [{ text: prompt }];
+  if (flags.has('--in')) {
+    const inputPath = flags.get('--in');
+    const ext = inputPath.toLowerCase().split('.').pop();
+    const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : ext === 'webp' ? 'image/webp' : 'image/png';
+    parts.push({ inlineData: { mimeType: mime, data: readFileSync(inputPath).toString('base64') } });
+  }
+
+  const generate = async (model, withModalities) => {
+    const body = { contents: [{ parts }] };
+    if (withModalities) body.generationConfig = { responseModalities: ['TEXT', 'IMAGE'] };
+    const response = await fetch(`${BASE}/models/${model}:generateContent`, {
+      method: 'POST',
+      headers: { 'x-goog-api-key': key, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const json = await response.json().catch(() => ({}));
+    return { status: response.status, json };
+  };
+
+  const run = async () => {
+    const tried = [];
+    let sawQuota = false;
+    let zeroQuota = false;
+    const modelList = flags.has('--model') ? [flags.get('--model')] : MODELS;
+    for (const model of modelList) {
+      for (const withModalities of [false, true]) {
+        const { status, json } = await generate(model, withModalities);
+        if (status === 404) {
+          tried.push(`${model}: not available to this key`);
+          break; // no point retrying the same missing model with a config tweak
+        }
+        if (status === 429) {
+          sawQuota = true;
+          // "limit: 0" means the key's tier includes NO image generation at
+          // all (free tier, verified 2026-09) — not that usage ran out.
+          if ((json.error?.message ?? '').includes('limit: 0')) zeroQuota = true;
+          tried.push(`${model}: 429 quota`);
+          break; // maybe another model still has quota
+        }
+        if (status !== 200) {
+          tried.push(`${model}${withModalities ? ' (+modalities)' : ''}: HTTP ${status} ${JSON.stringify(json).slice(0, 200)}`);
+          continue;
+        }
+        const responseParts = json.candidates?.[0]?.content?.parts ?? [];
+        const image = responseParts.find((part) => part.inlineData?.data);
+        if (!image) {
+          tried.push(`${model}${withModalities ? ' (+modalities)' : ''}: 200 but no image in response`);
+          continue;
+        }
+        writeFileSync(outPath, Buffer.from(image.inlineData.data, 'base64'));
+        const text = responseParts.find((part) => part.text)?.text?.trim();
+        console.log(`saved ${outPath} (model: ${model})${text ? `\nmodel note: ${text.slice(0, 200)}` : ''}`);
+        return 0;
+      }
+    }
+    console.error('image generation failed on every model tried:');
+    for (const line of tried) console.error(`  - ${line}`);
+    if (zeroQuota) {
+      console.error(
+        'This API key has ZERO image-generation quota: the Gemini free tier does not include image ' +
+          'models. The owner must enable billing on the key (pay-per-image) or set up local generation. ' +
+          'Report this — do not retry.',
+      );
+    } else if (sawQuota) {
+      console.error('quota exhausted (daily/minute limit) — try again later.');
+    } else {
+      console.error('run with --list-models to see what this key can access.');
+    }
+    return sawQuota ? 4 : 1;
+  };
+
+  process.exitCode = await run();
+}
