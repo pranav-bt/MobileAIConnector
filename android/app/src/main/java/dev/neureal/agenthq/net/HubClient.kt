@@ -40,6 +40,7 @@ import java.util.concurrent.TimeUnit
 sealed interface LinkState {
     data object Unpaired : LinkState
     data object PairingInFlight : LinkState
+    data object Idle : LinkState // paired, no session attempt yet
     data object Connecting : LinkState
     data object Connected : LinkState
     data class Failed(val message: String) : LinkState
@@ -50,7 +51,7 @@ class HubClient(private val store: KV, private val deviceName: String) {
     private val http = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    val linkState = MutableStateFlow<LinkState>(if (isPaired()) LinkState.Connecting else LinkState.Unpaired)
+    val linkState = MutableStateFlow<LinkState>(if (isPaired()) LinkState.Idle else LinkState.Unpaired)
     val snapshotFlow: StateFlow<Snapshot> get() = stateFlow
     private val stateFlow = MutableStateFlow(Snapshot())
 
@@ -61,6 +62,16 @@ class HubClient(private val store: KV, private val deviceName: String) {
     fun isPaired(): Boolean = store.get("host") != null
 
     fun pairedHost(): String? = store.get("host")
+
+    // Safe to call from every activity (re)creation: only opens a session
+    // when paired and none is live or already being established.
+    fun ensureConnected() {
+        if (!isPaired()) return
+        when (linkState.value) {
+            is LinkState.Idle, is LinkState.Failed -> connect()
+            else -> return
+        }
+    }
 
     // --- pairing ------------------------------------------------------------
 
@@ -219,5 +230,24 @@ class HubClient(private val store: KV, private val deviceName: String) {
     fun respondPermission(requestId: String, decision: String) {
         val signature = identity.signApproval(decision, requestId)
         sendCommand(dev.neureal.agenthq.model.Commands.respondPermission(requestId, decision, signature))
+    }
+}
+
+// One HubClient per process: activity recreation (folding a flip phone,
+// rotation, theme changes) must never tear down or duplicate the session.
+object HubHolder {
+    @Volatile private var instance: HubClient? = null
+
+    fun get(context: android.content.Context): HubClient {
+        return instance ?: synchronized(this) {
+            instance ?: run {
+                val manufacturer = android.os.Build.MANUFACTURER ?: ""
+                val model = android.os.Build.MODEL ?: "Android phone"
+                val name = (if (model.startsWith(manufacturer, ignoreCase = true)) model else "$manufacturer $model")
+                    .trim()
+                    .replaceFirstChar { it.uppercaseChar() }
+                HubClient(dev.neureal.agenthq.store.PrefsKV(context, "agenthq"), name).also { instance = it }
+            }
+        }
     }
 }

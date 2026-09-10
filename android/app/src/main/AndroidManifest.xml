@@ -11,10 +11,13 @@
         android:usesCleartextTraffic="true"><!-- ws:// carrier only: every frame after the
         handshake is ChaCha20-Poly1305 sealed at the app layer (keys pinned at pairing) -->
 
+        <!-- configChanges: folding, rotation, and resizing must not tear down
+             the encrypted session on foldables/tablets. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:launchMode="singleTask">
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|uiMode|keyboard|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

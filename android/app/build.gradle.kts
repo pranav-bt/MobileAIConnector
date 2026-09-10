@@ -11,7 +11,7 @@ android {
 
     defaultConfig {
         applicationId = "dev.neureal.agenthq"
-        minSdk = 29
+        minSdk = 28 // ChaCha20-Poly1305 platform cipher floor — any Android 9+ device
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"

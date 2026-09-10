@@ -32,11 +32,8 @@ class MainActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        hub = HubClient(
-            dev.neureal.agenthq.store.PrefsKV(this, "agenthq"),
-            android.os.Build.MODEL ?: "Android phone",
-        )
-        if (hub.isPaired()) hub.connect()
+        hub = dev.neureal.agenthq.net.HubHolder.get(applicationContext)
+        hub.ensureConnected()
 
         // Debug convenience: adb shell am start ... -e payload_b64 <base64 of QR json>
         val prefill = intent.getStringExtra("payload_b64")?.let {
