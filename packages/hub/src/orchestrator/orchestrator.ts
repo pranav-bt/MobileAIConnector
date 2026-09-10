@@ -3,7 +3,7 @@ import type { Agent, ModelTier, PermissionRequest, Task, Team, Usage } from '@ag
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine } from '../engine/types.js';
-import { reviewWorkerReport, routeTask, type PlanStep } from './master.js';
+import { evaluateQaReport, reviewWorkerReport, routeTask, type PlanStep } from './master.js';
 import { capturePcScreen, shareFile } from '../files.js';
 import { evaluatePermission } from './policy.js';
 import { delay } from './util.js';
@@ -31,6 +31,8 @@ export class Orchestrator implements CommandHandlers {
   #pendingResolvers = new Map<string, (decision: 'approve' | 'deny') => void>();
   #controllers = new Map<string, AbortController>();
   #stopping = new Set<string>();
+  #qaSource = new Map<string, string>(); // [QA] taskId -> source taskId
+  #scaleAsked = new Set<string>(); // teams with an open scale-up card
   #routingCount = 0;
   #tokensByModel: Record<ModelTier, number> = { opus: 0, sonnet: 0, haiku: 0 };
 
@@ -285,6 +287,7 @@ export class Orchestrator implements CommandHandlers {
       const queue = this.#queues.get(team.id) ?? [];
       queue.push(taskId);
       this.#queues.set(team.id, queue);
+      this.#maybeAskToScale(team);
     } else {
       void this.#runTask(taskId, team);
     }
@@ -469,6 +472,8 @@ export class Orchestrator implements CommandHandlers {
       outcome = review.synopsis || '';
 
       if (autoQa) this.#enqueueQa(taskId, team, review.synopsis);
+      // A finished QA task gets a verdict: pass, or a remediation round.
+      if (task.title.startsWith('[QA]')) void this.#handleQaOutcome(taskId, review.synopsis);
     } catch (error) {
       if (this.#stopping.has(taskId)) {
         this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' });
@@ -528,13 +533,113 @@ export class Orchestrator implements CommandHandlers {
     });
     this.#activity('master', taskId, `QA follow-up queued for: ${source.title.slice(0, 45)}`);
 
+    this.#qaSource.set(taskId, sourceTaskId);
     if ((this.#activeWorkers.get(qa.id) ?? 0) >= qa.maxConcurrentWorkers) {
       const queue = this.#queues.get(qa.id) ?? [];
       queue.push(taskId);
       this.#queues.set(qa.id, queue);
+      this.#maybeAskToScale(qa);
     } else {
       void this.#runTask(taskId, qa, false);
     }
+  }
+
+  // QA verdict -> Meeting Room huddle -> [fix] task back to the source team.
+  // Fixes get re-QA'd; after two failed rounds it escalates to the owner.
+  async #handleQaOutcome(qaTaskId: string, qaSynopsis: string): Promise<void> {
+    const sourceId = this.#qaSource.get(qaTaskId);
+    this.#qaSource.delete(qaTaskId);
+    const source = sourceId ? this.#bus.state.tasks[sourceId] : undefined;
+    if (!source || !source.teamId) return;
+    const sourceTeam = this.#registry.get(source.teamId);
+    const qa = this.#qaTeam();
+    if (!sourceTeam || !qa) return;
+
+    const evaluation = await evaluateQaReport(this.#engine, qaSynopsis);
+    this.#recordTokens('haiku', evaluation.tokens);
+    if (evaluation.verdict === 'pass') {
+      this.#activity('master', qaTaskId, `QA verdict: pass — ${source.title.slice(0, 45)}`);
+      return;
+    }
+
+    const rootTitle = source.title.replace(/^\[fix\d*\]\s*/, '');
+    const roundMatch = source.title.match(/^\[fix(\d*)\]/);
+    const round = roundMatch ? (roundMatch[1] ? Number(roundMatch[1]) : 1) : 0;
+    if (round >= 2) {
+      this.#activity(
+        'master',
+        qaTaskId,
+        `QA still failing after ${round} fix rounds — needs your attention: ${rootTitle.slice(0, 45)}`,
+      );
+      return;
+    }
+
+    // The leads huddle in the meeting room while the handover happens.
+    const meeting = `meeting: QA findings on "${rootTitle.slice(0, 32)}"`;
+    this.#patchAgent(`${qa.id}-lead`, { status: 'reporting', activity: meeting });
+    this.#patchAgent(`${sourceTeam.id}-lead`, { status: 'reporting', activity: meeting });
+    this.#activity('master', qaTaskId, `${qa.name} and ${sourceTeam.name} leads are meeting over QA findings`);
+    setTimeout(() => {
+      for (const leadId of [`${qa.id}-lead`, `${sourceTeam.id}-lead`]) {
+        const lead = this.#bus.state.agents[leadId];
+        if (lead && lead.activity.startsWith('meeting:')) {
+          this.#patchAgent(leadId, { status: 'idle', activity: 'standing by' });
+        }
+      }
+    }, 10_000);
+
+    this.#taskCounter += 1;
+    const fixId = `t-${now().toString(36)}-${this.#taskCounter}`;
+    const fixTitle = (round === 0 ? `[fix] ${rootTitle}` : `[fix${round + 1}] ${rootTitle}`).slice(0, 60);
+    this.#publishTask({
+      id: fixId,
+      title: fixTitle,
+      detail:
+        `QA found issues in "${rootTitle}". Fix them; the work will be re-QA'd.\n\n` +
+        `Issues from QA:\n${evaluation.summary || qaSynopsis}\n\n` +
+        `Original work summary: ${source.synopsis ?? '(none)'}`,
+      projectId: source.projectId,
+      teamId: sourceTeam.id,
+      status: 'queued',
+      progressPct: 0,
+      agentIds: [],
+      synopsis: null,
+      tokensUsed: 0,
+      createdAt: now(),
+      updatedAt: now(),
+    });
+    this.#activity('master', fixId, `remediation assigned to ${sourceTeam.name}: ${fixTitle.slice(0, 45)}`);
+
+    if ((this.#activeWorkers.get(sourceTeam.id) ?? 0) >= sourceTeam.maxConcurrentWorkers) {
+      const queue = this.#queues.get(sourceTeam.id) ?? [];
+      queue.push(fixId);
+      this.#queues.set(sourceTeam.id, queue);
+      this.#maybeAskToScale(sourceTeam);
+    } else {
+      void this.#runTask(fixId, sourceTeam, true);
+    }
+  }
+
+  // Backed-up team -> an approval card (reaches the phone too): approve to
+  // raise the team's worker cap by one.
+  #maybeAskToScale(team: Team): void {
+    const queue = this.#queues.get(team.id) ?? [];
+    if (queue.length < 2 || this.#scaleAsked.has(team.id)) return;
+    this.#scaleAsked.add(team.id);
+    const request: PermissionRequest = {
+      id: `scale-${team.id}-${now().toString(36)}`,
+      taskId: queue[0] ?? '',
+      agentId: 'master',
+      teamId: team.id,
+      command: `add a temporary worker to ${team.name} (${queue.length} tasks queued)`,
+      flags: ['team scaling'],
+      reason: `${team.name} is at its cap of ${team.maxConcurrentWorkers} concurrent worker(s) with a growing queue. Approving raises the cap by one.`,
+      status: 'pending',
+      scope: 'once',
+      requestedAt: now(),
+      resolvedAt: null,
+    };
+    this.#bus.publish({ type: 'permission.updated', request });
   }
 
   // Finished workers head to the lounge; the lounge keeps only the last few.
@@ -554,6 +659,7 @@ export class Orchestrator implements CommandHandlers {
   #drainQueue(teamId: string): void {
     const team = this.#registry.get(teamId);
     const queue = this.#queues.get(teamId) ?? [];
+    if (queue.length === 0) this.#scaleAsked.delete(teamId); // eligible to ask again next backlog
     if (!team || queue.length === 0) return;
     if ((this.#activeWorkers.get(teamId) ?? 0) >= team.maxConcurrentWorkers) return;
     const nextTaskId = queue.shift();
@@ -595,6 +701,26 @@ export class Orchestrator implements CommandHandlers {
       type: 'permission.updated',
       request: { ...request, status: decision === 'approve' ? 'approved' : 'denied', resolvedAt: now() },
     });
+    // Master's scale-up ask: no worker is waiting on this — approving raises
+    // the team's worker cap by one and drains its queue.
+    if (requestId.startsWith('scale-') && request.teamId) {
+      if (decision === 'approve') {
+        const team = this.#registry.get(request.teamId);
+        const updated = team
+          ? this.#registry.update({ teamId: team.id, maxConcurrentWorkers: team.maxConcurrentWorkers + 1 })
+          : null;
+        if (updated) {
+          this.#bus.publish({ type: 'team.updated', team: updated });
+          this.#activity(
+            'master',
+            null,
+            `${updated.name} scaled up to ${updated.maxConcurrentWorkers} concurrent workers`,
+          );
+          this.#drainQueue(updated.id);
+        }
+      }
+      return;
+    }
     this.#patchAgent(request.agentId, {
       status: 'working',
       activity: decision === 'approve' ? 'approved — continuing' : 'denied — adjusting approach',

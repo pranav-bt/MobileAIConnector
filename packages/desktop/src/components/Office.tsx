@@ -40,6 +40,10 @@ export function Office(props: { state: HubState }): JSX.Element {
   const teams = Object.values(state.teams).sort((a, b) => a.createdAt - b.createdAt);
   const loungeAgents = agents.filter((agent) => agent.role === 'worker' && agent.teamId === null);
   const freelancers = agents.filter((agent) => agent.role === 'freelancer');
+  // Agents whose activity is a meeting (e.g. QA + source-team leads over QA
+  // findings) render in the Meeting room while it lasts.
+  const meetingAgents = agents.filter((agent) => agent.activity.startsWith('meeting:'));
+  const meetingTopic = meetingAgents[0]?.activity.replace(/^meeting:\s*/, '') ?? '';
   const pendingByAgent = new Map(
     Object.values(state.permissions)
       .filter((request) => request.status === 'pending')
@@ -83,22 +87,52 @@ export function Office(props: { state: HubState }): JSX.Element {
       {/* Meeting room */}
       <div className="room">
         <div className="lbl">Meeting room</div>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 80 }}>
-          <div
-            style={{
-              width: 130,
-              height: 54,
-              border: '1.5px dashed #2A3444',
-              borderRadius: 27,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          >
-            <span className="empty-note">empty</span>
-          </div>
-        </div>
-        <div className="act" style={{ color: 'var(--faint)' }}>leads gather here for cross-team tasks</div>
+        {meetingAgents.length === 0 ? (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 80 }}>
+              <div
+                style={{
+                  width: 130,
+                  height: 54,
+                  border: '1.5px dashed #2A3444',
+                  borderRadius: 27,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <span className="empty-note">empty</span>
+              </div>
+            </div>
+            <div className="act" style={{ color: 'var(--faint)' }}>leads gather here for cross-team tasks</div>
+          </>
+        ) : (
+          <>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 10,
+                minHeight: 80,
+                border: '1.5px solid rgba(232,180,74,0.45)',
+                borderRadius: 27,
+                padding: '8px 14px',
+                marginTop: 8,
+              }}
+            >
+              {meetingAgents.map((agent) => (
+                <div key={agent.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <div className="av" style={{ borderColor: 'var(--amber)' }}>
+                    {initialsOf(agent)}
+                  </div>
+                  <span className="nm">{agent.name}</span>
+                </div>
+              ))}
+            </div>
+            <div className="act" style={{ color: 'var(--amber)', marginTop: 8 }}>{meetingTopic}</div>
+          </>
+        )}
       </div>
 
       {/* Lounge */}

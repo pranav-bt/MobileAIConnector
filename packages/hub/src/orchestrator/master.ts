@@ -133,6 +133,36 @@ export async function routeTask(
   }
 }
 
+// Master's read of a QA report: does it need a remediation round?
+export async function evaluateQaReport(
+  engine: OrchestratorEngine,
+  qaSynopsis: string,
+): Promise<{ verdict: 'pass' | 'issues'; summary: string; tokens: number }> {
+  const prompt = [
+    'You are the master agent. A QA report on completed work just came in.',
+    `QA report: "${qaSynopsis}"`,
+    '',
+    'Does it indicate REAL issues that the original team must fix (bugs, failures,',
+    'meaningful performance problems)? Nitpicks and pass-with-notes count as "pass".',
+    'Reply with ONLY JSON: {"verdict": "pass" | "issues", "summary": "<the concrete issues to fix, or empty>"}',
+  ].join('\n');
+  try {
+    const { text, tokens } = await engine.complete({ prompt, model: 'haiku' });
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]) as { verdict?: unknown; summary?: unknown };
+      return {
+        verdict: parsed.verdict === 'issues' ? 'issues' : 'pass',
+        summary: typeof parsed.summary === 'string' ? parsed.summary : '',
+        tokens,
+      };
+    }
+    return { verdict: 'pass', summary: '', tokens };
+  } catch {
+    return { verdict: 'pass', summary: '', tokens: 0 };
+  }
+}
+
 export async function reviewWorkerReport(
   engine: OrchestratorEngine,
   team: Team,

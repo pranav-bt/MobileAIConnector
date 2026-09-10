@@ -262,6 +262,66 @@ try {
   }
   console.log('file channel ok: desktop -> hub -> clients');
 
+  // 12. QA remediation loop: QA finds real issues -> the QA and source-team
+  // leads meet in the Meeting room -> a [fix] task goes back to the source
+  // team -> the fix is re-QA'd and passes (no infinite loop).
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding: remediate-me sneaky bug feature' }));
+  await waitFor(
+    'remediate-me coding task done',
+    (e) => e.type === 'task.updated' && e.task.detail.startsWith('coding: remediate-me') && e.task.status === 'done',
+  );
+  await waitFor(
+    'leads meet over QA findings',
+    (e) => e.type === 'agent.updated' && e.agent.id === 'coding-lead' && e.agent.activity.startsWith('meeting:'),
+    15000,
+  );
+  const qaLeadMeeting = events.some(
+    (e) => e.type === 'agent.updated' && /qa|test/i.test(e.agent.id) && e.agent.activity.startsWith('meeting:'),
+  );
+  if (!qaLeadMeeting) fail('QA lead never joined the meeting');
+  const fixDone = await waitFor(
+    '[fix] task done on the source team',
+    (e) => e.type === 'task.updated' && e.task.title.startsWith('[fix]') && e.task.status === 'done',
+    15000,
+  );
+  if (fixDone.type !== 'task.updated' || fixDone.task.teamId !== 'coding') {
+    fail('the [fix] task should run on the coding team');
+  }
+  await waitFor(
+    're-QA passes the fix',
+    (e) => e.type === 'activity' && e.entry.message.startsWith('QA verdict: pass — [fix]'),
+    15000,
+  );
+  if (events.some((e) => e.type === 'task.updated' && e.task.title.startsWith('[fix2]'))) {
+    fail('remediation looped past the first round when the fix was clean');
+  }
+  console.log('QA remediation ok: meeting held, [fix] ran on coding, re-QA passed');
+
+  // 13. Scale-up ask: a backed-up team raises an approval card; approving it
+  // lifts the team's concurrent-worker cap by one.
+  for (let i = 1; i <= 5; i++) {
+    ws.send(encodeCommand({ type: 'task.submit', text: `coding slow-test batch item ${i}` }));
+  }
+  const scaleAsk = await waitFor(
+    'scale-up card for the coding team',
+    (e) => e.type === 'permission.updated' && e.request.id.startsWith('scale-coding-') && e.request.status === 'pending',
+    15000,
+  );
+  if (scaleAsk.type !== 'permission.updated') fail('unreachable');
+  ws.send(
+    encodeCommand({ type: 'permission.respond', requestId: scaleAsk.request.id, decision: 'approve', scope: 'once' }),
+  );
+  await waitFor(
+    'coding cap raised by approval',
+    (e) => e.type === 'team.updated' && e.team.id === 'coding' && e.team.maxConcurrentWorkers === 4,
+  );
+  await waitFor(
+    'slow-test backlog fully drained',
+    (e) => e.type === 'task.updated' && e.task.detail.includes('batch item 5') && e.task.status === 'done',
+    30000,
+  );
+  console.log('scale-up ask ok: card raised at 2 queued, approval lifted the cap, queue drained');
+
   console.log('ORCH SMOKE PASS');
   ws.close();
   await hub.close();

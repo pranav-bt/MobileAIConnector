@@ -37,11 +37,31 @@ export class MockEngine implements OrchestratorEngine {
         tokens: 12,
       };
     }
+    // QA-verdict prompts expect JSON {verdict, summary}. "remediate-me" in
+    // the QA report marks it as a real failure.
+    if (args.prompt.includes('"verdict"')) {
+      const failed = args.prompt.includes('remediate-me') || args.prompt.includes('ISSUES');
+      return {
+        text: JSON.stringify(
+          failed
+            ? { verdict: 'issues', summary: 'Mock QA issues: the remediate-me bug is real, fix it.' }
+            : { verdict: 'pass', summary: '' },
+        ),
+        tokens: 6,
+      };
+    }
     // Lead-review prompts expect JSON {synopsis, memoryNote}.
     if (args.prompt.includes('"synopsis"')) {
       const memoryNote = args.prompt.toLowerCase().includes('remember') ? 'Mock lesson: remember this.' : null;
+      // Carry the remediation marker through the review so a [QA] task's
+      // synopsis can trip the verdict step — but only on its first QA round
+      // ([fix] work reviews clean, ending the loop).
+      const synopsis =
+        args.prompt.includes('remediate-me') && args.prompt.includes('[QA]') && !args.prompt.includes('[fix')
+          ? 'ISSUES: QA found the remediate-me bug in the feature.'
+          : 'Mock lead review: work checked, looks complete.';
       return {
-        text: JSON.stringify({ synopsis: 'Mock lead review: work checked, looks complete.', memoryNote }),
+        text: JSON.stringify({ synopsis, memoryNote }),
         tokens: 9,
       };
     }
@@ -79,6 +99,16 @@ export class MockEngine implements OrchestratorEngine {
       });
       if (signal?.aborted) throw new Error('aborted');
       callbacks.onActivity(decision === 'approve' ? 'mock: package installed' : 'mock: denied — working around it');
+    }
+    // "slow-test" keeps the worker busy long enough for queues to build up.
+    if (taskText.includes('slow-test')) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 1500);
+        signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
     }
     if (signal?.aborted) throw new Error('aborted');
     callbacks.onTokens(42);
