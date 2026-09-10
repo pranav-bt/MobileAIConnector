@@ -104,6 +104,17 @@ data class Snapshot(
     val usage: Usage = Usage(),
 )
 
+@Serializable
+data class SharedFile(
+    val id: String,
+    val name: String,
+    val mimeType: String = "application/octet-stream",
+    val bytesB64: String,
+    val from: String = "desktop",
+    val taskId: String? = null,
+    val at: Double = 0.0,
+)
+
 // One reducer-friendly event decoded from the envelope.
 sealed interface HubEvent {
     data class SnapshotEvent(val snapshot: Snapshot) : HubEvent
@@ -116,6 +127,7 @@ sealed interface HubEvent {
     data class ProjectUpdated(val project: Project) : HubEvent
     data class ProjectRemoved(val projectId: String) : HubEvent
     data class UsageUpdated(val usage: Usage) : HubEvent
+    data class FileShared(val file: SharedFile) : HubEvent
     data object Ignored : HubEvent
 }
 
@@ -134,6 +146,7 @@ fun decodeEnvelope(raw: String): HubEvent? {
             "project.updated" -> HubEvent.ProjectUpdated(json.decodeFromJsonElement(event["project"]!!))
             "project.removed" -> HubEvent.ProjectRemoved(event["projectId"]!!.jsonPrimitive.content)
             "usage.updated" -> HubEvent.UsageUpdated(json.decodeFromJsonElement(event["usage"]!!))
+            "file.shared" -> HubEvent.FileShared(json.decodeFromJsonElement(event["file"]!!))
             else -> HubEvent.Ignored
         }
     } catch (error: Exception) {
@@ -152,6 +165,10 @@ object Commands {
     fun submitTask(text: String): JsonObject = buildJsonObject {
         put("type", "task.submit")
         put("text", text)
+    }
+
+    fun captureScreen(): JsonObject = buildJsonObject {
+        put("type", "screen.capture")
     }
 
     fun respondPermission(requestId: String, decision: String, signatureB64: String): JsonObject = buildJsonObject {

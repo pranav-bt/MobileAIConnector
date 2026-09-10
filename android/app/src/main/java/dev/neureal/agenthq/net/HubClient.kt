@@ -9,6 +9,7 @@ import dev.neureal.agenthq.crypto.deriveSessionKeys
 import dev.neureal.agenthq.crypto.unb64
 import dev.neureal.agenthq.model.HubEvent
 import dev.neureal.agenthq.model.PairingPayload
+import dev.neureal.agenthq.model.SharedFile
 import dev.neureal.agenthq.model.Snapshot
 import dev.neureal.agenthq.model.decodeEnvelope
 import dev.neureal.agenthq.model.json
@@ -54,6 +55,8 @@ class HubClient(private val store: KV, private val deviceName: String) {
     val linkState = MutableStateFlow<LinkState>(if (isPaired()) LinkState.Idle else LinkState.Unpaired)
     val snapshotFlow: StateFlow<Snapshot> get() = stateFlow
     private val stateFlow = MutableStateFlow(Snapshot())
+    // Files pushed from the PC (screenshots, worker outputs) — last few kept.
+    val filesFlow = MutableStateFlow<List<SharedFile>>(emptyList())
 
     private var socket: WebSocket? = null
     private var crypto: FrameCrypto? = null
@@ -191,6 +194,7 @@ class HubClient(private val store: KV, private val deviceName: String) {
                         s.copy(projects = s.projects.filter { it.id != event.projectId })
                     }
                     is HubEvent.UsageUpdated -> stateFlow.value = stateFlow.value.copy(usage = event.usage)
+                    is HubEvent.FileShared -> filesFlow.value = (filesFlow.value + event.file).takeLast(6)
                     else -> {}
                 }
             }

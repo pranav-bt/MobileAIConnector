@@ -3,8 +3,10 @@ import type { Agent, ModelTier, PermissionRequest, Task, Team, Usage } from '@ag
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine } from '../engine/types.js';
-import { reviewWorkerReport, routeTask } from './master.js';
+import { reviewWorkerReport, routeTask, type PlanStep } from './master.js';
+import { capturePcScreen, shareFile } from '../files.js';
 import { evaluatePermission } from './policy.js';
+import { delay } from './util.js';
 import type { PermissionMode } from '../config.js';
 import type { TeamRegistry } from './teams.js';
 import type { ProjectRegistry } from './projects.js';
@@ -35,6 +37,7 @@ export class Orchestrator implements CommandHandlers {
   #projects: ProjectRegistry;
   #policy: { mode: PermissionMode };
   #onPermissionModeChange: (mode: PermissionMode) => void;
+  #outboxDir: string;
 
   constructor(
     bus: HubBus,
@@ -44,6 +47,7 @@ export class Orchestrator implements CommandHandlers {
     workspaceDir: string,
     policy: { mode: PermissionMode } = { mode: 'auto' },
     onPermissionModeChange: (mode: PermissionMode) => void = () => {},
+    outboxDir = '',
   ) {
     this.#bus = bus;
     this.#engine = engine;
@@ -52,6 +56,22 @@ export class Orchestrator implements CommandHandlers {
     this.#workspaceDir = workspaceDir;
     this.#policy = policy;
     this.#onPermissionModeChange = onPermissionModeChange;
+    this.#outboxDir = outboxDir;
+  }
+
+  // Every completed code task gets a QA follow-up; make sure a QA team exists.
+  #ensureQaTeam(): void {
+    const existing = this.#registry.all().find((team) => /\bqa\b|test/i.test(team.id) || /\bqa\b|test/i.test(team.name));
+    if (existing) return;
+    this.createTeam({
+      name: 'QA team',
+      charter:
+        "Tests completed work: runs the project's REAL tests and the app itself in its proper environment " +
+        '(build it, launch it, exercise the feature). Verifies correctness and edge cases, hunts bugs, and ' +
+        'ALWAYS checks performance. Reports pass/fail with concrete findings.',
+      allowedTools: ['read', 'bash', 'git'],
+      blockedTools: [],
+    });
   }
 
   init(): void {
@@ -85,6 +105,7 @@ export class Orchestrator implements CommandHandlers {
       tokensUsed: 0,
       updatedAt: now(),
     });
+    this.#ensureQaTeam();
   }
 
   // Restore token counters from a persisted usage snapshot (per-tier split
@@ -244,6 +265,13 @@ export class Orchestrator implements CommandHandlers {
     }
 
     const project = this.#projects.get(decision.projectId) ?? this.#projects.defaultProject();
+
+    if (decision.steps) {
+      void this.#runChain(taskId, decision.steps, project.id, decision.title);
+      this.#masterStatus();
+      return;
+    }
+
     this.#patchTask(taskId, { teamId: team.id, projectId: project.id, title: decision.title });
     this.#activity(
       'master',
@@ -261,6 +289,57 @@ export class Orchestrator implements CommandHandlers {
       void this.#runTask(taskId, team);
     }
     this.#masterStatus();
+  }
+
+  // Sequenced multi-team plan: each step runs after the previous one and
+  // receives its synopsis as a handover; QA follows only the final step.
+  async #runChain(firstTaskId: string, steps: PlanStep[], projectId: string, overallTitle: string): Promise<void> {
+    this.#activity(
+      'master',
+      firstTaskId,
+      `plan for "${overallTitle}": ${steps.map((step, index) => `${index + 1}. ${this.#registry.get(step.teamId)?.name ?? step.teamId}`).join(' → ')}`,
+    );
+
+    let handover: string | null = null;
+    for (let index = 0; index < steps.length; index++) {
+      const step = steps[index]!;
+      const team = this.#registry.get(step.teamId);
+      if (!team) break;
+      const isLast = index === steps.length - 1;
+      const detail = handover
+        ? `${step.instruction}\n\nHandover from the previous step (${handover}`
+        : step.instruction;
+
+      const taskId = index === 0 ? firstTaskId : `t-${now().toString(36)}-${++this.#taskCounter}`;
+      const record: Task = {
+        id: taskId,
+        title: `Step ${index + 1}/${steps.length} — ${step.title}`.slice(0, 60),
+        detail,
+        projectId,
+        teamId: team.id,
+        status: 'queued',
+        progressPct: 0,
+        agentIds: [],
+        synopsis: null,
+        tokensUsed: 0,
+        createdAt: this.#bus.state.tasks[taskId]?.createdAt ?? now(),
+        updatedAt: now(),
+      };
+      this.#publishTask(record);
+
+      // Respect the team's concurrency cap without jumping its queue forever.
+      while ((this.#activeWorkers.get(team.id) ?? 0) >= team.maxConcurrentWorkers) {
+        if (this.#stopping.has(taskId) || ['paused', 'failed'].includes(this.#bus.state.tasks[taskId]?.status ?? '')) return;
+        await delay(2000);
+      }
+      const synopsis = await this.#runTask(taskId, team, isLast);
+      if (synopsis === null) {
+        this.#activity('master', taskId, `plan halted at step ${index + 1}/${steps.length}`);
+        return;
+      }
+      handover = `${team.name} team): ${synopsis.replace(/\s+/g, ' ').slice(0, 600)}`;
+    }
+    this.#activity('master', null, `plan complete: ${overallTitle}`);
   }
 
   // The worker's context, cheapest layer first: task text, recent synopses
@@ -290,12 +369,20 @@ export class Orchestrator implements CommandHandlers {
           "Keep all new files inside this project's workspace; brand-new projects or standalone tools belong only under those roots.",
       );
     }
+    if (this.#outboxDir) {
+      sections.push(
+        `To send a file or screenshot to the owner's phone, copy it into: ${this.#outboxDir} (it is pushed automatically and removed).`,
+      );
+    }
     return sections.join('\n');
   }
 
-  async #runTask(taskId: string, team: Team): Promise<void> {
+  // Returns the final synopsis on success, or null if the task failed or was
+  // stopped (chains use this to decide whether to continue).
+  async #runTask(taskId: string, team: Team, autoQa = true): Promise<string | null> {
     const task = this.#bus.state.tasks[taskId];
-    if (!task) return;
+    if (!task) return null;
+    let outcome: string | null = null;
     const project = (task.projectId ? this.#projects.get(task.projectId) : undefined) ?? this.#projects.defaultProject();
 
     this.#activeWorkers.set(team.id, (this.#activeWorkers.get(team.id) ?? 0) + 1);
@@ -363,7 +450,7 @@ export class Orchestrator implements CommandHandlers {
       if (this.#stopping.has(taskId)) {
         this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' });
         this.#patchAgent(workerId, { status: 'idle', activity: 'task stopped', taskId: null });
-        return;
+        return null;
       }
 
       // Lead review: the worker's report becomes the synopsis the owner reads.
@@ -379,6 +466,9 @@ export class Orchestrator implements CommandHandlers {
 
       this.#patchTask(taskId, { status: 'done', progressPct: 100, synopsis: review.synopsis || null });
       this.#activity(`${team.id}-lead`, taskId, `report filed: ${task.title.slice(0, 50)}`);
+      outcome = review.synopsis || '';
+
+      if (autoQa) this.#enqueueQa(taskId, team, review.synopsis);
     } catch (error) {
       if (this.#stopping.has(taskId)) {
         this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' });
@@ -396,6 +486,54 @@ export class Orchestrator implements CommandHandlers {
       this.#activeWorkers.set(team.id, Math.max(0, (this.#activeWorkers.get(team.id) ?? 1) - 1));
       this.#masterStatus();
       this.#drainQueue(team.id);
+    }
+    return outcome;
+  }
+
+  #qaTeam(): Team | null {
+    return (
+      this.#registry.all().find((team) => /\bqa\b|test/i.test(team.id) || /\bqa\b|test/i.test(team.name)) ?? null
+    );
+  }
+
+  // Completed code work always gets a QA pass: real tests, the real app in
+  // its real environment, correctness AND performance.
+  #enqueueQa(sourceTaskId: string, sourceTeam: Team, synopsis: string): void {
+    const qa = this.#qaTeam();
+    const source = this.#bus.state.tasks[sourceTaskId];
+    if (!qa || !source) return;
+    if (sourceTeam.id === qa.id || source.title.startsWith('[QA]')) return;
+    // Only work that can have touched code/system state needs QA.
+    if (!sourceTeam.allowedTools.some((tool) => tool === 'edit' || tool === 'bash')) return;
+
+    this.#taskCounter += 1;
+    const taskId = `t-${now().toString(36)}-${this.#taskCounter}`;
+    this.#publishTask({
+      id: taskId,
+      title: `[QA] ${source.title}`.slice(0, 60),
+      detail:
+        `QA the completed task "${source.title}" in this project. What was reported done: ${synopsis || '(no synopsis)'}\n\n` +
+        "Run the project's REAL tests, and where applicable actually run the app in its proper environment " +
+        '(build it, launch it, exercise the changed feature). Verify correctness and edge cases, hunt for bugs, ' +
+        'and ALWAYS check performance. Report pass/fail with concrete findings.',
+      projectId: source.projectId,
+      teamId: qa.id,
+      status: 'queued',
+      progressPct: 0,
+      agentIds: [],
+      synopsis: null,
+      tokensUsed: 0,
+      createdAt: now(),
+      updatedAt: now(),
+    });
+    this.#activity('master', taskId, `QA follow-up queued for: ${source.title.slice(0, 45)}`);
+
+    if ((this.#activeWorkers.get(qa.id) ?? 0) >= qa.maxConcurrentWorkers) {
+      const queue = this.#queues.get(qa.id) ?? [];
+      queue.push(taskId);
+      this.#queues.set(qa.id, queue);
+    } else {
+      void this.#runTask(taskId, qa, false);
     }
   }
 
@@ -537,6 +675,18 @@ export class Orchestrator implements CommandHandlers {
       const message = error instanceof Error ? error.message : String(error);
       this.#activity('master', null, `project "${input.name}" ${message}`);
     }
+  }
+
+  sendFile(name: string, mimeType: string, bytesB64: string): void {
+    try {
+      shareFile(this.#bus, { name, mimeType, bytes: Buffer.from(bytesB64, 'base64'), from: 'desktop' });
+    } catch (error) {
+      this.#activity('master', null, `file "${name}" could not be shared: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
+  captureScreen(): void {
+    void capturePcScreen(this.#bus);
   }
 
   setPermissionMode(mode: PermissionMode): void {

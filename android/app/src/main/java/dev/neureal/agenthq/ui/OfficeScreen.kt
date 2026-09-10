@@ -48,6 +48,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -254,6 +255,26 @@ fun MainScreen(
             }
             VoiceOverlay(Modifier.align(Alignment.BottomCenter))
         }
+    }
+}
+
+private fun saveToDownloads(context: android.content.Context, name: String, mimeType: String, bytes: ByteArray): Boolean {
+    return try {
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Downloads.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.Downloads.MIME_TYPE, mimeType)
+            }
+            val uri = context.contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: return false
+            context.contentResolver.openOutputStream(uri)?.use { it.write(bytes) } ?: return false
+        } else {
+            val dir = context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS) ?: return false
+            java.io.File(dir, name).writeBytes(bytes)
+        }
+        true
+    } catch (error: Exception) {
+        false
     }
 }
 
@@ -506,6 +527,69 @@ private fun LinkTab(
                     if (connected) "linked to ${pairedHost ?: "?"} · end-to-end encrypted, keys pinned" else "reconnecting to ${pairedHost ?: "?"}…",
                     color = HQ.text2, fontSize = 12.sp, lineHeight = 17.sp,
                 )
+            }
+        }
+
+        item {
+            val hub = dev.neureal.agenthq.net.HubHolder.get(context.applicationContext)
+            val files by hub.filesFlow.collectAsState()
+            Card {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SectionLabel("Files from the PC")
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "request PC screenshot",
+                        color = HQ.accent, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                        modifier = Modifier
+                            .clickable(enabled = connected) {
+                                hub.sendCommand(dev.neureal.agenthq.model.Commands.captureScreen())
+                                android.widget.Toast.makeText(context, "Asking the PC for a screenshot…", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                            .padding(4.dp),
+                    )
+                }
+                if (files.isEmpty()) {
+                    Text(
+                        "screenshots and files sent by the PC or the agents appear here",
+                        color = HQ.ghost, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                    )
+                }
+                files.reversed().forEach { file ->
+                    val bytes = remember(file.id) { try { dev.neureal.agenthq.crypto.unb64(file.bytesB64) } catch (e: Exception) { ByteArray(0) } }
+                    Column(
+                        modifier = Modifier.fillMaxWidth().background(HQ.panel2, RoundedCornerShape(8.dp)).padding(9.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        if (file.mimeType.startsWith("image/") && bytes.isNotEmpty()) {
+                            val bitmap = remember(file.id) {
+                                try { android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) } catch (e: Exception) { null }
+                            }
+                            if (bitmap != null) {
+                                androidx.compose.foundation.Image(
+                                    bitmap = bitmap.asImageBitmap(),
+                                    contentDescription = file.name,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(file.name, color = HQ.text, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                Text("${file.from} · ${bytes.size / 1024} KB", color = HQ.muted, fontSize = 9.5.sp, fontFamily = FontFamily.Monospace)
+                            }
+                            Text(
+                                "save",
+                                color = HQ.accent, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                                modifier = Modifier
+                                    .clickable {
+                                        val saved = saveToDownloads(context, file.name, file.mimeType, bytes)
+                                        android.widget.Toast.makeText(context, if (saved) "Saved to Downloads" else "Save failed", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                    .padding(6.dp),
+                            )
+                        }
+                    }
+                }
             }
         }
 

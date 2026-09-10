@@ -99,6 +99,29 @@ class LinkService : Service() {
 
         if (collecting) return START_STICKY
         collecting = true
+
+        // Buzz when the PC pushes a file (screenshot, worker output).
+        scope.launch {
+            var seenFiles = hub.filesFlow.value.map { it.id }.toSet()
+            hub.filesFlow.collect { files ->
+                val manager = getSystemService(NotificationManager::class.java)
+                for (file in files) {
+                    if (file.id in seenFiles) continue
+                    manager.notify(
+                        file.id.hashCode(),
+                        NotificationCompat.Builder(this@LinkService, CHANNEL_APPROVALS)
+                            .setSmallIcon(R.drawable.ic_launcher_foreground)
+                            .setContentTitle("File from HQ: ${file.name}")
+                            .setContentText(if (file.from == "pc-screen") "PC screenshot" else "sent by ${file.from}")
+                            .setAutoCancel(true)
+                            .setContentIntent(openAppIntent())
+                            .build(),
+                    )
+                }
+                seenFiles = files.map { it.id }.toSet()
+            }
+        }
+
         scope.launch {
             hub.snapshotFlow.collect { snapshot ->
                 val pending = snapshot.permissions.filter { it.status == "pending" }

@@ -6,6 +6,12 @@ import type { OrchestratorEngine } from '../engine/types.js';
 // heuristics if the call or the parse fails, so a submitted task is never
 // lost.
 
+export interface PlanStep {
+  teamId: string;
+  title: string;
+  instruction: string;
+}
+
 export interface RoutingDecision {
   teamId: string;
   projectId: string;
@@ -13,6 +19,9 @@ export interface RoutingDecision {
   reason: string;
   tokens: number;
   fallback: boolean;
+  // Present when the master decomposed the task into a sequenced multi-team
+  // plan (each step gets the previous step's synopsis as a handover).
+  steps: PlanStep[] | null;
 }
 
 const MASTER_MODEL: ModelTier = 'opus';
@@ -38,8 +47,15 @@ function routingPrompt(teams: Team[], projects: Project[], defaultProjectId: str
     '',
     `Task: "${text}"`,
     '',
-    'Reply with ONLY a JSON object, no other text:',
+    'Reply with ONLY a JSON object, no other text.',
+    'Single-team task (the common case):',
     '{"teamId": "<team id>", "projectId": "<project id>", "title": "<short imperative title, max 60 chars>", "reason": "<one sentence>"}',
+    '',
+    'ONLY if the task genuinely needs teams working in sequence (e.g., design',
+    'produces a spec first, then coding implements it), reply instead with a',
+    'plan of 2-3 steps — each step runs after the previous one finishes and',
+    'receives its report as a handover:',
+    '{"projectId": "<project id>", "title": "<overall title>", "reason": "<one sentence>", "plan": [{"teamId": "<team id>", "title": "<step title>", "instruction": "<what this team should do>"}, ...]}',
   ].join('\n');
 }
 
@@ -73,19 +89,36 @@ export async function routeTask(
       projectId?: unknown;
       title?: unknown;
       reason?: unknown;
+      plan?: unknown;
     };
+    const routedProject = projects.find((candidate) => candidate.id === parsed.projectId);
+    // An explicit @project from the user always beats the model's pick.
+    const projectId = forcedProjectId ?? routedProject?.id ?? defaultProjectId;
+    const title =
+      typeof parsed.title === 'string' && parsed.title.trim() ? parsed.title.trim().slice(0, 60) : fallbackTitle;
+    const reason = typeof parsed.reason === 'string' ? parsed.reason : '';
+
+    if (Array.isArray(parsed.plan) && parsed.plan.length >= 2) {
+      const steps: PlanStep[] = [];
+      for (const raw of parsed.plan.slice(0, 3)) {
+        if (typeof raw !== 'object' || raw === null) continue;
+        const step = raw as { teamId?: unknown; title?: unknown; instruction?: unknown };
+        const team = teams.find((candidate) => candidate.id === step.teamId);
+        if (!team || typeof step.instruction !== 'string' || !step.instruction.trim()) continue;
+        steps.push({
+          teamId: team.id,
+          title: typeof step.title === 'string' && step.title.trim() ? step.title.trim().slice(0, 50) : team.name,
+          instruction: step.instruction.trim(),
+        });
+      }
+      if (steps.length >= 2) {
+        return { teamId: steps[0]!.teamId, projectId, title, reason, tokens, fallback: false, steps };
+      }
+    }
+
     const team = teams.find((candidate) => candidate.id === parsed.teamId);
     if (!team) throw new Error(`routing picked unknown team: ${String(parsed.teamId)}`);
-    const routedProject = projects.find((candidate) => candidate.id === parsed.projectId);
-    return {
-      teamId: team.id,
-      // An explicit @project from the user always beats the model's pick.
-      projectId: forcedProjectId ?? routedProject?.id ?? defaultProjectId,
-      title: typeof parsed.title === 'string' && parsed.title.trim() ? parsed.title.trim().slice(0, 60) : fallbackTitle,
-      reason: typeof parsed.reason === 'string' ? parsed.reason : '',
-      tokens,
-      fallback: false,
-    };
+    return { teamId: team.id, projectId, title, reason, tokens, fallback: false, steps: null };
   } catch (error) {
     console.warn('[orchestrator] routing call failed, using keyword fallback:', error);
     return {
@@ -95,6 +128,7 @@ export async function routeTask(
       reason: 'keyword fallback',
       tokens: 0,
       fallback: true,
+      steps: null,
     };
   }
 }

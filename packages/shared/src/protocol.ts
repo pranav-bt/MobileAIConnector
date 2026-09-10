@@ -71,6 +71,15 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('project.remove'), projectId: z.string() }),
   z.object({ type: z.literal('permissions.set'), mode: z.enum(['auto', 'strict']) }),
+  // Push a file to the phone (from the desktop UI).
+  z.object({
+    type: z.literal('file.send'),
+    name: z.string().min(1),
+    mimeType: z.string(),
+    bytesB64: z.string().min(1),
+  }),
+  // Phone asks the hub for a screenshot of the PC screen.
+  z.object({ type: z.literal('screen.capture') }),
   // Security commands — the hub only honors these from trusted local
   // clients, never from a device session.
   z.object({ type: z.literal('pairing.start') }),

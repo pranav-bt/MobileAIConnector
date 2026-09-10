@@ -11,6 +11,7 @@ export function startEventLog(bus: HubBus, dataDir: string): () => void {
   mkdirSync(dataDir, { recursive: true });
   const logPath = join(dataDir, 'events.jsonl');
   return bus.onEvent((event: HubEvent) => {
+    if (event.type === 'file.shared') return; // transient payloads stay out of the log
     try {
       appendFileSync(logPath, encodeEvent(event) + '\n');
     } catch (error) {

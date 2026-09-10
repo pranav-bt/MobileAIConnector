@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
-import type { ClientCommand, HubState } from '@agent-hq/shared';
+import { MAX_SHARED_FILE_BYTES, type ClientCommand, type HubState } from '@agent-hq/shared';
 
 export function SecurityPage(props: {
   state: HubState;
@@ -8,6 +8,23 @@ export function SecurityPage(props: {
 }): JSX.Element {
   const { security } = props.state;
   const [qrUrl, setQrUrl] = useState<string | null>(null);
+  const [sendNote, setSendNote] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  const sendFileToPhone = (file: File): void => {
+    if (file.size > MAX_SHARED_FILE_BYTES) {
+      setSendNote(`"${file.name}" is over the 6MB limit`);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result ?? '');
+      const bytesB64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      props.send({ type: 'file.send', name: file.name, mimeType: file.type || 'application/octet-stream', bytesB64 });
+      setSendNote(`sent "${file.name}" to the phone`);
+    };
+    reader.readAsDataURL(file);
+  };
 
   useEffect(() => {
     let alive = true;
@@ -50,7 +67,27 @@ export function SecurityPage(props: {
             <div className="act" style={{ marginTop: 4, color: 'var(--faint)' }}>
               approvals from this device must be signed with its key — the hub verifies before anything runs
             </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <input
+                  ref={fileInput}
+                  type="file"
+                  hidden
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) sendFileToPhone(file);
+                    event.target.value = '';
+                  }}
+                />
+                <button
+                  className="btn approve"
+                  style={{ flexGrow: 0, padding: '8px 16px' }}
+                  onClick={() => fileInput.current?.click()}
+                >
+                  Send file to phone
+                </button>
+                {sendNote && <span className="act">{sendNote}</span>}
+              </div>
               <button
                 className="btn deny"
                 style={{ flexGrow: 0, padding: '8px 16px', borderColor: 'rgba(229,104,92,0.5)', color: 'var(--red)' }}

@@ -216,6 +216,52 @@ try {
   await waitFor('auto mode restored', (e) => e.type === 'hub.updated' && e.info.permissionMode === 'auto');
   console.log('strict policy ok: edit asked, approval completed, auto restored');
 
+  // 9. Interdisciplinary: QA team auto-exists; a coding task gets a QA
+  // follow-up that runs in the same project.
+  const qaTeam = snapshot.snapshot.teams.find((team) => /qa|test/i.test(team.id)) ??
+    (await waitFor('qa team seeded', (e) => e.type === 'team.updated' && /qa|test/i.test(e.team.id)) as never);
+  const codingDone = await waitFor(
+    'earlier coding task done',
+    (e) => e.type === 'task.updated' && e.task.teamId === 'coding' && e.task.status === 'done',
+  );
+  if (codingDone.type !== 'task.updated') fail('unreachable');
+  const qaFollowUp = await waitFor(
+    'QA follow-up created and completed',
+    (e) => e.type === 'task.updated' && e.task.title.startsWith('[QA]') && e.task.status === 'done',
+  );
+  if (qaFollowUp.type !== 'task.updated') fail('unreachable');
+  if (!/qa|test/i.test(qaFollowUp.task.teamId ?? '')) fail('QA follow-up not assigned to the QA team');
+  if (events.some((e) => e.type === 'task.updated' && e.task.title.startsWith('[QA] [QA]'))) {
+    fail('QA recursion: QA tasks must not spawn QA tasks');
+  }
+  console.log('auto-QA ok: follow-up ran on the QA team, no recursion');
+
+  // 10. Sequenced multi-team plan with handover.
+  ws.send(encodeCommand({ type: 'task.submit', text: 'multi-step: first design then build the widget' }));
+  const step1 = await waitFor(
+    'plan step 1 (design) done',
+    (e) => e.type === 'task.updated' && e.task.title.startsWith('Step 1/2') && e.task.status === 'done',
+  );
+  if (step1.type !== 'task.updated' || step1.task.teamId !== 'design') fail('step 1 should run on design');
+  const step2 = await waitFor(
+    'plan step 2 (coding) done with handover',
+    (e) => e.type === 'task.updated' && e.task.title.startsWith('Step 2/2') && e.task.status === 'done',
+    15000,
+  );
+  if (step2.type !== 'task.updated' || step2.task.teamId !== 'coding') fail('step 2 should run on coding');
+  if (!step2.task.detail.includes('Handover from the previous step')) fail('step 2 missing the handover context');
+  console.log('multi-team plan ok: design -> coding with handover');
+
+  // 11. File channel: a sent file comes back as a file.shared event.
+  ws.send(
+    encodeCommand({ type: 'file.send', name: 'note.txt', mimeType: 'text/plain', bytesB64: Buffer.from('hello phone').toString('base64') }),
+  );
+  const shared = await waitFor('file.shared broadcast', (e) => e.type === 'file.shared' && e.file.name === 'note.txt');
+  if (shared.type !== 'file.shared' || Buffer.from(shared.file.bytesB64, 'base64').toString() !== 'hello phone') {
+    fail('file payload did not round-trip');
+  }
+  console.log('file channel ok: desktop -> hub -> clients');
+
   console.log('ORCH SMOKE PASS');
   ws.close();
   await hub.close();

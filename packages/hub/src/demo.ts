@@ -286,6 +286,21 @@ export function startDemo(bus: HubBus, options: DemoOptions = {}): {
     setPermissionMode() {
       // demo mode has no real permission gate to configure
     },
+
+    sendFile(name, mimeType, bytesB64) {
+      // Echo through so the phone/desktop file path is testable in demo mode.
+      bus.publish({
+        type: 'file.shared',
+        file: { id: `f-${now()}`, name, mimeType, bytesB64, from: 'desktop', taskId: null, at: now() },
+      });
+    },
+
+    captureScreen() {
+      bus.publish({
+        type: 'activity',
+        entry: { agentId: 'master', taskId: null, message: 'screen capture is available in engine mode', at: now() },
+      });
+    },
   };
 
   return {

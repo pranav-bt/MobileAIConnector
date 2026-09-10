@@ -157,6 +157,21 @@ export const ActivityEntrySchema = z.object({
 });
 export type ActivityEntry = z.infer<typeof ActivityEntrySchema>;
 
+// A file pushed to clients (phone foremost): a PC screenshot, a file sent
+// from the desktop, or something a worker dropped into the outbox. Transient
+// — never part of state or the event log.
+export const SharedFileSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  mimeType: z.string(),
+  bytesB64: z.string(),
+  from: z.enum(['desktop', 'worker', 'pc-screen']),
+  taskId: z.string().nullable(),
+  at: z.number(),
+});
+export type SharedFile = z.infer<typeof SharedFileSchema>;
+export const MAX_SHARED_FILE_BYTES = 6 * 1024 * 1024;
+
 // Clients keep the most recent activity entries in state (capped) so task
 // detail views and history have something to show.
 export const ACTIVITY_LOG_CAP = 200;
@@ -208,5 +223,6 @@ export const HubEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('security.updated'), security: SecurityStateSchema }),
   z.object({ type: z.literal('hub.updated'), info: HubInfoSchema }),
   z.object({ type: z.literal('activity'), entry: ActivityEntrySchema }),
+  z.object({ type: z.literal('file.shared'), file: SharedFileSchema }),
 ]);
 export type HubEvent = z.infer<typeof HubEventSchema>;

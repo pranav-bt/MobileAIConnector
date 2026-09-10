@@ -10,8 +10,23 @@ export class MockEngine implements OrchestratorEngine {
       const projectIds = [...args.prompt.matchAll(/^\* project: ([a-z0-9-]+)/gm)].map((match) => match[1] ?? '');
       const taskMatch = args.prompt.match(/Task: "([\s\S]*?)"\n/);
       const text = (taskMatch?.[1] ?? '').toLowerCase();
-      const teamId = teamIds.find((id) => id && text.includes(id)) ?? teamIds[0] ?? 'coding';
       const projectId = projectIds.find((id) => id && text.includes(id)) ?? projectIds[0] ?? '';
+      // "multi-step" exercises the sequenced multi-team plan path.
+      if (text.includes('multi-step')) {
+        return {
+          text: JSON.stringify({
+            projectId,
+            title: 'Multi-step feature',
+            reason: 'mock plan',
+            plan: [
+              { teamId: 'design', title: 'Design pass', instruction: 'design the feature' },
+              { teamId: 'coding', title: 'Build pass', instruction: 'implement the design' },
+            ],
+          }),
+          tokens: 15,
+        };
+      }
+      const teamId = teamIds.find((id) => id && text.includes(id)) ?? teamIds[0] ?? 'coding';
       return {
         text: JSON.stringify({
           teamId,
