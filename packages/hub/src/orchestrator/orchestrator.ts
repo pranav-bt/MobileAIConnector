@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import type { Agent, ModelTier, PermissionRequest, Task, Team, Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
@@ -134,6 +135,14 @@ export class Orchestrator implements CommandHandlers {
         modelMixPct: { opus: pct('opus'), sonnet: pct('sonnet'), haiku: pct('haiku') },
       },
     });
+  }
+
+  // Workspace roots (minus the one the worker is already inside) become
+  // additional tool directories, so cross-project searches see full trees.
+  #extraDirs(cwd: string): string[] {
+    return this.#projects.roots
+      .map((root) => root.path)
+      .filter((path) => existsSync(path) && !cwd.toLowerCase().startsWith(path.toLowerCase()));
   }
 
   #masterStatus(): void {
@@ -275,10 +284,10 @@ export class Orchestrator implements CommandHandlers {
       if (teamMemory) sections.push('Team notes:', teamMemory);
     }
     if (this.#projects.roots.length > 0) {
+      const rootList = this.#projects.roots.map((root) => `${root.path} (${root.label})`).join(' · ');
       sections.push(
-        'File locations policy: keep all new files inside this project\'s workspace. Brand-new projects or standalone tools belong ONLY under: ' +
-          this.#projects.roots.map((root) => `${root.path} (${root.label})`).join(' · ') +
-          '.',
+        `File locations policy: you have full READ/SEARCH access to everything under these roots, including ALL subdirectories at any depth — recurse into them when searching: ${rootList}. ` +
+          "Keep all new files inside this project's workspace; brand-new projects or standalone tools belong only under those roots.",
       );
     }
     return sections.join('\n');
@@ -319,6 +328,7 @@ export class Orchestrator implements CommandHandlers {
         team,
         model: team.workerModel,
         cwd: project.workspaceDir || this.#workspaceDir,
+        extraDirs: this.#extraDirs(project.workspaceDir || this.#workspaceDir),
         signal: controller.signal,
         callbacks: {
           onActivity: (message) => {

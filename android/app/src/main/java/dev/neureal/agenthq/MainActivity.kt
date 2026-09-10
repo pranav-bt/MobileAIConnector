@@ -1,9 +1,14 @@
 package dev.neureal.agenthq
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Base64
 import android.widget.Toast
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.runtime.Composable
@@ -20,20 +25,35 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import dev.neureal.agenthq.model.Commands
 import dev.neureal.agenthq.model.PermissionRequest
 import dev.neureal.agenthq.net.HubClient
+import dev.neureal.agenthq.net.HubHolder
+import dev.neureal.agenthq.net.LinkService
 import dev.neureal.agenthq.net.LinkState
 import dev.neureal.agenthq.ui.AgentHqTheme
-import dev.neureal.agenthq.ui.OfficeScreen
+import dev.neureal.agenthq.ui.MainScreen
 import dev.neureal.agenthq.ui.PairScreen
 
 // FragmentActivity (not ComponentActivity) so BiometricPrompt works.
 class MainActivity : FragmentActivity() {
 
     private lateinit var hub: HubClient
+    private var backgroundState: ((Boolean) -> Unit)? = null
+
+    private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) enableBackground() else {
+            Toast.makeText(this, "Notifications denied — background alerts stay off", Toast.LENGTH_SHORT).show()
+            backgroundState?.invoke(false)
+        }
+    }
+
+    private fun uiPrefs() = getSharedPreferences("agenthq-ui", MODE_PRIVATE)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        hub = dev.neureal.agenthq.net.HubHolder.get(applicationContext)
+        hub = HubHolder.get(applicationContext)
         hub.ensureConnected()
+        if (uiPrefs().getBoolean("bgService", false)) {
+            ContextCompat.startForegroundService(this, Intent(this, LinkService::class.java))
+        }
 
         // Debug convenience: adb shell am start ... -e payload_b64 <base64 of QR json>
         val prefill = intent.getStringExtra("payload_b64")?.let {
@@ -50,6 +70,8 @@ class MainActivity : FragmentActivity() {
         val link by hub.linkState.collectAsState()
         val snapshot by hub.snapshotFlow.collectAsState()
         var pairError by remember { mutableStateOf<String?>(null) }
+        var backgroundEnabled by remember { mutableStateOf(uiPrefs().getBoolean("bgService", false)) }
+        backgroundState = { value -> backgroundEnabled = value }
 
         when (link) {
             is LinkState.Unpaired, is LinkState.PairingInFlight -> PairScreen(
@@ -77,14 +99,40 @@ class MainActivity : FragmentActivity() {
                 onPair = { payload -> hub.pair(payload) { error -> pairError = error } },
             )
 
-            else -> OfficeScreen(
+            else -> MainScreen(
                 snapshot = snapshot,
                 connected = link is LinkState.Connected,
+                pairedHost = hub.pairedHost(),
+                backgroundEnabled = backgroundEnabled,
+                onToggleBackground = { enabled ->
+                    backgroundEnabled = enabled
+                    if (enabled) requestBackgroundOrEnable() else disableBackground()
+                },
                 onRespond = { request, decision -> respondWithBiometric(request, decision) },
                 onSubmitTask = { text -> hub.sendCommand(Commands.submitTask(text)) },
-                onUnpair = { hub.unpair() },
+                onUnpair = {
+                    disableBackground()
+                    hub.unpair()
+                },
             )
         }
+    }
+
+    private fun requestBackgroundOrEnable() {
+        val needsPermission = Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        if (needsPermission) notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS) else enableBackground()
+    }
+
+    private fun enableBackground() {
+        uiPrefs().edit().putBoolean("bgService", true).apply()
+        backgroundState?.invoke(true)
+        ContextCompat.startForegroundService(this, Intent(this, LinkService::class.java))
+    }
+
+    private fun disableBackground() {
+        uiPrefs().edit().putBoolean("bgService", false).apply()
+        stopService(Intent(this, LinkService::class.java))
     }
 
     // Approvals sit behind biometrics when the device has them; the Ed25519

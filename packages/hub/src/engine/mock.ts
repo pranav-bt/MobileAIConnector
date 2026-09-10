@@ -38,6 +38,7 @@ export class MockEngine implements OrchestratorEngine {
     team: Team;
     model: ModelTier;
     cwd: string;
+    extraDirs?: string[];
     callbacks: WorkerRunCallbacks;
     signal?: AbortSignal;
   }): Promise<WorkerRunResult> {

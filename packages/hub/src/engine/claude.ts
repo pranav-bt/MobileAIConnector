@@ -68,6 +68,7 @@ export class ClaudeEngine implements OrchestratorEngine {
     team: { blockedTools: string[]; charter: string };
     model: 'opus' | 'sonnet' | 'haiku';
     cwd: string;
+    extraDirs?: string[];
     callbacks: WorkerRunCallbacks;
     signal?: AbortSignal;
   }): Promise<WorkerRunResult> {
@@ -88,6 +89,7 @@ export class ClaudeEngine implements OrchestratorEngine {
         abortController,
         model: MODEL_IDS[args.model],
         cwd: args.cwd,
+        additionalDirectories: args.extraDirs ?? [],
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',

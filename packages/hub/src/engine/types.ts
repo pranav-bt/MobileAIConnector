@@ -28,6 +28,8 @@ export interface OrchestratorEngine {
     team: Team;
     model: ModelTier;
     cwd: string;
+    // Extra directory roots the worker's tools may roam (all subdirectories).
+    extraDirs?: string[];
     callbacks: WorkerRunCallbacks;
     signal?: AbortSignal;
   }): Promise<WorkerRunResult>;
