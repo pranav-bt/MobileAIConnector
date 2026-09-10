@@ -62,8 +62,9 @@ dependencies {
     // comes from the platform Cipher (API 28+).
     implementation("com.google.crypto.tink:tink-android:1.13.0")
 
-    // QR scanning for pairing.
-    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    // QR scanning for pairing — Google's code scanner: no camera permission,
+    // no activity of our own, the scan UI is rendered by Play services.
+    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
 
     // Biometric gate on approvals.
     implementation("androidx.biometric:biometric:1.1.0")

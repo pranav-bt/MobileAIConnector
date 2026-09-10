@@ -14,8 +14,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import dev.neureal.agenthq.model.Commands
 import dev.neureal.agenthq.model.PermissionRequest
 import dev.neureal.agenthq.net.HubClient
@@ -53,22 +54,28 @@ class MainActivity : FragmentActivity() {
         val snapshot by hub.snapshotFlow.collectAsState()
         var pairError by remember { mutableStateOf<String?>(null) }
 
-        val scanLauncher = androidx.activity.compose.rememberLauncherForActivityResult(ScanContract()) { result ->
-            if (result.contents != null) {
-                hub.pair(result.contents) { error -> pairError = error }
-            }
-        }
-
         when (link) {
             is LinkState.Unpaired, is LinkState.PairingInFlight -> PairScreen(
                 initialPayload = prefill,
                 busy = link is LinkState.PairingInFlight,
                 error = pairError,
                 onScan = {
-                    val options = ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                        .setPrompt("Scan the pairing QR on your PC")
-                        .setBeepEnabled(false)
-                    scanLauncher.launch(options)
+                    try {
+                        val options = GmsBarcodeScannerOptions.Builder()
+                            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                            .build()
+                        GmsBarcodeScanning.getClient(this@MainActivity, options)
+                            .startScan()
+                            .addOnSuccessListener { barcode ->
+                                val payload = barcode.rawValue
+                                if (payload != null) hub.pair(payload) { error -> pairError = error }
+                            }
+                            .addOnFailureListener { error ->
+                                pairError = "Scanner unavailable (${error.message ?: "unknown"}) — paste the code below instead."
+                            }
+                    } catch (error: Exception) {
+                        pairError = "Scanner failed to start — paste the code below instead."
+                    }
                 },
                 onPair = { payload -> hub.pair(payload) { error -> pairError = error } },
             )

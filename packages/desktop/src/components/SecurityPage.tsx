@@ -76,6 +76,18 @@ export function SecurityPage(props: {
                   <div className="act" style={{ marginTop: 8, color: 'var(--amber)' }}>
                     pairing window closes automatically after 2 minutes
                   </div>
+                  <div className="act" style={{ marginTop: 6 }}>
+                    <a
+                      href="#"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        if (security.pairingQr) void navigator.clipboard.writeText(security.pairingQr);
+                      }}
+                    >
+                      copy pairing code
+                    </a>{' '}
+                    — paste it in the phone app if scanning is unavailable
+                  </div>
                   <button
                     className="btn deny"
                     style={{ flexGrow: 0, padding: '7px 14px', marginTop: 10 }}
