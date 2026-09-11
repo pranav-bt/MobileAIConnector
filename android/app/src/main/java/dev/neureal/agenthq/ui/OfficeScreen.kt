@@ -584,6 +584,27 @@ private fun LinkTab(
         }
 
         item {
+            // Voice breadcrumbs — screenshot this card when Jarvis misbehaves.
+            val traceLines by dev.neureal.agenthq.voice.VoiceTrace.lines.collectAsState()
+            if (traceLines.isNotEmpty()) {
+                Card {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        SectionLabel("Voice trace — screenshot this if Jarvis misbehaves")
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            "clear",
+                            color = HQ.muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.clickable { dev.neureal.agenthq.voice.VoiceTrace.clear() }.padding(4.dp),
+                        )
+                    }
+                    traceLines.takeLast(14).forEach { line ->
+                        Text(line, color = HQ.text2, fontSize = 9.5.sp, lineHeight = 13.sp, fontFamily = FontFamily.Monospace, maxLines = 2)
+                    }
+                }
+            }
+        }
+
+        item {
             val hub = dev.neureal.agenthq.net.HubHolder.get(context.applicationContext)
             val files by hub.filesFlow.collectAsState()
             Card {

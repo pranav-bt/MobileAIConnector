@@ -17,16 +17,28 @@ import kotlinx.coroutines.withTimeoutOrNull
 object VoiceFeedback {
     private var tts: TextToSpeech? = null
     private var ready = false
+    // Some engines (Samsung TTS among them) can swallow a QUEUE_ADD right
+    // after stop(); the first utterance after a hush uses QUEUE_FLUSH.
+    @Volatile private var flushNext = false
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     fun init(context: Context) {
         if (tts != null) return
-        tts = TextToSpeech(context.applicationContext) { status -> ready = status == TextToSpeech.SUCCESS }
+        tts = TextToSpeech(context.applicationContext) { status ->
+            ready = status == TextToSpeech.SUCCESS
+            VoiceTrace.log("tts init: ${if (ready) "ready" else "FAILED status=$status"}")
+        }
     }
 
     fun speak(text: String) {
         VoiceSession.jarvis(text)
-        if (ready) tts?.speak(text.take(500), TextToSpeech.QUEUE_ADD, null, "hq-${System.nanoTime()}")
+        val queueMode = if (flushNext) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+        flushNext = false
+        val result = if (ready) tts?.speak(text.take(500), queueMode, null, "hq-${System.nanoTime()}") else null
+        VoiceTrace.log(
+            "speak(${if (queueMode == TextToSpeech.QUEUE_FLUSH) "flush" else "add"}): \"${text.take(40)}\" -> " +
+                (if (!ready) "NOT READY" else if (result == TextToSpeech.SUCCESS) "ok" else "FAILED($result)"),
+        )
     }
 
     // Shut up NOW: flush the current + queued utterances and stop following
@@ -34,6 +46,7 @@ object VoiceFeedback {
     // the recognizer never hears Jarvis's own voice.
     fun hush() {
         try { tts?.stop() } catch (ignored: Exception) {}
+        flushNext = true
         scope.coroutineContext.cancelChildren()
     }
 

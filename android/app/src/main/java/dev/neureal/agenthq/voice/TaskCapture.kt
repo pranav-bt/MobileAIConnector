@@ -48,7 +48,9 @@ object TaskCapture {
         val hub = HubHolder.get(context.applicationContext)
         // Waits for the encrypted session — a raw send would drop silently
         // when the link is down, which reads as "it just did nothing".
+        VoiceTrace.log("submitting: \"${text.take(50)}\"")
         hub.submitTask(text) { error ->
+            VoiceTrace.log("submit -> ${error ?: "sent"}")
             if (error == null) {
                 VoiceFeedback.speak("On it.")
                 VoiceFeedback.followTask(hub, text)
@@ -72,6 +74,7 @@ object TaskCapture {
             onDone?.invoke()
             return
         }
+        VoiceTrace.log("begin: draft=${if (VoiceSession.draft.value == null) "none" else "pending"}")
         captureActive = true // wake loop releases the mic when it sees this
         VoiceFeedback.hush() // never let the recognizer transcribe Jarvis itself
         chirp()
@@ -93,7 +96,9 @@ object TaskCapture {
                     VoiceSession.listening.value = false
                     val text = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         ?.firstOrNull()?.trim()
+                    VoiceTrace.log("heard(${if (confirm) "confirm" else "capture"}): \"${text?.take(60) ?: "(empty)"}\"")
                     if (text.isNullOrEmpty()) {
+                        VoiceFeedback.speak("I heard nothing.")
                         finish(onDone)
                         return
                     }
@@ -104,7 +109,9 @@ object TaskCapture {
                         afterTts { round(app, confirm = true, onDone = onDone) }
                         return
                     }
-                    when (classify(text)) {
+                    val verdict = classify(text)
+                    VoiceTrace.log("verdict: $verdict")
+                    when (verdict) {
                         Verdict.SEND -> {
                             submitDraft(app)
                             finish(onDone)
@@ -127,7 +134,8 @@ object TaskCapture {
                     rec.destroy()
                     recognizer = null
                     VoiceSession.listening.value = false
-    // Samsung's recognizer is touchy about back-to-back
+                    VoiceTrace.log("recognizer error: ${VoiceTrace.errorName(error)} (retriesLeft=$retriesLeft, confirm=$confirm)")
+                    // Samsung's recognizer is touchy about back-to-back
                     // sessions and mic handoffs — retry once before giving up.
                     if (retriesLeft > 0) {
                         mainHandler.postDelayed({ round(app, confirm = confirm, onDone = onDone, retriesLeft = retriesLeft - 1) }, 500)
@@ -197,6 +205,7 @@ object TaskCapture {
                 val ttsDone = started && !VoiceFeedback.isSpeaking()
                 val neverStarted = !started && waited >= 2000
                 if (ttsDone || neverStarted || waited > 12000) {
+                    VoiceTrace.log("mic reopening (ttsStarted=$started, waited=${waited}ms)")
                     chirp()
                     block()
                 } else {
