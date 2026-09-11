@@ -168,20 +168,33 @@ export function Office(props: { state: HubState; send: (command: ClientCommand) 
         );
       })}
 
-      {/* Freelancers strip */}
+      {/* Freelancers strip — the list scrolls; the room keeps its height. */}
       <div className="room wide">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
-          <div>
-            <div className="lbl">Freelancers</div>
-            <div className="act" style={{ color: 'var(--faint)', marginTop: 3 }}>
-              terminal Claude Code sessions · message them from here
-            </div>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+          <div className="lbl">Freelancers</div>
+          <div className="act" style={{ color: 'var(--faint)' }}>
+            terminal Claude Code sessions · message them from here
           </div>
+          <div className="lbl" style={{ marginLeft: 'auto', color: 'var(--faint)' }}>
+            {freelancers.length > 0 ? `${freelancers.length} open` : ''}
+          </div>
+        </div>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+            marginTop: 10,
+            maxHeight: 208,
+            overflowY: 'auto',
+            paddingRight: 4,
+          }}
+        >
           {freelancers.length === 0 && (
             <span className="empty-note">terminal Claude Code sessions appear here automatically</span>
           )}
           {freelancers.map((agent) => (
-            <div key={agent.id} className="chip" style={{ minWidth: 320 }}>
+            <div key={agent.id} className="chip" style={{ width: '100%' }}>
               <div className="av" style={{ borderColor: ringColor(agent), borderRadius: 6 }}>
                 {'>_'}
               </div>
