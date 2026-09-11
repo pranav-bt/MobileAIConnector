@@ -18,12 +18,23 @@ function fail(message: string): never {
 
 const dataDir = mkdtempSync(join(tmpdir(), 'agent-hq-orch-'));
 const claudeProjectsDir = mkdtempSync(join(tmpdir(), 'agent-hq-claude-'));
+// Freelancer session cwds live under the test workspace root so the
+// freelancer-task flow can auto-register their projects.
+const castleCwd = join(tmpdir(), 'CastleWars');
+const bnbCwd = join(tmpdir(), 'BuildAndBattle');
+let freelancerCalls = 0;
 const hub = await startHub({
   engine: 'mock',
   port: PORT,
   dataDir,
   claudeProjectsDir, // isolate the freelancer observer from real sessions
   freelancerOpenSessions: () => 2, // pretend two terminal sessions are open
+  freelancerRunner: async (_sessionId, _cwd, text) => {
+    freelancerCalls += 1;
+    return text.includes('QA found issues')
+      ? 'Fixed the tower HUD glitch as requested.'
+      : 'Tower HUD tweak done (first pass).';
+  },
   // Tests sandbox the workspace-roots policy to the temp dir.
   workspaceRoots: [{ key: 'tmp', path: tmpdir(), label: 'test sandbox' }],
 });
@@ -433,6 +444,27 @@ try {
     'sensitive-test task still completes',
     (e) => e.type === 'task.updated' && e.task.id === sensitiveAsk.request.taskId && e.task.status === 'done',
   );
+  // The auto-QA follow-up re-runs the same brief (it quotes the task), so it
+  // raises its own sensitive card — deny it too or its worker occupies a QA
+  // slot forever and starves later scenarios.
+  const qaSensitiveAsk = await waitFor(
+    'QA follow-up raises its own sensitive card',
+    (e) =>
+      e.type === 'permission.updated' &&
+      e.request.status === 'pending' &&
+      e.request.flags.includes('reads sensitive data') &&
+      e.request.id !== sensitiveAsk.request.id,
+    20000,
+  );
+  if (qaSensitiveAsk.type !== 'permission.updated') fail('unreachable');
+  ws.send(
+    encodeCommand({ type: 'permission.respond', requestId: qaSensitiveAsk.request.id, decision: 'deny', scope: 'once' }),
+  );
+  await waitFor(
+    'sensitive QA follow-up completes after denial',
+    (e) => e.type === 'task.updated' && e.task.id === qaSensitiveAsk.request.taskId && e.task.status === 'done',
+    15000,
+  );
   console.log('sensitive-read gate ok: card raised, denial honored, task completed');
 
   // 18. Findings reach the owner: a text team's long report is saved to
@@ -460,29 +492,29 @@ try {
   // 19. Freelancer observer: a live terminal Claude Code session (a
   // recently-written transcript) shows up as a freelancer with its project
   // name and last action.
-  const sessionDir = join(claudeProjectsDir, 'd--Work-Roblox-CastleWars');
+  const sessionDir = join(claudeProjectsDir, 'tmp-CastleWars');
   mkdirSync(sessionDir, { recursive: true });
   writeFileSync(
     join(sessionDir, 'sess-castle-1.jsonl'),
     [
-      JSON.stringify({ type: 'user', cwd: 'D:\\Work\\Roblox\\CastleWars', message: { content: 'tweak the tower balance' } }),
+      JSON.stringify({ type: 'user', cwd: castleCwd, message: { content: 'tweak the tower balance' } }),
       JSON.stringify({
         type: 'assistant',
-        cwd: 'D:\\Work\\Roblox\\CastleWars',
+        cwd: castleCwd,
         message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }] },
       }),
     ].join('\n') + '\n',
   );
   // A second session that went quiet 10 minutes ago: open (process count
   // says 2) but idle — it must STAY visible.
-  const idleDir = join(claudeProjectsDir, 'd--Work-Roblox-BuildAndBattle');
+  const idleDir = join(claudeProjectsDir, 'tmp-BuildAndBattle');
   mkdirSync(idleDir, { recursive: true });
   const idlePath = join(idleDir, 'sess-bnb-1.jsonl');
   writeFileSync(
     idlePath,
     JSON.stringify({
       type: 'assistant',
-      cwd: 'D:\\Work\\Roblox\\BuildAndBattle',
+      cwd: bnbCwd,
       message: { content: [{ type: 'text', text: 'Battle system refactor is done, awaiting your review.' }] },
     }) + '\n',
   );
@@ -516,6 +548,58 @@ try {
     (e) => e.type === 'activity' && e.entry.message.includes('freelancer message failed — session not found'),
   );
   console.log('freelancer messaging plumbing ok: command routed to the manager');
+
+  // 20. Freelancers work like workers: an instruction becomes a real task —
+  // the session's project is auto-registered, the freelance desk lead
+  // reviews the reply, auto-QA runs in that project, and QA failures send a
+  // [fix] instruction back to the SAME session, re-QA'd until it passes.
+  ws.send(
+    encodeCommand({ type: 'freelancer.send', agentId: 'fl-sess-castle-1', text: 'remediate-me tweak the tower HUD' }),
+  );
+  const flTask = await waitFor(
+    'freelancer instruction became a reviewed task',
+    (e) =>
+      e.type === 'task.updated' &&
+      e.task.title.startsWith('[FL CastleWars]') &&
+      e.task.status === 'done' &&
+      !!e.task.synopsis,
+    15000,
+  );
+  if (flTask.type !== 'task.updated') fail('unreachable');
+  await waitFor(
+    'freelancer project auto-registered',
+    (e) => e.type === 'project.updated' && e.project.id === 'castlewars',
+  );
+  if (flTask.task.projectId !== 'castlewars') fail('freelancer task not pinned to its auto-registered project');
+  await waitFor(
+    'QA ran on the freelancer work',
+    (e) => e.type === 'task.updated' && e.task.title.startsWith('[QA] [FL CastleWars]') && e.task.status === 'done',
+    15000,
+  ).catch((error) => {
+    console.error('--- recent task/activity events at failure ---');
+    for (const e of events.slice(-40)) {
+      if (e.type === 'task.updated') console.error('TASK', e.task.status, e.task.title.slice(0, 55), e.task.teamId, e.task.projectId);
+      if (e.type === 'activity') console.error('ACT ', e.entry.message.slice(0, 90));
+    }
+    throw error;
+  });
+  await waitFor(
+    'QA findings meeting names the freelance desk',
+    (e) => e.type === 'activity' && e.entry.message.includes('Freelance desk leads are meeting'),
+    15000,
+  );
+  await waitFor(
+    'remediation went back to the same session',
+    (e) => e.type === 'task.updated' && e.task.title.startsWith('[fix] [FL CastleWars]') && e.task.status === 'done',
+    15000,
+  );
+  await waitFor(
+    're-QA passed the freelancer fix',
+    (e) => e.type === 'activity' && e.entry.message.startsWith('QA verdict: pass — [fix] [FL'),
+    15000,
+  );
+  if (freelancerCalls !== 2) fail(`expected 2 freelancer runs (work + fix), got ${freelancerCalls}`);
+  console.log('freelancer-as-worker ok: task, review, QA in own project, remediation to the same session, re-QA pass');
 
   console.log('ORCH SMOKE PASS');
   ws.close();

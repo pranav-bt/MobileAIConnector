@@ -29,6 +29,7 @@ export interface HubOptions {
   workspaceRoots?: WorkspaceRoot[]; // tests override; defaults from data/config.json
   claudeProjectsDir?: string; // tests override; defaults to ~/.claude/projects
   freelancerOpenSessions?: () => number; // tests override the process scan
+  freelancerRunner?: (sessionId: string, cwd: string, text: string) => Promise<string>; // tests override the sidecar
 }
 
 export interface RunningHub {
@@ -148,6 +149,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   const freelancers = new FreelancerManager(bus, {
     ...(options.claudeProjectsDir ? { projectsDir: options.claudeProjectsDir } : {}),
     ...(options.freelancerOpenSessions ? { openSessions: options.freelancerOpenSessions } : {}),
+    ...(options.freelancerRunner ? { runner: options.freelancerRunner } : {}),
     outboxDir: outbox.outboxDir,
     activeCwds: () => workerCwds(),
   });

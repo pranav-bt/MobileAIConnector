@@ -19,6 +19,34 @@ import type { ProjectRegistry } from './projects.js';
 const now = () => Date.now();
 const MAX_LOUNGE_IDLE = 3;
 
+// The freelancer manager, as the orchestrator sees it.
+interface FreelancerRunner {
+  describe(agentId: string): { name: string; cwd: string } | null;
+  runInstruction(
+    agentId: string,
+    text: string,
+  ): Promise<{ ok: true; name: string; reply: string } | { ok: false; name: string; error: string }>;
+}
+
+// Synthetic team for freelancer work: gives the standard review prompt a
+// charter/lead, and satisfies the QA gate (freelancers build and run things).
+// It is NOT in the registry — no room is rendered for it.
+const FREELANCE_DESK: Team = {
+  id: 'freelance',
+  name: 'Freelance desk',
+  charter:
+    'Independent Claude Code terminal sessions supervised directly by the owner; each works inside its own project.',
+  allowedTools: ['read', 'edit', 'bash', 'git'],
+  blockedTools: [],
+  leadModel: 'opus',
+  workerModel: 'sonnet',
+  maxConcurrentWorkers: 8,
+  quotaSharePct: 0,
+  memoryDir: '',
+  mcpServers: {},
+  createdAt: 0,
+};
+
 export class Orchestrator implements CommandHandlers {
   #bus: HubBus;
   #engine: OrchestratorEngine;
@@ -667,8 +695,11 @@ export class Orchestrator implements CommandHandlers {
     const sourceId = this.#qaSource.get(qaTaskId);
     this.#qaSource.delete(qaTaskId);
     const source = sourceId ? this.#bus.state.tasks[sourceId] : undefined;
-    if (!source || !source.teamId) return;
-    const sourceTeam = this.#registry.get(source.teamId);
+    if (!source) return;
+    // Freelancer-sourced work has no registry team — the freelance desk
+    // stands in, and remediation goes back to the SAME terminal session.
+    const isFreelance = !source.teamId && source.title.includes('[FL ');
+    const sourceTeam = isFreelance ? FREELANCE_DESK : source.teamId ? this.#registry.get(source.teamId) : undefined;
     const qa = this.#qaTeam();
     if (!sourceTeam || !qa) return;
 
@@ -695,9 +726,24 @@ export class Orchestrator implements CommandHandlers {
     this.#holdMeeting([`${qa.id}-lead`, `${sourceTeam.id}-lead`], `QA findings on "${rootTitle.slice(0, 32)}"`);
     this.#activity('master', qaTaskId, `${qa.name} and ${sourceTeam.name} leads are meeting over QA findings`);
 
+    const fixTitle = (round === 0 ? `[fix] ${rootTitle}` : `[fix${round + 1}] ${rootTitle}`).slice(0, 60);
+
+    // Freelancer remediation: the fix instruction resumes the SAME session
+    // (which re-enters the normal flow, so the fix gets re-QA'd too).
+    if (isFreelance) {
+      const freelancerId = source.agentIds[0];
+      if (!freelancerId) return;
+      this.#activity('master', qaTaskId, `remediation sent back to freelancer: ${fixTitle.slice(0, 45)}`);
+      void this.#runFreelancerTask(
+        freelancerId,
+        `QA found issues in your earlier work ("${rootTitle.slice(0, 50)}"). Fix them now; the work will be re-checked.\n\nIssues:\n${evaluation.summary || qaSynopsis}`,
+        fixTitle,
+      );
+      return;
+    }
+
     this.#taskCounter += 1;
     const fixId = `t-${now().toString(36)}-${this.#taskCounter}`;
-    const fixTitle = (round === 0 ? `[fix] ${rootTitle}` : `[fix${round + 1}] ${rootTitle}`).slice(0, 60);
     this.#publishTask({
       id: fixId,
       title: fixTitle,
@@ -950,14 +996,86 @@ export class Orchestrator implements CommandHandlers {
 
   // The freelancer manager is created alongside the hub and attached here so
   // "message a freelancer" flows through the normal command channel.
-  #freelancers: { sendInstruction(agentId: string, text: string): void } | null = null;
+  #freelancers: FreelancerRunner | null = null;
 
-  attachFreelancers(manager: { sendInstruction(agentId: string, text: string): void }): void {
+  attachFreelancers(manager: FreelancerRunner): void {
     this.#freelancers = manager;
   }
 
+  // A freelancer instruction is a real task: the terminal session is the
+  // worker, the freelance desk lead reviews its report into a synopsis, and
+  // the normal machinery follows — auto-QA in the freelancer's own project,
+  // coordination, history, reports. Only the worker differs.
   freelancerSend(agentId: string, text: string): void {
-    this.#freelancers?.sendInstruction(agentId, text);
+    void this.#runFreelancerTask(agentId, text);
+  }
+
+  async #runFreelancerTask(agentId: string, text: string, titleOverride?: string): Promise<void> {
+    const manager = this.#freelancers;
+    if (!manager) return;
+    const who = manager.describe(agentId);
+    if (!who) {
+      this.#activity('master', null, `freelancer message failed — session not found (${agentId})`);
+      return;
+    }
+
+    // QA has to run where the freelancer works: reuse a registered project
+    // covering that folder, or register it (workspace-roots still enforced).
+    let project = this.#projects
+      .all()
+      .find((candidate) => who.cwd.toLowerCase().startsWith(candidate.workspaceDir.toLowerCase()) && candidate.workspaceDir);
+    if (!project && who.cwd) {
+      try {
+        project = this.#projects.register({ name: who.cwd.split(/[\\/]/).pop() || who.name, workspaceDir: who.cwd });
+        this.#bus.publish({ type: 'project.updated', project });
+        this.#activity('master', null, `project registered from freelancer session: ${project.name} → ${who.cwd}`);
+      } catch {
+        project = undefined; // outside the workspace roots — task still runs, QA is skipped
+      }
+    }
+
+    this.#taskCounter += 1;
+    const taskId = `t-${now().toString(36)}-${this.#taskCounter}`;
+    this.#publishTask({
+      id: taskId,
+      title: (titleOverride ?? `[FL ${who.name}] ${text}`).slice(0, 60),
+      detail: text,
+      projectId: project?.id ?? null,
+      teamId: null,
+      status: 'in_flight',
+      progressPct: 10,
+      agentIds: [agentId],
+      synopsis: null,
+      tokensUsed: 0,
+      createdAt: now(),
+      updatedAt: now(),
+    });
+    this.#activity(agentId, taskId, `instruction sent to freelancer ${who.name}: ${text.slice(0, 45)}`);
+
+    const result = await manager.runInstruction(agentId, text);
+    if (!result.ok) {
+      this.#patchTask(taskId, { status: 'failed', synopsis: `Freelancer ${result.name}: ${result.error}` });
+      this.#activity(agentId, taskId, `freelancer ${result.name} instruction failed: ${result.error.slice(0, 70)}`);
+      this.#masterStatus();
+      return;
+    }
+
+    // Same review the teams get; the freelance desk is a synthetic team so
+    // the standard prompts, QA gate, and coordination all apply unchanged.
+    this.#patchTask(taskId, { status: 'review', progressPct: 90 });
+    const task = this.#bus.state.tasks[taskId];
+    const review = await reviewWorkerReport(this.#engine, FREELANCE_DESK, task?.title ?? text, result.reply);
+    this.#recordTokens(FREELANCE_DESK.leadModel, review.tokens);
+    this.#patchTask(taskId, { status: 'done', progressPct: 100, synopsis: review.synopsis || result.reply.slice(0, 400) });
+    this.#activity(agentId, taskId, `freelancer ${result.name} replied — full reply sent to your phone`);
+
+    if (project) {
+      this.#enqueueQa(taskId, FREELANCE_DESK, review.synopsis || result.reply.slice(0, 400));
+    } else {
+      this.#activity('master', taskId, `QA skipped — ${who.cwd || 'this session'} is outside the workspace roots`);
+    }
+    void this.#coordinate(taskId, FREELANCE_DESK, review.synopsis || '');
+    this.#masterStatus();
   }
 
   setPermissionMode(mode: PermissionMode): void {

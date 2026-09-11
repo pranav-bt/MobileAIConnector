@@ -119,6 +119,7 @@ export class FreelancerManager {
       outboxDir: string;
       activeCwds?: () => string[];
       openSessions?: () => number; // tests inject; real scans processes
+      runner?: (sessionId: string, cwd: string, text: string) => Promise<string>; // tests inject; real spawns claude
     },
   ) {
     this.#bus = bus;
@@ -126,6 +127,14 @@ export class FreelancerManager {
     this.#outboxDir = options.outboxDir;
     this.#activeCwds = options.activeCwds ?? (() => []);
     this.#openSessionsOverride = options.openSessions ?? null;
+    this.#runnerOverride = options.runner ?? null;
+  }
+
+  #runnerOverride: ((sessionId: string, cwd: string, text: string) => Promise<string>) | null = null;
+
+  describe(agentId: string): { name: string; cwd: string } | null {
+    const info = this.#registry.get(agentId);
+    return info ? { name: info.name, cwd: info.cwd } : null;
   }
 
   start(): void {
@@ -248,7 +257,7 @@ export class FreelancerManager {
             continue;
           }
           const cwd = extractCwd(chunk);
-          if (cwd && /\\Temp\\|\/tmp\//i.test(cwd)) continue; // scratch sessions, not real projects
+          if (cwd && /\\Temp\\claude\\|\/tmp\/claude\//i.test(cwd)) continue; // scratchpad sessions, not real projects
           if (cwd && busyCwds.has(cwd.toLowerCase())) continue; // a hub worker owns this dir right now
 
           const sessionId = file.replace(/\.jsonl$/, '');
@@ -354,71 +363,93 @@ export class FreelancerManager {
     });
   }
 
-  // Continue the freelancer's conversation with an instruction from the
-  // owner; the reply lands in the activity feed and (in full) on the phone.
-  sendInstruction(agentId: string, text: string): void {
+  // Continue the freelancer's conversation with an instruction. Resolves
+  // with the session's reply (also pushed to the phone in full); the CALLER
+  // (orchestrator) owns the task lifecycle, review, and QA around it.
+  runInstruction(agentId: string, text: string): Promise<{ ok: true; name: string; reply: string } | { ok: false; name: string; error: string }> {
     const info = this.#registry.get(agentId);
-    if (!info) {
-      this.#activity('master', `freelancer message failed — session not found (${agentId})`);
-      return;
-    }
+    if (!info) return Promise.resolve({ ok: false, name: agentId, error: 'session not found' });
     if (!info.sessionId) {
-      this.#activity(agentId, `freelancer ${info.name} has no conversation yet — start one in that window first`);
-      return;
+      return Promise.resolve({ ok: false, name: info.name, error: 'no conversation yet — start one in that window first' });
     }
     if (this.#busy.has(agentId)) {
-      this.#activity(agentId, `freelancer ${info.name} is still working on the previous instruction`);
-      return;
+      return Promise.resolve({ ok: false, name: info.name, error: 'still working on the previous instruction' });
     }
     this.#busy.add(agentId);
     this.#patch(agentId, info.name, 'working', `HQ instruction: ${text.slice(0, 60)}`);
-    this.#activity(agentId, `instruction sent to freelancer ${info.name}: ${text.slice(0, 45)}`);
 
-    const child = spawn('claude', ['-p', '--resume', info.sessionId, text], {
-      cwd: info.cwd || undefined,
-      shell: true,
-      windowsHide: true,
-    });
-    let out = '';
-    let err = '';
-    child.stdout.on('data', (data) => {
-      out += String(data);
-      if (out.length > 400_000) out = out.slice(-400_000);
-    });
-    child.stderr.on('data', (data) => {
-      err = (err + String(data)).slice(0, 2000);
-    });
-    const timer = setTimeout(() => {
+    const deliver = (reply: string) => {
       try {
-        child.kill();
-      } catch {}
-    }, SIDECAR_TIMEOUT_MS);
-
-    const settle = (code: number | null) => {
-      clearTimeout(timer);
-      this.#busy.delete(agentId);
-      const reply = out.trim();
-      if (code === 0 && reply) {
-        try {
-          const fileName = `freelancer-${info.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-reply.md`;
-          writeFileSync(
-            join(this.#outboxDir, fileName),
-            `# Freelancer ${info.name} — reply\n\n**Instruction:** ${text}\n\n---\n\n${reply}\n`,
-          );
-          this.#activity(agentId, `freelancer ${info.name} replied — full reply sent to your phone`);
-        } catch {
-          this.#activity(agentId, `freelancer ${info.name} replied (report delivery failed)`);
-        }
-        this.#patch(agentId, info.name, 'idle', reply.replace(/\s+/g, ' ').slice(0, 80));
-      } else {
-        this.#activity(
-          agentId,
-          `freelancer ${info.name} instruction failed${code ? ` (exit ${code})` : ''}: ${(err || reply || 'no output').slice(0, 80)}`,
+        const fileName = `freelancer-${info.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-reply.md`;
+        writeFileSync(
+          join(this.#outboxDir, fileName),
+          `# Freelancer ${info.name} — reply\n\n**Instruction:** ${text}\n\n---\n\n${reply}\n`,
         );
-        this.#patch(agentId, info.name, 'idle', 'instruction failed');
+      } catch {
+        /* full-text delivery is best-effort; the synopsis still lands on the task */
       }
     };
-    child.on('close', settle);
-    child.on('error', () => settle(-1));
+
+    if (this.#runnerOverride) {
+      return this.#runnerOverride(info.sessionId, info.cwd, text).then(
+        (reply) => {
+          this.#busy.delete(agentId);
+          this.#patch(agentId, info.name, 'idle', reply.replace(/\s+/g, ' ').slice(0, 80));
+          deliver(reply);
+          return { ok: true as const, name: info.name, reply };
+        },
+        (error: Error) => {
+          this.#busy.delete(agentId);
+          this.#patch(agentId, info.name, 'idle', 'instruction failed');
+          return { ok: false as const, name: info.name, error: error.message };
+        },
+      );
+    }
+
+    return new Promise((resolvePromise) => {
+      const child = spawn('claude', ['-p', '--resume', info.sessionId, text], {
+        cwd: info.cwd || undefined,
+        shell: true,
+        windowsHide: true,
+      });
+      let out = '';
+      let err = '';
+      child.stdout.on('data', (data) => {
+        out += String(data);
+        if (out.length > 400_000) out = out.slice(-400_000);
+      });
+      child.stderr.on('data', (data) => {
+        err = (err + String(data)).slice(0, 2000);
+      });
+      const timer = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {}
+      }, SIDECAR_TIMEOUT_MS);
+
+      const settle = (code: number | null) => {
+        clearTimeout(timer);
+        this.#busy.delete(agentId);
+        const reply = out.trim();
+        if (code === 0 && reply) {
+          deliver(reply);
+          this.#patch(agentId, info.name, 'idle', reply.replace(/\s+/g, ' ').slice(0, 80));
+          resolvePromise({ ok: true, name: info.name, reply });
+        } else {
+          this.#patch(agentId, info.name, 'idle', 'instruction failed');
+          resolvePromise({
+            ok: false,
+            name: info.name,
+            error: `${code ? `exit ${code}: ` : ''}${(err || reply || 'no output').slice(0, 160)}`,
+          });
+        }
+      };
+      child.on('close', settle);
+      child.on('error', (error) => {
+        out = '';
+        err = error.message;
+        settle(-1);
+      });
+    });
   }
 }
