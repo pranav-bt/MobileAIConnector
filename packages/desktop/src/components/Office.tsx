@@ -174,7 +174,7 @@ export function Office(props: { state: HubState; send: (command: ClientCommand) 
           <div>
             <div className="lbl">Freelancers</div>
             <div className="act" style={{ color: 'var(--faint)', marginTop: 3 }}>
-              observed terminal sessions · read-only
+              terminal Claude Code sessions · message them from here
             </div>
           </div>
           {freelancers.length === 0 && (

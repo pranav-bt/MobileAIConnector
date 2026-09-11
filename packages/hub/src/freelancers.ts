@@ -4,14 +4,16 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { HubBus } from './bus.js';
 
-// Freelancers: plain Claude Code terminal sessions on this machine.
+// Freelancers: plain Claude Code sessions on this machine.
 //
 // PRESENCE — transcripts alone can't tell "idle, waiting for input" from
-// "closed" (both just stop writing), so presence is anchored to the number
-// of Claude Code PROCESSES actually running (scanned every 15s, excluding
-// the hub's own SDK sessions which run with stream-json flags): the N
-// most-recently-written transcripts are the N open sessions. Written in the
-// last 45s -> working, otherwise idle.
+// "closed" (both just stop writing). The precise signal is Claude Code's own
+// IDE registry: ~/.claude/ide/*.lock lists {pid, workspaceFolders} for every
+// IDE-attached session; locks whose pid is alive ARE the open sessions, and
+// each shows its workspace's newest transcript (written <45s ago -> working,
+// otherwise idle — however old). Plain terminal/-p sessions without a lock
+// are covered by a recent-writes window. Tests inject openSessions and use
+// the count-based path instead.
 //
 // INTERACTION — an instruction to a freelancer resumes that session's
 // conversation headlessly (`claude -p --resume <id>`) in its own workspace;
@@ -21,7 +23,7 @@ import type { HubBus } from './bus.js';
 
 const POLL_MS = 5000;
 const PROCESS_SCAN_MS = 15_000;
-const LOOKBACK_MS = 12 * 60 * 60_000; // transcripts older than this are never candidates
+const LOOKBACK_MS = 30 * 24 * 60 * 60_000; // IDE windows can idle for weeks; locks decide presence
 const FALLBACK_WINDOW_MS = 2 * 60_000; // used when the process scan fails
 const WORKING_WINDOW_MS = 45_000;
 const HEAD_BYTES = 8 * 1024;
@@ -104,7 +106,9 @@ export class FreelancerManager {
   #published = new Map<string, number>(); // agentId -> mtime last published
   #registry = new Map<string, SessionInfo>();
   #busy = new Set<string>(); // sidecar instruction in flight
-  #openCount = -1; // -1 = scan unavailable -> fallback window
+  #openCount = -1; // test/fallback path only
+  #openWorkspaces: string[] = []; // lowercased folders from live IDE locks
+  #locksSeen = false;
   #lastScan = 0;
   #interval: ReturnType<typeof setInterval> | null = null;
 
@@ -133,9 +137,10 @@ export class FreelancerManager {
     if (this.#interval) clearInterval(this.#interval);
   }
 
-  // Count running interactive Claude Code processes. The hub's own SDK
-  // sessions run the CLI with stream-json flags and are excluded.
-  #scanProcesses(): void {
+  // Refresh the open-session registry from ~/.claude/ide/*.lock: each lock
+  // names {pid, workspaceFolders}; a lock with a live pid is an open session.
+  // Stale locks (crashed/closed windows) fail the pid check and drop out.
+  #scanSessions(): void {
     if (this.#openSessionsOverride) {
       this.#openCount = this.#openSessionsOverride();
       return;
@@ -143,24 +148,63 @@ export class FreelancerManager {
     const now = Date.now();
     if (now - this.#lastScan < PROCESS_SCAN_MS) return;
     this.#lastScan = now;
-    const script =
-      "(Get-CimInstance Win32_Process -Filter \"Name='claude.exe' or Name='node.exe' or Name='bun.exe'\" | " +
-      "Where-Object { $_.CommandLine -match 'claude' -and $_.CommandLine -notmatch 'stream-json|claude-agent-sdk' }).Count";
+
+    const ideDir = join(homedir(), '.claude', 'ide');
+    const locks: { pid: number; folders: string[] }[] = [];
+    try {
+      for (const file of readdirSync(ideDir)) {
+        if (!file.endsWith('.lock')) continue;
+        try {
+          const parsed = JSON.parse(readChunks(join(ideDir, file), statSync(join(ideDir, file)).size)) as {
+            pid?: number;
+            workspaceFolders?: string[];
+          };
+          if (typeof parsed.pid === 'number' && Array.isArray(parsed.workspaceFolders)) {
+            locks.push({ pid: parsed.pid, folders: parsed.workspaceFolders.filter((f) => typeof f === 'string') });
+          }
+        } catch {
+          /* unreadable lock — skip */
+        }
+      }
+    } catch {
+      /* no ide dir — terminal-only machine */
+    }
+    if (locks.length === 0) {
+      this.#locksSeen = false;
+      return;
+    }
+
+    const pids = [...new Set(locks.map((lock) => lock.pid))];
+    const script = `Get-Process -Id ${pids.join(',')} -ErrorAction SilentlyContinue | ForEach-Object Id`;
     execFile(
       'powershell',
       ['-NoProfile', '-NonInteractive', '-Command', script],
       { timeout: 10_000, windowsHide: true },
       (error, stdout) => {
-        if (error) return; // keep last known count (or fallback)
-        const count = Number(stdout.trim());
-        if (Number.isFinite(count)) this.#openCount = count;
+        // PS 5.1 exits non-zero when ANY of the pids is gone, even with
+        // SilentlyContinue — the alive ones are still on stdout, so parse
+        // that and only treat empty-output-with-error as a real failure.
+        const alive = new Set(
+          (stdout ?? '')
+            .split(/\r?\n/)
+            .map((line) => Number(line.trim()))
+            .filter((pid) => Number.isFinite(pid) && pid > 0),
+        );
+        if (alive.size === 0 && error) return; // keep last known registry
+        const folders = new Set<string>();
+        for (const lock of locks) {
+          if (!alive.has(lock.pid)) continue;
+          for (const folder of lock.folders) folders.add(folder.toLowerCase());
+        }
+        this.#openWorkspaces = [...folders];
+        this.#locksSeen = true;
       },
     );
   }
 
   #tick(): void {
     try {
-      this.#scanProcesses();
+      this.#scanSessions();
       if (!existsSync(this.#projectsDir)) return;
       const now = Date.now();
       const busyCwds = new Set(this.#activeCwds().map((cwd) => cwd.toLowerCase()));
@@ -186,8 +230,25 @@ export class FreelancerManager {
           if (now - stats.mtimeMs > LOOKBACK_MS || stats.size === 0) continue;
 
           const chunk = readChunks(path, stats.size);
-          if (OWN_SESSION_MARKERS.some((marker) => chunk.includes(marker))) continue;
+          // Own-session check: our engine prompts are the FIRST record of
+          // their transcript. Only look there — a terminal session's tail can
+          // legitimately quote these strings (editing this very codebase), and
+          // a file that STARTS with a compaction summary is always a real
+          // interactive session (SDK one-shots never compact).
+          const firstLines = chunk.split('\n').slice(0, 3).join('\n');
+          const isOwnEngineSession =
+            !firstLines.includes('"type":"summary"') &&
+            OWN_SESSION_MARKERS.some((marker) => firstLines.includes(marker));
+          if (isOwnEngineSession) continue;
+          // One-shot runs (claude -p, old engine sessions) leave tiny
+          // transcripts; a real terminal session accumulates records fast.
+          // Old AND tiny -> not an open terminal.
+          const age = now - stats.mtimeMs;
+          if (age > 60 * 60_000 && stats.size < 32 * 1024 && chunk.split('\n').filter((l) => l.trim()).length < 8) {
+            continue;
+          }
           const cwd = extractCwd(chunk);
+          if (cwd && /\\Temp\\|\/tmp\//i.test(cwd)) continue; // scratch sessions, not real projects
           if (cwd && busyCwds.has(cwd.toLowerCase())) continue; // a hub worker owns this dir right now
 
           const sessionId = file.replace(/\.jsonl$/, '');
@@ -201,12 +262,37 @@ export class FreelancerManager {
       }
       candidates.sort((a, b) => b.mtime - a.mtime);
 
-      // Presence: as many sessions as there are open processes; if the scan
-      // is unavailable, fall back to "written in the last 2 minutes".
-      const visible =
-        this.#openCount >= 0
-          ? candidates.slice(0, this.#openCount)
-          : candidates.filter((candidate) => now - candidate.mtime <= FALLBACK_WINDOW_MS);
+      // Presence. Test/override path: top-N by count. Real path: one entry
+      // per live IDE lock's workspace (its newest transcript, however old),
+      // plus anything written in the last 2 minutes (plain terminal or -p
+      // runs that have no lock). No locks at all -> recent-writes only.
+      let visible: typeof candidates;
+      if (this.#openCount >= 0) {
+        visible = candidates.slice(0, this.#openCount);
+      } else {
+        const recent = candidates.filter((candidate) => now - candidate.mtime <= FALLBACK_WINDOW_MS);
+        const byWorkspace: typeof candidates = [];
+        if (this.#locksSeen) {
+          for (const workspace of this.#openWorkspaces) {
+            const newest = candidates.find((candidate) => candidate.info.cwd.toLowerCase() === workspace);
+            if (newest) {
+              byWorkspace.push(newest); // candidates are mtime-desc
+            } else {
+              // Open session, but nothing said in it yet (or only long ago):
+              // still present in the office.
+              byWorkspace.push({
+                agentId: `fl-ws-${workspace.replace(/[^a-z0-9]+/g, '-').slice(-24)}`,
+                mtime: 0,
+                info: { sessionId: '', cwd: workspace, name: basename(workspace) },
+                activity: 'no conversation yet',
+              });
+            }
+          }
+        }
+        const merged = new Map<string, (typeof candidates)[number]>();
+        for (const candidate of [...byWorkspace, ...recent]) merged.set(candidate.agentId, candidate);
+        visible = [...merged.values()];
+      }
 
       const seen = new Set<string>();
       for (const candidate of visible) {
@@ -274,6 +360,10 @@ export class FreelancerManager {
     const info = this.#registry.get(agentId);
     if (!info) {
       this.#activity('master', `freelancer message failed — session not found (${agentId})`);
+      return;
+    }
+    if (!info.sessionId) {
+      this.#activity(agentId, `freelancer ${info.name} has no conversation yet — start one in that window first`);
       return;
     }
     if (this.#busy.has(agentId)) {
