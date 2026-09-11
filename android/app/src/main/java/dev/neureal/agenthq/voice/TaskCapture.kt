@@ -24,6 +24,14 @@ object TaskCapture {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
 
+    // True while a capture (any entry point) is running. The wake-word loop
+    // must release the microphone while this is set: the platform recognizer
+    // lives in ANOTHER app's process, and Android silences its audio stream
+    // when we hold an AudioRecord — the recognizer then "hears" nothing and
+    // errors out, which surfaced as "I didn't catch that" on every attempt.
+    @Volatile var captureActive = false
+        private set
+
     private val SEND_WORDS = setOf(
         "send", "send it", "yes", "yeah", "yep", "yes send", "confirm", "go ahead",
         "do it", "ok", "okay", "ok send", "okay send", "submit", "ship it",
@@ -64,9 +72,12 @@ object TaskCapture {
             onDone?.invoke()
             return
         }
+        captureActive = true // wake loop releases the mic when it sees this
         VoiceFeedback.hush() // never let the recognizer transcribe Jarvis itself
         chirp()
-        round(app, confirm = VoiceSession.draft.value != null, onDone = onDone)
+        // Give the wake loop a beat to actually release its AudioRecord
+        // before the recognizer opens the mic.
+        mainHandler.postDelayed({ round(app, confirm = VoiceSession.draft.value != null, onDone = onDone) }, 300)
     }
 
     private fun round(app: Context, confirm: Boolean, onDone: (() -> Unit)?, retriesLeft: Int = 1) {
@@ -116,10 +127,10 @@ object TaskCapture {
                     rec.destroy()
                     recognizer = null
                     VoiceSession.listening.value = false
-                    // Samsung's recognizer is touchy about back-to-back
-                    // sessions — retry a confirm round once before giving up.
-                    if (confirm && retriesLeft > 0) {
-                        mainHandler.postDelayed({ round(app, confirm = true, onDone = onDone, retriesLeft = retriesLeft - 1) }, 500)
+    // Samsung's recognizer is touchy about back-to-back
+                    // sessions and mic handoffs — retry once before giving up.
+                    if (retriesLeft > 0) {
+                        mainHandler.postDelayed({ round(app, confirm = confirm, onDone = onDone, retriesLeft = retriesLeft - 1) }, 500)
                         return
                     }
                     // Never end silently: say what state things are in.
@@ -168,6 +179,7 @@ object TaskCapture {
         text.lowercase(Locale.ROOT).trim().trimEnd('.', '!', ',', '?')
 
     private fun finish(onDone: (() -> Unit)?) {
+        captureActive = false // hand the mic back to the wake loop
         onDone?.invoke()
     }
 

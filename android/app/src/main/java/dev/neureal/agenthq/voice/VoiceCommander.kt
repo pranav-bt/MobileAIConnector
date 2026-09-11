@@ -61,7 +61,10 @@ class VoiceCommander(
     private fun wakeLoop() {
         val wakeEngine = engine ?: return
         while (running) {
-            if (capturing) {
+            // Yield the microphone whenever ANY capture is running — ours or
+            // the mic button's. Holding the AudioRecord silences the platform
+            // recognizer (it runs in another app's process).
+            if (capturing || TaskCapture.captureActive) {
                 Thread.sleep(100)
                 continue
             }
@@ -76,9 +79,9 @@ class VoiceCommander(
             try {
                 record.startRecording()
                 val chunk = ShortArray(WakeWordEngine.CHUNK_SAMPLES)
-                while (running && !capturing) {
+                while (running && !capturing && !TaskCapture.captureActive) {
                     var filled = 0
-                    while (filled < chunk.size && running && !capturing) {
+                    while (filled < chunk.size && running && !capturing && !TaskCapture.captureActive) {
                         val n = record.read(chunk, filled, chunk.size - filled)
                         if (n <= 0) break
                         filled += n
