@@ -89,14 +89,22 @@ object TaskCapture {
             recognizer?.destroy()
             val rec = SpeechRecognizer.createSpeechRecognizer(app)
             recognizer = rec
+            // Some recognizer versions deliver the transcript ONLY through
+            // partial results and hand onResults an empty list (seen live on
+            // the Flip 5) — keep the latest partial as the fallback.
+            var lastPartial: String? = null
             rec.setRecognitionListener(object : RecognitionListener {
                 override fun onResults(results: Bundle) {
                     rec.destroy()
                     recognizer = null
                     VoiceSession.listening.value = false
-                    val text = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val finalText = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         ?.firstOrNull()?.trim()
-                    VoiceTrace.log("heard(${if (confirm) "confirm" else "capture"}): \"${text?.take(60) ?: "(empty)"}\"")
+                    val text = if (finalText.isNullOrEmpty()) lastPartial?.trim() else finalText
+                    VoiceTrace.log(
+                        "heard(${if (confirm) "confirm" else "capture"}): \"${text?.take(60) ?: "(empty)"}\"" +
+                            if (finalText.isNullOrEmpty() && !text.isNullOrEmpty()) " [from partials]" else "",
+                    )
                     if (text.isNullOrEmpty()) {
                         VoiceFeedback.speak("I heard nothing.")
                         finish(onDone)
@@ -155,16 +163,23 @@ object TaskCapture {
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(buffer: ByteArray?) {}
                 override fun onEndOfSpeech() {}
-                override fun onPartialResults(partialResults: Bundle?) {}
+                override fun onPartialResults(partialResults: Bundle?) {
+                    val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        ?.firstOrNull()?.trim()
+                    if (!partial.isNullOrEmpty()) lastPartial = partial
+                }
                 override fun onEvent(eventType: Int, params: Bundle?) {}
             })
+            // NOTE: deliberately NO silence-length extras — they push the
+            // recognizer down a path that returns EMPTY final results (the
+            // trace showed 19s captures ending in nothing). This is the exact
+            // intent configuration of the build that worked; mid-thought
+            // pauses are handled by the draft+append confirm flow instead.
             rec.startListening(
                 Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                     .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-                    // A thinking pause should not end the capture prematurely.
-                    .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000)
-                    .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000),
+                    .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true),
             )
         }
     }
