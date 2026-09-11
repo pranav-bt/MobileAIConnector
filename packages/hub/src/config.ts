@@ -16,6 +16,7 @@ export type PermissionMode = 'auto' | 'strict';
 export interface HubConfig {
   workspaceRoots: WorkspaceRoot[];
   permissionMode: PermissionMode;
+  paEnabled: boolean; // the PA desk master switch (/pa on|off)
 }
 
 const DEFAULT_CONFIG: HubConfig = {
@@ -25,6 +26,7 @@ const DEFAULT_CONFIG: HubConfig = {
     { key: 'ai', path: 'D:\\AI', label: 'Misc — tools, temp projects, anything else (subdirs ok)' },
   ],
   permissionMode: 'auto',
+  paEnabled: true,
 };
 
 export function loadHubConfig(dataDir: string): HubConfig {
@@ -39,6 +41,7 @@ export function loadHubConfig(dataDir: string): HubConfig {
             ? parsed.workspaceRoots
             : DEFAULT_CONFIG.workspaceRoots,
         permissionMode: parsed.permissionMode === 'strict' ? 'strict' : 'auto',
+        paEnabled: parsed.paEnabled !== false,
       };
     } catch {
       /* unreadable — fall through to defaults */
@@ -52,4 +55,10 @@ export function savePermissionMode(dataDir: string, mode: PermissionMode): void 
   const configPath = join(dataDir, 'config.json');
   const config = loadHubConfig(dataDir);
   writeFileSync(configPath, JSON.stringify({ ...config, permissionMode: mode }, null, 2));
+}
+
+export function savePaEnabled(dataDir: string, enabled: boolean): void {
+  const configPath = join(dataDir, 'config.json');
+  const config = loadHubConfig(dataDir);
+  writeFileSync(configPath, JSON.stringify({ ...config, paEnabled: enabled }, null, 2));
 }

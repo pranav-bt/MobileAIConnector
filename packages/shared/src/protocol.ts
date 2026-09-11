@@ -88,6 +88,15 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
   // Message a freelancer: the hub resumes that terminal session's
   // conversation headlessly and returns the reply.
   z.object({ type: z.literal('freelancer.send'), agentId: z.string().min(1), text: z.string().min(1) }),
+  // PA desk: one switch gates all assistant machinery (reminders, alerts)…
+  z.object({ type: z.literal('pa.set'), enabled: z.boolean() }),
+  // …and deterministic capture into its stores (atMs for reminder/event).
+  z.object({
+    type: z.literal('pa.add'),
+    kind: z.enum(['todo', 'reminder', 'event', 'note']),
+    text: z.string().min(1),
+    atMs: z.number().optional(),
+  }),
   // Security commands — the hub only honors these from trusted local
   // clients, never from a device session.
   z.object({ type: z.literal('pairing.start') }),

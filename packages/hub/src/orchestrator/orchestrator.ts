@@ -19,6 +19,13 @@ import type { ProjectRegistry } from './projects.js';
 const now = () => Date.now();
 const MAX_LOUNGE_IDLE = 3;
 
+// The PA desk, as the orchestrator sees it.
+interface PaDeskLike {
+  setEnabled(enabled: boolean): void;
+  add(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number): void;
+  paths: { dir: string; todos: string; reminders: string; calendar: string; notes: string };
+}
+
 // The freelancer manager, as the orchestrator sees it.
 interface FreelancerRunner {
   describe(agentId: string): { name: string; cwd: string } | null;
@@ -431,6 +438,24 @@ export class Orchestrator implements CommandHandlers {
         'Your final message IS the deliverable the owner reads: include the complete findings/answer ' +
           '(with sources and links where relevant), never just a note that you finished.',
       );
+    }
+    if (this.#pa) {
+      sections.push(
+        `Shared owner notes (facts & preferences other teams recorded) live at: ${this.#pa.paths.notes} — consult them when a task depends on the owner's context.`,
+      );
+      // The PA team manages the desk's stores directly — plain files; the
+      // hub's own clock fires reminders/alerts, no polling needed.
+      if (task.teamId && /assistant/i.test(task.teamId)) {
+        const paths = this.#pa.paths;
+        sections.push(
+          'You run the PA desk. Its stores are plain files you edit directly (the hub clock fires reminders/event alerts automatically — never poll):\n' +
+            `- Todos: ${paths.todos} — [{id, text, done, createdAt}]\n` +
+            `- Reminders: ${paths.reminders} — [{id, text, atMs}] (atMs = epoch milliseconds; fired ones gain firedAt)\n` +
+            `- Calendar (custom, the only calendar we use): ${paths.calendar} — [{id, title, startMs}]\n` +
+            `- Owner notes: ${paths.notes} — durable facts/preferences, one bullet per line.\n` +
+            'When asked to add/complete/list/reschedule any of these, edit the files; when summarizing (agenda, open todos), read them.',
+        );
+      }
     }
     return sections.join('\n');
   }
@@ -992,6 +1017,22 @@ export class Orchestrator implements CommandHandlers {
 
   captureScreen(): void {
     void capturePcScreen(this.#bus);
+  }
+
+  // The PA desk (deterministic assistant stores + clock) is created by the
+  // hub and attached here so its commands flow through the normal channel.
+  #pa: PaDeskLike | null = null;
+
+  attachPa(desk: PaDeskLike): void {
+    this.#pa = desk;
+  }
+
+  paSet(enabled: boolean): void {
+    this.#pa?.setEnabled(enabled);
+  }
+
+  paAdd(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number): void {
+    this.#pa?.add(kind, text, atMs);
   }
 
   // The freelancer manager is created alongside the hub and attached here so

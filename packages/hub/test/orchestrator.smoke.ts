@@ -29,6 +29,7 @@ const hub = await startHub({
   dataDir,
   claudeProjectsDir, // isolate the freelancer observer from real sessions
   freelancerOpenSessions: () => 2, // pretend two terminal sessions are open
+  paTickMs: 300, // fast PA clock for scenario 21
   freelancerRunner: async (_sessionId, _cwd, text) => {
     freelancerCalls += 1;
     return text.includes('QA found issues')
@@ -600,6 +601,41 @@ try {
   );
   if (freelancerCalls !== 2) fail(`expected 2 freelancer runs (work + fix), got ${freelancerCalls}`);
   console.log('freelancer-as-worker ok: task, review, QA in own project, remediation to the same session, re-QA pass');
+
+  // 21. PA desk: deterministic capture, token-free firing to the phone, and
+  // the single kill switch (/pa off holds everything; /pa on releases it).
+  ws.send(encodeCommand({ type: 'pa.add', kind: 'todo', text: 'buy milk' }));
+  await waitFor('todo captured', (e) => e.type === 'activity' && e.entry.message === 'todo added: buy milk');
+  const todosOnDisk = JSON.parse(readFileSync(join(dataDir, 'pa', 'todos.json'), 'utf8'));
+  if (!todosOnDisk.some((t: { text: string }) => t.text === 'buy milk')) fail('todo not persisted to data/pa');
+
+  ws.send(encodeCommand({ type: 'pa.add', kind: 'reminder', text: 'stand up and stretch', atMs: Date.now() + 700 }));
+  await waitFor(
+    'reminder fires as an activity',
+    (e) => e.type === 'activity' && e.entry.message === 'Reminder: stand up and stretch',
+    8000,
+  );
+  await waitFor(
+    'reminder pushed to the phone via outbox',
+    (e) => e.type === 'file.shared' && e.file.name.startsWith('PA Reminder'),
+    20000,
+  );
+
+  ws.send(encodeCommand({ type: 'pa.set', enabled: false }));
+  await waitFor('PA desk off', (e) => e.type === 'activity' && e.entry.message.includes('PA desk switched OFF'));
+  ws.send(encodeCommand({ type: 'pa.add', kind: 'reminder', text: 'ghost ping', atMs: Date.now() + 400 }));
+  await waitFor('ghost reminder accepted', (e) => e.type === 'activity' && e.entry.message.includes('ghost ping'));
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  if (events.some((e) => e.type === 'activity' && e.entry.message === 'Reminder: ghost ping')) {
+    fail('the kill switch did not gate the PA clock');
+  }
+  ws.send(encodeCommand({ type: 'pa.set', enabled: true }));
+  await waitFor(
+    'held reminder fires after re-enable',
+    (e) => e.type === 'activity' && e.entry.message === 'Reminder: ghost ping',
+    8000,
+  );
+  console.log('PA desk ok: capture persisted, clock fires to phone, /pa off holds and /pa on releases');
 
   console.log('ORCH SMOKE PASS');
   ws.close();

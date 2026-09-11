@@ -3,7 +3,46 @@ import type { ClientCommand, HubState, WorkspaceRoot } from '@agent-hq/shared';
 import { isActive } from '../status';
 
 const HELP =
-  '/project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /permissions auto|strict';
+  '/project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /permissions auto|strict · /todo <text> · /note <text> · /remind <when> <text> · /event <when> <title> · /pa on|off';
+
+const WHEN_HELP = '<when>: "in 20m|2h|3d", "17:30", "tomorrow 09:00", or "2026-09-14 18:00"';
+
+// Deterministic time parsing (zero tokens): returns epoch ms or null.
+function parseWhen(raw: string): number | null {
+  const text = raw.trim().toLowerCase();
+  const now = new Date();
+  let match = text.match(/^in\s+(\d+)\s*(m|min|minutes?|h|hours?|d|days?)$/);
+  if (match) {
+    const n = Number(match[1]);
+    const unit = match[2]![0];
+    return now.getTime() + n * (unit === 'm' ? 60_000 : unit === 'h' ? 3_600_000 : 86_400_000);
+  }
+  match = text.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})$/);
+  if (match) {
+    const at = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]));
+    return at.getTime();
+  }
+  match = text.match(/^(tomorrow\s+)?(\d{1,2}):(\d{2})$/);
+  if (match) {
+    const at = new Date(now);
+    at.setHours(Number(match[2]), Number(match[3]), 0, 0);
+    if (match[1]) at.setDate(at.getDate() + 1);
+    else if (at.getTime() <= now.getTime()) at.setDate(at.getDate() + 1); // past today -> tomorrow
+    return at.getTime();
+  }
+  return null;
+}
+
+// "/remind in 20m take the build out" -> {atMs, text: "take the build out"}.
+// The <when> part is everything before the first token that stops parsing.
+function splitWhen(rest: string): { atMs: number; text: string } | null {
+  const words = rest.trim().split(/\s+/);
+  for (let take = Math.min(3, words.length - 1); take >= 1; take--) {
+    const atMs = parseWhen(words.slice(0, take).join(' '));
+    if (atMs !== null) return { atMs, text: words.slice(take).join(' ') };
+  }
+  return null;
+}
 
 function slug(ref: string): string {
   return ref.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -60,6 +99,31 @@ function parseSlashCommand(
   if (match && match[1]) {
     return { command: { type: 'project.remove', projectId: slug(match[1]) }, note: `removing project ${match[1]}` };
   }
+  // PA desk: deterministic capture + the master switch.
+  match = text.match(/^\/pa (on|off)$/i);
+  if (match && match[1]) {
+    const enabled = match[1].toLowerCase() === 'on';
+    return { command: { type: 'pa.set', enabled }, note: `PA desk ${enabled ? 'on' : 'off'}` };
+  }
+  match = text.match(/^\/todo (.+)$/i);
+  if (match && match[1]) {
+    return { command: { type: 'pa.add', kind: 'todo', text: match[1].trim() }, note: 'todo added' };
+  }
+  match = text.match(/^\/note (.+)$/i);
+  if (match && match[1]) {
+    return { command: { type: 'pa.add', kind: 'note', text: match[1].trim() }, note: 'noted' };
+  }
+  match = text.match(/^\/(remind|event) (.+)$/i);
+  if (match && match[1] && match[2]) {
+    const kind = match[1].toLowerCase() === 'remind' ? 'reminder' : 'event';
+    const parsed = splitWhen(match[2]);
+    if (!parsed || !parsed.text) return { hint: `couldn't read the time — ${WHEN_HELP}` };
+    return {
+      command: { type: 'pa.add', kind, text: parsed.text, atMs: parsed.atMs },
+      note: `${kind} set for ${new Date(parsed.atMs).toLocaleString()}`,
+    };
+  }
+
   match = text.match(/^\/permissions (auto|strict)$/i);
   if (match && match[1]) {
     const mode = match[1].toLowerCase() as 'auto' | 'strict';

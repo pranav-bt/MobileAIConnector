@@ -1,0 +1,199 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { HubBus } from './bus.js';
+
+// The PA desk: the deterministic half of the Personal Assistant. Plain-data
+// stores (todos, reminders, a custom calendar, shared owner notes) plus a
+// clock that fires reminders and event alerts to the phone — ZERO tokens at
+// rest. PA workers edit the same files when a task needs judgment; every
+// other team is told where the shared notes live.
+//
+// One switch gates all of it: pa.set / "/pa off". While off, nothing fires
+// and nothing is written by the clock; pending items are kept and fire after
+// re-enable. The stores stay editable either way.
+
+interface Todo {
+  id: string;
+  text: string;
+  done: boolean;
+  createdAt: number;
+}
+interface Reminder {
+  id: string;
+  text: string;
+  atMs: number;
+  firedAt?: number;
+}
+interface CalEvent {
+  id: string;
+  title: string;
+  startMs: number;
+  remindedAt?: number;
+}
+
+const EVENT_REMIND_BEFORE_MS = 15 * 60_000;
+const KEEP_FIRED_MS = 7 * 24 * 60 * 60_000;
+
+const newId = () => `pa-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+
+export class PaDesk {
+  #bus: HubBus;
+  #dir: string;
+  #outboxDir: string;
+  #enabled: boolean;
+  #persistEnabled: (enabled: boolean) => void;
+  #intervalMs: number;
+  #interval: ReturnType<typeof setInterval> | null = null;
+
+  constructor(
+    bus: HubBus,
+    dataDir: string,
+    outboxDir: string,
+    options: { enabled: boolean; persistEnabled: (enabled: boolean) => void; intervalMs?: number },
+  ) {
+    this.#bus = bus;
+    this.#dir = join(dataDir, 'pa');
+    this.#outboxDir = outboxDir;
+    this.#enabled = options.enabled;
+    this.#persistEnabled = options.persistEnabled;
+    this.#intervalMs = options.intervalMs ?? 30_000;
+    mkdirSync(this.#dir, { recursive: true });
+    for (const file of ['todos.json', 'reminders.json', 'calendar.json']) {
+      const path = join(this.#dir, file);
+      if (!existsSync(path)) writeFileSync(path, '[]\n');
+    }
+    const notes = join(this.#dir, 'notes.md');
+    if (!existsSync(notes)) writeFileSync(notes, '# Owner notes — shared facts & preferences\n');
+  }
+
+  get enabled(): boolean {
+    return this.#enabled;
+  }
+
+  get paths(): { dir: string; todos: string; reminders: string; calendar: string; notes: string } {
+    return {
+      dir: this.#dir,
+      todos: join(this.#dir, 'todos.json'),
+      reminders: join(this.#dir, 'reminders.json'),
+      calendar: join(this.#dir, 'calendar.json'),
+      notes: join(this.#dir, 'notes.md'),
+    };
+  }
+
+  start(): void {
+    this.#interval = setInterval(() => this.#tick(), this.#intervalMs);
+  }
+
+  stop(): void {
+    if (this.#interval) clearInterval(this.#interval);
+  }
+
+  setEnabled(enabled: boolean): void {
+    if (this.#enabled === enabled) return;
+    this.#enabled = enabled;
+    this.#persistEnabled(enabled);
+    this.#activity(
+      enabled
+        ? 'PA desk switched ON — reminders and event alerts will fire (missed ones fire now)'
+        : 'PA desk switched OFF — nothing will fire or notify until "/pa on"',
+    );
+  }
+
+  add(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number): void {
+    const clean = text.trim();
+    if (!clean) return;
+    if (kind === 'todo') {
+      const todos = this.#read<Todo[]>('todos.json', []);
+      todos.push({ id: newId(), text: clean, done: false, createdAt: Date.now() });
+      this.#write('todos.json', todos);
+      this.#activity(`todo added: ${clean.slice(0, 60)}`);
+      return;
+    }
+    if (kind === 'note') {
+      appendFileSync(join(this.#dir, 'notes.md'), `- ${new Date().toISOString().slice(0, 10)}: ${clean}\n`);
+      this.#activity(`noted: ${clean.slice(0, 60)}`);
+      return;
+    }
+    if (!atMs || !Number.isFinite(atMs) || atMs < Date.now() - 60_000) {
+      this.#activity(`${kind} needs a valid future time — nothing was saved`);
+      return;
+    }
+    const when = new Date(atMs).toLocaleString('en-GB', { hour12: false }).slice(0, 17);
+    if (kind === 'reminder') {
+      const reminders = this.#read<Reminder[]>('reminders.json', []);
+      reminders.push({ id: newId(), text: clean, atMs });
+      this.#write('reminders.json', reminders);
+      this.#activity(`reminder set for ${when}: ${clean.slice(0, 50)}`);
+    } else {
+      const events = this.#read<CalEvent[]>('calendar.json', []);
+      events.push({ id: newId(), title: clean, startMs: atMs });
+      this.#write('calendar.json', events);
+      this.#activity(`event added ${when}: ${clean.slice(0, 50)}`);
+    }
+  }
+
+  #tick(): void {
+    if (!this.#enabled) return;
+    try {
+      const now = Date.now();
+
+      const reminders = this.#read<Reminder[]>('reminders.json', []);
+      let dirty = false;
+      for (const reminder of reminders) {
+        if (reminder.firedAt || reminder.atMs > now) continue;
+        reminder.firedAt = now;
+        dirty = true;
+        this.#notify('Reminder', reminder.text);
+      }
+      const keptReminders = reminders.filter((r) => !r.firedAt || now - r.firedAt < KEEP_FIRED_MS);
+      if (dirty || keptReminders.length !== reminders.length) this.#write('reminders.json', keptReminders);
+
+      const events = this.#read<CalEvent[]>('calendar.json', []);
+      let eventsDirty = false;
+      for (const event of events) {
+        if (event.remindedAt || now < event.startMs - EVENT_REMIND_BEFORE_MS) continue;
+        event.remindedAt = now;
+        eventsDirty = true;
+        const minutes = Math.max(0, Math.round((event.startMs - now) / 60_000));
+        this.#notify(minutes > 0 ? `In ${minutes} min` : 'Now', event.title);
+      }
+      const keptEvents = events.filter((e) => !e.remindedAt || now - e.startMs < KEEP_FIRED_MS);
+      if (eventsDirty || keptEvents.length !== events.length) this.#write('calendar.json', keptEvents);
+    } catch {
+      /* a bad tick never kills the clock; next one retries */
+    }
+  }
+
+  // A notice = activity line (desktop Today feed) + a small file through the
+  // outbox, which reaches the phone as a real notification and is readable
+  // in place. No model call anywhere on this path.
+  #notify(title: string, body: string): void {
+    this.#activity(`${title}: ${body}`);
+    try {
+      const slug = body.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'notice';
+      writeFileSync(
+        join(this.#outboxDir, `PA ${title} - ${slug}.md`),
+        `# ${title}\n\n${body}\n\n_${new Date().toLocaleString('en-GB', { hour12: false })}_\n`,
+      );
+    } catch {
+      /* phone push is best-effort; the activity line stands */
+    }
+  }
+
+  #activity(message: string): void {
+    const paLead = this.#bus.state.agents['personal-assistant-team-lead'] ? 'personal-assistant-team-lead' : 'master';
+    this.#bus.publish({ type: 'activity', entry: { agentId: paLead, taskId: null, message, at: Date.now() } });
+  }
+
+  #read<T>(file: string, fallback: T): T {
+    try {
+      return JSON.parse(readFileSync(join(this.#dir, file), 'utf8')) as T;
+    } catch {
+      return fallback;
+    }
+  }
+
+  #write(file: string, value: unknown): void {
+    writeFileSync(join(this.#dir, file), JSON.stringify(value, null, 2) + '\n');
+  }
+}

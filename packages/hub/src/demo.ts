@@ -309,6 +309,13 @@ export function startDemo(bus: HubBus, options: DemoOptions = {}): {
         entry: { agentId: 'master', taskId: null, message: 'freelancer messaging is available in engine mode', at: now() },
       });
     },
+
+    paSet() {
+      /* the PA desk runs in engine mode */
+    },
+    paAdd() {
+      /* the PA desk runs in engine mode */
+    },
   };
 
   return {

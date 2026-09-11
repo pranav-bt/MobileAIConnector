@@ -6,6 +6,7 @@ import { HubBus } from './bus.js';
 import { loadPriorState, startEventLog, startSnapshotWriter } from './persist.js';
 import { ensureInboxDir, startOutboxWatcher } from './files.js';
 import { FreelancerManager } from './freelancers.js';
+import { PaDesk } from './pa.js';
 import { startServer, type HubServer } from './server.js';
 import { startDemo } from './demo.js';
 import { ClaudeEngine } from './engine/claude.js';
@@ -16,7 +17,7 @@ import { ProjectRegistry } from './orchestrator/projects.js';
 import { PairingManager } from './security/pairing.js';
 import { SecurityController } from './security/controller.js';
 import { startLimitsPoller } from './usage/limits.js';
-import { loadHubConfig, savePermissionMode, type PermissionMode, type WorkspaceRoot } from './config.js';
+import { loadHubConfig, savePaEnabled, savePermissionMode, type PermissionMode, type WorkspaceRoot } from './config.js';
 import type { CommandHandlers } from './commands.js';
 
 export interface HubOptions {
@@ -30,6 +31,7 @@ export interface HubOptions {
   claudeProjectsDir?: string; // tests override; defaults to ~/.claude/projects
   freelancerOpenSessions?: () => number; // tests override the process scan
   freelancerRunner?: (sessionId: string, cwd: string, text: string) => Promise<string>; // tests override the sidecar
+  paTickMs?: number; // tests speed up the PA desk clock
 }
 
 export interface RunningHub {
@@ -72,6 +74,15 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   const outbox = startOutboxWatcher(bus, dataDir);
   const inboxDir = ensureInboxDir(dataDir);
 
+  // The PA desk: deterministic assistant stores + clock (zero tokens at
+  // rest); "/pa off" gates all of it, persisted in config.
+  const paDesk = new PaDesk(bus, dataDir, outbox.outboxDir, {
+    enabled: config.paEnabled,
+    persistEnabled: (enabled) => savePaEnabled(dataDir, enabled),
+    ...(options.paTickMs ? { intervalMs: options.paTickMs } : {}),
+  });
+  paDesk.start();
+
   const pairing = new PairingManager(dataDir);
   await pairing.init();
 
@@ -106,6 +117,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     orchestrator.init();
     workerCwds = () => orchestrator.activeWorkerCwds();
     attachFreelancers = (manager) => orchestrator.attachFreelancers(manager);
+    orchestrator.attachPa(paDesk);
 
     // Task history and usage survive restarts; anything mid-flight when the
     // hub died comes back as paused.
@@ -172,6 +184,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
       stopLimits?.();
       stopSnapshots?.();
       freelancers.stop();
+      paDesk.stop();
       outbox.stop();
       securityController.stop();
       stopLog();
