@@ -79,3 +79,9 @@ npm run typecheck      # tsc across workspaces
   <name>: <charter> · /team workers <team> <n> · /team remove <team> ·
   /project add <name> <path> [description] · /project remove <project>.
   Prefixing a task with @<project> pins it to that project.
+- Image generation (`tools/generate-image.mjs`) is LOCAL FIRST: on-demand
+  ComfyUI at D:\AI\comfyui (boots per job, watchdog kills it after ~2 min
+  idle — zero background footprint; models: FLUX schnell fp8 default, SDXL
+  via --model sdxl). The Gemini API is the fallback and the only path for
+  --in image editing (key in data/secrets.json; free tier has zero image
+  quota). Never wire paid or web-scraped generation.
