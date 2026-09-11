@@ -242,6 +242,25 @@ class HubClient(private val store: KV, private val deviceName: String) {
         sendCommand(dev.neureal.agenthq.model.Commands.respondPermission(requestId, decision, signature))
     }
 
+    // Submit a task, waiting for the session first — raw sendCommand drops
+    // silently when the link happens to be down at that moment.
+    fun submitTask(text: String, onResult: (String?) -> Unit) {
+        ensureConnected()
+        scope.launch {
+            var waited = 0
+            while (linkState.value !is LinkState.Connected && waited < 10_000) {
+                delay(250)
+                waited += 250
+            }
+            if (linkState.value !is LinkState.Connected) {
+                onResult("Not connected to the PC")
+                return@launch
+            }
+            sendCommand(dev.neureal.agenthq.model.Commands.submitTask(text))
+            onResult(null)
+        }
+    }
+
     // Send a file to the PC's inbox. sendCommand silently drops when no
     // session is up, so this waits briefly for the link before sealing.
     fun sendFile(name: String, mimeType: String, bytes: ByteArray, onResult: (String?) -> Unit) {

@@ -10,7 +10,6 @@ import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import dev.neureal.agenthq.model.Commands
 import dev.neureal.agenthq.net.HubHolder
 import java.util.Locale
 
@@ -36,12 +35,20 @@ object TaskCapture {
 
     fun submitDraft(context: Context) {
         val text = VoiceSession.draft.value?.trim().orEmpty()
-        VoiceSession.draft.value = null
         if (text.isEmpty()) return
+        VoiceSession.draft.value = null
         val hub = HubHolder.get(context.applicationContext)
-        hub.sendCommand(Commands.submitTask(text))
-        VoiceFeedback.speak("On it.")
-        VoiceFeedback.followTask(hub, text)
+        // Waits for the encrypted session — a raw send would drop silently
+        // when the link is down, which reads as "it just did nothing".
+        hub.submitTask(text) { error ->
+            if (error == null) {
+                VoiceFeedback.speak("On it.")
+                VoiceFeedback.followTask(hub, text)
+            } else {
+                VoiceSession.draft.value = text // nothing was sent — keep it
+                VoiceFeedback.speak("$error. Your draft is kept — try again once linked.")
+            }
+        }
     }
 
     fun discardDraft() {
@@ -62,7 +69,7 @@ object TaskCapture {
         round(app, confirm = VoiceSession.draft.value != null, onDone = onDone)
     }
 
-    private fun round(app: Context, confirm: Boolean, onDone: (() -> Unit)?) {
+    private fun round(app: Context, confirm: Boolean, onDone: (() -> Unit)?, retriesLeft: Int = 1) {
         mainHandler.post {
             VoiceSession.listening.value = true
             recognizer?.destroy()
@@ -86,17 +93,17 @@ object TaskCapture {
                         afterTts { round(app, confirm = true, onDone = onDone) }
                         return
                     }
-                    when (normalize(text)) {
-                        in SEND_WORDS -> {
+                    when (classify(text)) {
+                        Verdict.SEND -> {
                             submitDraft(app)
                             finish(onDone)
                         }
-                        in CANCEL_WORDS -> {
+                        Verdict.CANCEL -> {
                             discardDraft()
                             VoiceFeedback.speak("Discarded.")
                             finish(onDone)
                         }
-                        else -> {
+                        Verdict.APPEND -> {
                             VoiceSession.draft.value = ((VoiceSession.draft.value ?: "") + " " + text).trim()
                             VoiceSession.you(text)
                             VoiceFeedback.speak("Added. Say send when ready.")
@@ -109,8 +116,18 @@ object TaskCapture {
                     rec.destroy()
                     recognizer = null
                     VoiceSession.listening.value = false
-                    // The draft (if any) stays visible in the overlay with
-                    // Send/Discard buttons — nothing is sent on a mishear.
+                    // Samsung's recognizer is touchy about back-to-back
+                    // sessions — retry a confirm round once before giving up.
+                    if (confirm && retriesLeft > 0) {
+                        mainHandler.postDelayed({ round(app, confirm = true, onDone = onDone, retriesLeft = retriesLeft - 1) }, 500)
+                        return
+                    }
+                    // Never end silently: say what state things are in.
+                    if (VoiceSession.draft.value != null) {
+                        VoiceFeedback.speak("Your draft is waiting. Say hey Jarvis, then send — or tap send in the app.")
+                    } else if (!confirm) {
+                        VoiceFeedback.speak("I didn't catch that.")
+                    }
                     finish(onDone)
                 }
 
@@ -133,6 +150,20 @@ object TaskCapture {
         }
     }
 
+    private enum class Verdict { SEND, CANCEL, APPEND }
+
+    // Forgiving match: exact phrases, or a short utterance containing an
+    // unambiguous verb ("please send it", "yeah send", "no cancel that").
+    private fun classify(raw: String): Verdict {
+        val text = normalize(raw)
+        if (text in SEND_WORDS) return Verdict.SEND
+        if (text in CANCEL_WORDS) return Verdict.CANCEL
+        val words = text.split(' ').filter { it.isNotBlank() }
+        if (words.size <= 4 && words.any { it in setOf("send", "submit", "ship") }) return Verdict.SEND
+        if (words.size <= 4 && words.any { it in setOf("cancel", "discard", "scrap") }) return Verdict.CANCEL
+        return Verdict.APPEND
+    }
+
     private fun normalize(text: String): String =
         text.lowercase(Locale.ROOT).trim().trimEnd('.', '!', ',', '?')
 
@@ -141,20 +172,27 @@ object TaskCapture {
     }
 
     // Wait for Jarvis to finish talking before the mic reopens, so the
-    // confirm round never transcribes the prompt itself.
+    // confirm round never transcribes the prompt itself. TTS has startup
+    // latency, so first wait for it to START (up to 2s), then to end —
+    // opening the mic during the prompt would append Jarvis's own words
+    // to the draft.
     private fun afterTts(block: () -> Unit) {
         mainHandler.postDelayed(object : Runnable {
             private var waited = 0
+            private var started = false
             override fun run() {
-                if (!VoiceFeedback.isSpeaking() || waited > 8000) {
+                if (VoiceFeedback.isSpeaking()) started = true
+                val ttsDone = started && !VoiceFeedback.isSpeaking()
+                val neverStarted = !started && waited >= 2000
+                if (ttsDone || neverStarted || waited > 12000) {
                     chirp()
                     block()
                 } else {
-                    waited += 200
-                    mainHandler.postDelayed(this, 200)
+                    waited += 150
+                    mainHandler.postDelayed(this, 150)
                 }
             }
-        }, 600)
+        }, 150)
     }
 
     private fun chirp() {

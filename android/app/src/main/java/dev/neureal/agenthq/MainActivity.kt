@@ -288,7 +288,11 @@ class MainActivity : FragmentActivity() {
                     }
                 },
                 onRespond = { request, decision -> respondWithBiometric(request, decision) },
-                onSubmitTask = { text -> hub.sendCommand(Commands.submitTask(text)) },
+                onSubmitTask = { text ->
+                    hub.submitTask(text) { error ->
+                        if (error != null) runOnUiThread { Toast.makeText(this, "$error — task not sent", Toast.LENGTH_LONG).show() }
+                    }
+                },
                 onVoice = { startVoiceCapture() },
                 onSendFile = { filePicker.launch("*/*") },
                 onUnpair = {
