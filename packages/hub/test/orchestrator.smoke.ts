@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
@@ -17,10 +17,12 @@ function fail(message: string): never {
 }
 
 const dataDir = mkdtempSync(join(tmpdir(), 'agent-hq-orch-'));
+const claudeProjectsDir = mkdtempSync(join(tmpdir(), 'agent-hq-claude-'));
 const hub = await startHub({
   engine: 'mock',
   port: PORT,
   dataDir,
+  claudeProjectsDir, // isolate the freelancer observer from real sessions
   // Tests sandbox the workspace-roots policy to the temp dir.
   workspaceRoots: [{ key: 'tmp', path: tmpdir(), label: 'test sandbox' }],
 });
@@ -453,6 +455,31 @@ try {
     fail('pushed report does not carry the findings');
   }
   console.log('report delivery ok: findings saved to data/reports and pushed to the phone');
+
+  // 19. Freelancer observer: a live terminal Claude Code session (a
+  // recently-written transcript) shows up as a freelancer with its project
+  // name and last action.
+  const sessionDir = join(claudeProjectsDir, 'd--Work-Roblox-CastleWars');
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(
+    join(sessionDir, 'sess-castle-1.jsonl'),
+    [
+      JSON.stringify({ type: 'user', cwd: 'D:\\Work\\Roblox\\CastleWars', message: { content: 'tweak the tower balance' } }),
+      JSON.stringify({
+        type: 'assistant',
+        cwd: 'D:\\Work\\Roblox\\CastleWars',
+        message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }] },
+      }),
+    ].join('\n') + '\n',
+  );
+  const freelancer = await waitFor(
+    'terminal session appears as a freelancer',
+    (e) => e.type === 'agent.updated' && e.agent.role === 'freelancer' && e.agent.name === 'CastleWars',
+    12000,
+  );
+  if (freelancer.type !== 'agent.updated') fail('unreachable');
+  if (!freelancer.agent.activity.includes('npm test')) fail('freelancer activity missing the last action');
+  console.log('freelancer observer ok: terminal session visible with project name + last action');
 
   console.log('ORCH SMOKE PASS');
   ws.close();

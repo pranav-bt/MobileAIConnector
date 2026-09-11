@@ -441,6 +441,21 @@ private fun OfficeTab(
             }
         }
 
+        // Terminal Claude Code sessions on the PC, observed read-only.
+        val freelancers = snapshot.agents.filter { it.role == "freelancer" }.sortedBy { it.name }
+        if (freelancers.isNotEmpty()) {
+            item {
+                Card {
+                    Row {
+                        SectionLabel("Freelancers")
+                        Spacer(Modifier.weight(1f))
+                        SectionLabel("terminal sessions · read-only", HQ.faint)
+                    }
+                    freelancers.forEach { AgentChip(it) }
+                }
+            }
+        }
+
         item { Spacer(Modifier.height(8.dp)) }
     }
 }

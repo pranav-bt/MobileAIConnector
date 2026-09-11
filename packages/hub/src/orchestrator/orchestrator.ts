@@ -38,6 +38,9 @@ export class Orchestrator implements CommandHandlers {
   // and master-dispatched handovers each add one; past MAX the master stops
   // spawning and escalates to the owner instead of looping.
   #taskDepth = new Map<string, number>();
+  // Where each running worker is working — the freelancer observer skips
+  // these dirs so hub workers don't double as "freelancers".
+  #runningCwds = new Map<string, string>();
   #routingCount = 0;
   #tokensByModel: Record<ModelTier, number> = { opus: 0, sonnet: 0, haiku: 0 };
 
@@ -191,6 +194,10 @@ export class Orchestrator implements CommandHandlers {
 
   submitTask(text: string): void {
     void this.#intake(text);
+  }
+
+  activeWorkerCwds(): string[] {
+    return [...this.#runningCwds.values()];
   }
 
   stopTask(taskId: string): void {
@@ -431,6 +438,7 @@ export class Orchestrator implements CommandHandlers {
 
     const controller = new AbortController();
     this.#controllers.set(taskId, controller);
+    this.#runningCwds.set(taskId, project.workspaceDir || this.#workspaceDir);
 
     try {
       const result = await this.#engine.runWorker({
@@ -514,6 +522,7 @@ export class Orchestrator implements CommandHandlers {
       }
     } finally {
       this.#controllers.delete(taskId);
+      this.#runningCwds.delete(taskId);
       this.#stopping.delete(taskId);
       this.#patchAgent(`${team.id}-lead`, { status: 'idle', activity: 'standing by', taskId: null });
       this.#retireWorker(workerId);

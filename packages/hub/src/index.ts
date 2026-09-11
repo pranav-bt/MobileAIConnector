@@ -5,6 +5,7 @@ import { DEFAULT_HUB_PORT } from '@agent-hq/shared';
 import { HubBus } from './bus.js';
 import { loadPriorState, startEventLog, startSnapshotWriter } from './persist.js';
 import { ensureInboxDir, startOutboxWatcher } from './files.js';
+import { startFreelancerObserver } from './freelancers.js';
 import { startServer, type HubServer } from './server.js';
 import { startDemo } from './demo.js';
 import { ClaudeEngine } from './engine/claude.js';
@@ -26,6 +27,7 @@ export interface HubOptions {
   dataDir?: string;
   cwd?: string;
   workspaceRoots?: WorkspaceRoot[]; // tests override; defaults from data/config.json
+  claudeProjectsDir?: string; // tests override; defaults to ~/.claude/projects
 }
 
 export interface RunningHub {
@@ -74,6 +76,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   let handlers: CommandHandlers;
   let stopDemo: (() => void) | null = null;
   let stopSnapshots: (() => void) | null = null;
+  let workerCwds: () => string[] = () => [];
   const mode: 'demo' | 'claude' | 'mock' =
     options.engine === 'claude' || options.engine === 'mock' ? options.engine : 'demo';
 
@@ -98,6 +101,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
       inboxDir,
     );
     orchestrator.init();
+    workerCwds = () => orchestrator.activeWorkerCwds();
 
     // Task history and usage survive restarts; anything mid-flight when the
     // hub died comes back as paused.
@@ -136,6 +140,12 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   // when running real agents; demo seeds fake meters and mock stays offline.
   const stopLimits = mode === 'claude' ? startLimitsPoller(bus) : null;
 
+  // Terminal Claude Code sessions on this machine show up as Freelancers.
+  const freelancers = startFreelancerObserver(bus, {
+    ...(options.claudeProjectsDir ? { projectsDir: options.claudeProjectsDir } : {}),
+    activeCwds: () => workerCwds(),
+  });
+
   const securityController = new SecurityController(bus, pairing, port);
   const server: HubServer = await startServer(bus, handlers, securityController, port);
   securityController.publishState();
@@ -151,6 +161,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
       stopDemo?.();
       stopLimits?.();
       stopSnapshots?.();
+      freelancers.stop();
       outbox.stop();
       securityController.stop();
       stopLog();
