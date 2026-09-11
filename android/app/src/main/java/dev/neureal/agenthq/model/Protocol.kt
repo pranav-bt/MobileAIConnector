@@ -171,6 +171,14 @@ object Commands {
         put("type", "screen.capture")
     }
 
+    // Message a freelancer (terminal session): the hub resumes its
+    // conversation headlessly and pushes the reply back.
+    fun freelancerSend(agentId: String, text: String): JsonObject = buildJsonObject {
+        put("type", "freelancer.send")
+        put("agentId", agentId)
+        put("text", text)
+    }
+
     // Phone -> PC: the hub lands this in its data/inbox for the teams.
     fun sendFile(name: String, mimeType: String, bytesB64: String): JsonObject = buildJsonObject {
         put("type", "file.send")

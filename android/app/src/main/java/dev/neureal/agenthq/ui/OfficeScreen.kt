@@ -197,6 +197,7 @@ fun MainScreen(
     onSubmitTask: (String) -> Unit,
     onVoice: () -> Unit,
     onSendFile: () -> Unit,
+    onFreelancerSend: (String, String) -> Unit,
     onUnpair: () -> Unit,
 ) {
     var tab by rememberSaveable { mutableStateOf(0) }
@@ -253,7 +254,7 @@ fun MainScreen(
     ) { padding ->
         Box(Modifier.padding(padding)) {
             when (tab) {
-                0 -> OfficeTab(snapshot, connected, pending, onRespond)
+                0 -> OfficeTab(snapshot, connected, pending, onRespond, onFreelancerSend)
                 1 -> TasksTab(snapshot, connected, onSubmitTask)
                 2 -> HistoryTab(snapshot)
                 else -> LinkTab(snapshot, connected, pairedHost, backgroundEnabled, onToggleBackground, jarvisEnabled, onToggleJarvis, onSendFile, onUnpair)
@@ -385,6 +386,7 @@ private fun OfficeTab(
     connected: Boolean,
     pending: List<PermissionRequest>,
     onRespond: (PermissionRequest, String) -> Unit,
+    onFreelancerSend: (String, String) -> Unit,
 ) {
     val master = snapshot.agents.firstOrNull { it.role == "master" }
     val teams = snapshot.teams.sortedBy { it.createdAt }
@@ -441,17 +443,53 @@ private fun OfficeTab(
             }
         }
 
-        // Terminal Claude Code sessions on the PC, observed read-only.
+        // Terminal Claude Code sessions on the PC — visible and messageable.
         val freelancers = snapshot.agents.filter { it.role == "freelancer" }.sortedBy { it.name }
         if (freelancers.isNotEmpty()) {
             item {
+                var messageTarget by remember { mutableStateOf<String?>(null) }
+                var messageText by remember { mutableStateOf("") }
                 Card {
                     Row {
                         SectionLabel("Freelancers")
                         Spacer(Modifier.weight(1f))
-                        SectionLabel("terminal sessions · read-only", HQ.faint)
+                        SectionLabel("terminal sessions", HQ.faint)
                     }
-                    freelancers.forEach { AgentChip(it) }
+                    freelancers.forEach { agent ->
+                        AgentChip(agent)
+                        Text(
+                            if (messageTarget == agent.id) "close" else "message ${agent.name}",
+                            color = HQ.accent, fontSize = 10.5.sp, fontFamily = FontFamily.Monospace,
+                            modifier = Modifier
+                                .clickable {
+                                    messageTarget = if (messageTarget == agent.id) null else agent.id
+                                    messageText = ""
+                                }
+                                .padding(horizontal = 4.dp, vertical = 2.dp),
+                        )
+                        if (messageTarget == agent.id) {
+                            OutlinedTextField(
+                                value = messageText,
+                                onValueChange = { messageText = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                placeholder = { Text("Instruction for this session…", color = HQ.faint, fontSize = 11.sp) },
+                                textStyle = androidx.compose.ui.text.TextStyle(color = HQ.text, fontSize = 12.sp),
+                                minLines = 2,
+                            )
+                            Button(
+                                onClick = {
+                                    if (messageText.isNotBlank()) {
+                                        onFreelancerSend(agent.id, messageText.trim())
+                                        messageTarget = null
+                                        messageText = ""
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth().height(38.dp),
+                                shape = RoundedCornerShape(9.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = HQ.accentSolid, contentColor = HQ.accentInk),
+                            ) { Text("Send instruction", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
+                        }
+                    }
                 }
             }
         }

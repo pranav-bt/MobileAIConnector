@@ -5,7 +5,7 @@ import { DEFAULT_HUB_PORT } from '@agent-hq/shared';
 import { HubBus } from './bus.js';
 import { loadPriorState, startEventLog, startSnapshotWriter } from './persist.js';
 import { ensureInboxDir, startOutboxWatcher } from './files.js';
-import { startFreelancerObserver } from './freelancers.js';
+import { FreelancerManager } from './freelancers.js';
 import { startServer, type HubServer } from './server.js';
 import { startDemo } from './demo.js';
 import { ClaudeEngine } from './engine/claude.js';
@@ -28,6 +28,7 @@ export interface HubOptions {
   cwd?: string;
   workspaceRoots?: WorkspaceRoot[]; // tests override; defaults from data/config.json
   claudeProjectsDir?: string; // tests override; defaults to ~/.claude/projects
+  freelancerOpenSessions?: () => number; // tests override the process scan
 }
 
 export interface RunningHub {
@@ -77,6 +78,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   let stopDemo: (() => void) | null = null;
   let stopSnapshots: (() => void) | null = null;
   let workerCwds: () => string[] = () => [];
+  let attachFreelancers: (manager: FreelancerManager) => void = () => {};
   const mode: 'demo' | 'claude' | 'mock' =
     options.engine === 'claude' || options.engine === 'mock' ? options.engine : 'demo';
 
@@ -102,6 +104,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     );
     orchestrator.init();
     workerCwds = () => orchestrator.activeWorkerCwds();
+    attachFreelancers = (manager) => orchestrator.attachFreelancers(manager);
 
     // Task history and usage survive restarts; anything mid-flight when the
     // hub died comes back as paused.
@@ -140,11 +143,16 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   // when running real agents; demo seeds fake meters and mock stays offline.
   const stopLimits = mode === 'claude' ? startLimitsPoller(bus) : null;
 
-  // Terminal Claude Code sessions on this machine show up as Freelancers.
-  const freelancers = startFreelancerObserver(bus, {
+  // Terminal Claude Code sessions on this machine show up as Freelancers —
+  // and can be messaged (the hub resumes their conversation headlessly).
+  const freelancers = new FreelancerManager(bus, {
     ...(options.claudeProjectsDir ? { projectsDir: options.claudeProjectsDir } : {}),
+    ...(options.freelancerOpenSessions ? { openSessions: options.freelancerOpenSessions } : {}),
+    outboxDir: outbox.outboxDir,
     activeCwds: () => workerCwds(),
   });
+  freelancers.start();
+  attachFreelancers(freelancers);
 
   const securityController = new SecurityController(bus, pairing, port);
   const server: HubServer = await startServer(bus, handlers, securityController, port);

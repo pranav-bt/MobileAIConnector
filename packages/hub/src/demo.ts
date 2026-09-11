@@ -302,6 +302,13 @@ export function startDemo(bus: HubBus, options: DemoOptions = {}): {
         entry: { agentId: 'master', taskId: null, message: 'screen capture is available in engine mode', at: now() },
       });
     },
+
+    freelancerSend() {
+      bus.publish({
+        type: 'activity',
+        entry: { agentId: 'master', taskId: null, message: 'freelancer messaging is available in engine mode', at: now() },
+      });
+    },
   };
 
   return {

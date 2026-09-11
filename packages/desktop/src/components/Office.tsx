@@ -1,4 +1,4 @@
-import type { Agent, HubState, PermissionRequest } from '@agent-hq/shared';
+import type { Agent, ClientCommand, HubState, PermissionRequest } from '@agent-hq/shared';
 import { initialsOf, isActive, ringColor } from '../status';
 
 function AgentChip(props: { agent: Agent; dim?: boolean; pending?: PermissionRequest }): JSX.Element {
@@ -33,8 +33,8 @@ function AgentChip(props: { agent: Agent; dim?: boolean; pending?: PermissionReq
   );
 }
 
-export function Office(props: { state: HubState }): JSX.Element {
-  const { state } = props;
+export function Office(props: { state: HubState; send: (command: ClientCommand) => void }): JSX.Element {
+  const { state, send } = props;
   const agents = Object.values(state.agents);
   const master = agents.find((agent) => agent.role === 'master');
   const teams = Object.values(state.teams).sort((a, b) => a.createdAt - b.createdAt);
@@ -185,12 +185,23 @@ export function Office(props: { state: HubState }): JSX.Element {
               <div className="av" style={{ borderColor: ringColor(agent), borderRadius: 6 }}>
                 {'>_'}
               </div>
-              <div style={{ minWidth: 0 }}>
+              <div style={{ minWidth: 0, flexGrow: 1 }}>
                 <div className="nm">{agent.name}</div>
                 <div className="act" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {agent.activity}
                 </div>
               </div>
+              <span
+                className="tag"
+                style={{ cursor: 'pointer' }}
+                title="Continue this session's conversation with an instruction; the reply comes back here and on the phone."
+                onClick={() => {
+                  const text = window.prompt(`Instruction for ${agent.name}:`);
+                  if (text && text.trim()) send({ type: 'freelancer.send', agentId: agent.id, text: text.trim() });
+                }}
+              >
+                message
+              </span>
             </div>
           ))}
         </div>

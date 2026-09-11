@@ -24,7 +24,7 @@ export function App(): JSX.Element {
       <Rail state={state} status={status} view={view} onNavigate={setView} send={send} />
       <main className="main">
         <TopBar state={state} send={send} />
-        {view === 'office' && <Office state={state} />}
+        {view === 'office' && <Office state={state} send={send} />}
         {view === 'tasks' && <TasksPage state={state} send={send} />}
         {view === 'resources' && <ResourcesPage state={state} />}
         {view === 'history' && <HistoryPage state={state} />}

@@ -948,6 +948,18 @@ export class Orchestrator implements CommandHandlers {
     void capturePcScreen(this.#bus);
   }
 
+  // The freelancer manager is created alongside the hub and attached here so
+  // "message a freelancer" flows through the normal command channel.
+  #freelancers: { sendInstruction(agentId: string, text: string): void } | null = null;
+
+  attachFreelancers(manager: { sendInstruction(agentId: string, text: string): void }): void {
+    this.#freelancers = manager;
+  }
+
+  freelancerSend(agentId: string, text: string): void {
+    this.#freelancers?.sendInstruction(agentId, text);
+  }
+
   setPermissionMode(mode: PermissionMode): void {
     if (this.#policy.mode === mode) return;
     this.#policy.mode = mode;

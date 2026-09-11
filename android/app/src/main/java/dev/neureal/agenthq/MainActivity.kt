@@ -295,6 +295,7 @@ class MainActivity : FragmentActivity() {
                 },
                 onVoice = { startVoiceCapture() },
                 onSendFile = { filePicker.launch("*/*") },
+                onFreelancerSend = { agentId, text -> hub.sendCommand(Commands.freelancerSend(agentId, text)) },
                 onUnpair = {
                     disableBackground()
                     hub.unpair()

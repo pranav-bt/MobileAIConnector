@@ -1,29 +1,44 @@
-import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from 'node:fs';
+import { execFile, spawn } from 'node:child_process';
+import { closeSync, existsSync, openSync, readSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { HubBus } from './bus.js';
 
-// Freelancers: plain Claude Code terminal sessions running on this machine,
-// observed read-only. Claude Code appends every live session to
-// ~/.claude/projects/<cwd-slug>/<session>.jsonl — a recently-written file IS
-// a live session. Each becomes a 'freelancer' agent in the office: name =
-// the project folder, activity = the session's last visible action.
+// Freelancers: plain Claude Code terminal sessions on this machine.
 //
-// The hub's own engine sessions write there too; they are filtered out by
-// (a) cwd — a project workspace with a worker currently running — and
-// (b) orchestration markers in the transcript (master/lead/worker prompts).
+// PRESENCE — transcripts alone can't tell "idle, waiting for input" from
+// "closed" (both just stop writing), so presence is anchored to the number
+// of Claude Code PROCESSES actually running (scanned every 15s, excluding
+// the hub's own SDK sessions which run with stream-json flags): the N
+// most-recently-written transcripts are the N open sessions. Written in the
+// last 45s -> working, otherwise idle.
+//
+// INTERACTION — an instruction to a freelancer resumes that session's
+// conversation headlessly (`claude -p --resume <id>`) in its own workspace;
+// the reply comes back as an activity line and a report pushed to the phone.
+// (The terminal window itself can't be typed into from outside — this
+// continues the same conversation next to it.)
 
 const POLL_MS = 5000;
-const ACTIVE_WINDOW_MS = 2 * 60_000; // written recently -> shown
-const WORKING_WINDOW_MS = 30_000; // written moments ago -> 'working'
+const PROCESS_SCAN_MS = 15_000;
+const LOOKBACK_MS = 12 * 60 * 60_000; // transcripts older than this are never candidates
+const FALLBACK_WINDOW_MS = 2 * 60_000; // used when the process scan fails
+const WORKING_WINDOW_MS = 45_000;
 const HEAD_BYTES = 8 * 1024;
 const TAIL_BYTES = 64 * 1024;
+const SIDECAR_TIMEOUT_MS = 15 * 60_000;
 
 const OWN_SESSION_MARKERS = [
   'You are the master agent',
   'You are the lead of the',
   'File locations policy: you have full READ/SEARCH access',
 ];
+
+interface SessionInfo {
+  sessionId: string;
+  cwd: string;
+  name: string;
+}
 
 function readChunks(path: string, size: number): string {
   const fd = openSync(path, 'r');
@@ -79,28 +94,86 @@ function extractCwd(chunk: string): string | null {
   }
 }
 
-export function startFreelancerObserver(
-  bus: HubBus,
-  options: { projectsDir?: string; activeCwds?: () => string[] } = {},
-): { stop: () => void } {
-  const projectsDir = options.projectsDir ?? join(homedir(), '.claude', 'projects');
-  const activeCwds = options.activeCwds ?? (() => []);
-  const published = new Map<string, number>(); // agentId -> mtime last published
+export class FreelancerManager {
+  #bus: HubBus;
+  #projectsDir: string;
+  #outboxDir: string;
+  #activeCwds: () => string[];
+  #openSessionsOverride: (() => number) | null;
 
-  const tick = () => {
+  #published = new Map<string, number>(); // agentId -> mtime last published
+  #registry = new Map<string, SessionInfo>();
+  #busy = new Set<string>(); // sidecar instruction in flight
+  #openCount = -1; // -1 = scan unavailable -> fallback window
+  #lastScan = 0;
+  #interval: ReturnType<typeof setInterval> | null = null;
+
+  constructor(
+    bus: HubBus,
+    options: {
+      projectsDir?: string;
+      outboxDir: string;
+      activeCwds?: () => string[];
+      openSessions?: () => number; // tests inject; real scans processes
+    },
+  ) {
+    this.#bus = bus;
+    this.#projectsDir = options.projectsDir ?? join(homedir(), '.claude', 'projects');
+    this.#outboxDir = options.outboxDir;
+    this.#activeCwds = options.activeCwds ?? (() => []);
+    this.#openSessionsOverride = options.openSessions ?? null;
+  }
+
+  start(): void {
+    this.#tick();
+    this.#interval = setInterval(() => this.#tick(), POLL_MS);
+  }
+
+  stop(): void {
+    if (this.#interval) clearInterval(this.#interval);
+  }
+
+  // Count running interactive Claude Code processes. The hub's own SDK
+  // sessions run the CLI with stream-json flags and are excluded.
+  #scanProcesses(): void {
+    if (this.#openSessionsOverride) {
+      this.#openCount = this.#openSessionsOverride();
+      return;
+    }
+    const now = Date.now();
+    if (now - this.#lastScan < PROCESS_SCAN_MS) return;
+    this.#lastScan = now;
+    const script =
+      "(Get-CimInstance Win32_Process -Filter \"Name='claude.exe' or Name='node.exe' or Name='bun.exe'\" | " +
+      "Where-Object { $_.CommandLine -match 'claude' -and $_.CommandLine -notmatch 'stream-json|claude-agent-sdk' }).Count";
+    execFile(
+      'powershell',
+      ['-NoProfile', '-NonInteractive', '-Command', script],
+      { timeout: 10_000, windowsHide: true },
+      (error, stdout) => {
+        if (error) return; // keep last known count (or fallback)
+        const count = Number(stdout.trim());
+        if (Number.isFinite(count)) this.#openCount = count;
+      },
+    );
+  }
+
+  #tick(): void {
     try {
-      if (!existsSync(projectsDir)) return;
+      this.#scanProcesses();
+      if (!existsSync(this.#projectsDir)) return;
       const now = Date.now();
-      const busyCwds = new Set(activeCwds().map((cwd) => cwd.toLowerCase()));
-      const seen = new Set<string>();
+      const busyCwds = new Set(this.#activeCwds().map((cwd) => cwd.toLowerCase()));
 
-      for (const dirName of readdirSync(projectsDir)) {
-        const dir = join(projectsDir, dirName);
+      // Gather candidate sessions, newest first.
+      const candidates: { agentId: string; mtime: number; info: SessionInfo; activity: string }[] = [];
+      for (const dirName of readdirSync(this.#projectsDir)) {
+        const dir = join(this.#projectsDir, dirName);
         let files: string[];
         try {
           files = readdirSync(dir).filter((file) => file.endsWith('.jsonl'));
         } catch {
-          continue; // not a directory
+          continue;
         }
         for (const file of files) {
           const path = join(dir, file);
@@ -110,48 +183,152 @@ export function startFreelancerObserver(
           } catch {
             continue;
           }
-          if (now - stats.mtimeMs > ACTIVE_WINDOW_MS || stats.size === 0) continue;
+          if (now - stats.mtimeMs > LOOKBACK_MS || stats.size === 0) continue;
 
           const chunk = readChunks(path, stats.size);
-          if (OWN_SESSION_MARKERS.some((marker) => chunk.includes(marker))) continue; // our own engine session
+          if (OWN_SESSION_MARKERS.some((marker) => chunk.includes(marker))) continue;
           const cwd = extractCwd(chunk);
           if (cwd && busyCwds.has(cwd.toLowerCase())) continue; // a hub worker owns this dir right now
 
-          const agentId = `fl-${file.replace(/\.jsonl$/, '').slice(0, 24)}`;
-          seen.add(agentId);
-          if (published.get(agentId) === stats.mtimeMs) continue; // nothing new
-          published.set(agentId, stats.mtimeMs);
-          bus.publish({
-            type: 'agent.updated',
-            agent: {
-              id: agentId,
-              name: cwd ? basename(cwd) : dirName.replace(/^.*-/, '') || 'terminal',
-              role: 'freelancer',
-              teamId: null,
-              status: now - stats.mtimeMs <= WORKING_WINDOW_MS ? 'working' : 'idle',
-              activity: lastAssistantActivity(chunk),
-              model: 'sonnet',
-              taskId: null,
-              tokensUsed: 0,
-              updatedAt: now,
-            },
+          const sessionId = file.replace(/\.jsonl$/, '');
+          candidates.push({
+            agentId: `fl-${sessionId.slice(0, 24)}`,
+            mtime: stats.mtimeMs,
+            info: { sessionId, cwd: cwd ?? '', name: cwd ? basename(cwd) : dirName.replace(/^.*-/, '') || 'terminal' },
+            activity: lastAssistantActivity(chunk),
           });
         }
       }
+      candidates.sort((a, b) => b.mtime - a.mtime);
 
-      // Sessions that stopped writing age out of the office.
-      for (const agentId of [...published.keys()]) {
-        if (!seen.has(agentId)) {
-          published.delete(agentId);
-          bus.publish({ type: 'agent.removed', agentId });
+      // Presence: as many sessions as there are open processes; if the scan
+      // is unavailable, fall back to "written in the last 2 minutes".
+      const visible =
+        this.#openCount >= 0
+          ? candidates.slice(0, this.#openCount)
+          : candidates.filter((candidate) => now - candidate.mtime <= FALLBACK_WINDOW_MS);
+
+      const seen = new Set<string>();
+      for (const candidate of visible) {
+        seen.add(candidate.agentId);
+        this.#registry.set(candidate.agentId, candidate.info);
+        if (this.#busy.has(candidate.agentId)) continue; // sidecar owns its status right now
+        if (this.#published.get(candidate.agentId) === candidate.mtime) continue;
+        this.#published.set(candidate.agentId, candidate.mtime);
+        this.#bus.publish({
+          type: 'agent.updated',
+          agent: {
+            id: candidate.agentId,
+            name: candidate.info.name,
+            role: 'freelancer',
+            teamId: null,
+            status: now - candidate.mtime <= WORKING_WINDOW_MS ? 'working' : 'idle',
+            activity: candidate.activity,
+            model: 'sonnet',
+            taskId: null,
+            tokensUsed: 0,
+            updatedAt: now,
+          },
+        });
+      }
+
+      // Sessions that are no longer open leave the office (unless a sidecar
+      // instruction is still running against them).
+      for (const agentId of [...this.#published.keys()]) {
+        if (!seen.has(agentId) && !this.#busy.has(agentId)) {
+          this.#published.delete(agentId);
+          this.#registry.delete(agentId);
+          this.#bus.publish({ type: 'agent.removed', agentId });
         }
       }
     } catch {
       /* observation is best-effort; next tick retries */
     }
-  };
+  }
 
-  tick();
-  const interval = setInterval(tick, POLL_MS);
-  return { stop: () => clearInterval(interval) };
+  #activity(agentId: string, message: string): void {
+    this.#bus.publish({ type: 'activity', entry: { agentId, taskId: null, message, at: Date.now() } });
+  }
+
+  #patch(agentId: string, name: string, status: 'working' | 'idle', activity: string): void {
+    this.#bus.publish({
+      type: 'agent.updated',
+      agent: {
+        id: agentId,
+        name,
+        role: 'freelancer',
+        teamId: null,
+        status,
+        activity,
+        model: 'sonnet',
+        taskId: null,
+        tokensUsed: 0,
+        updatedAt: Date.now(),
+      },
+    });
+  }
+
+  // Continue the freelancer's conversation with an instruction from the
+  // owner; the reply lands in the activity feed and (in full) on the phone.
+  sendInstruction(agentId: string, text: string): void {
+    const info = this.#registry.get(agentId);
+    if (!info) {
+      this.#activity('master', `freelancer message failed — session not found (${agentId})`);
+      return;
+    }
+    if (this.#busy.has(agentId)) {
+      this.#activity(agentId, `freelancer ${info.name} is still working on the previous instruction`);
+      return;
+    }
+    this.#busy.add(agentId);
+    this.#patch(agentId, info.name, 'working', `HQ instruction: ${text.slice(0, 60)}`);
+    this.#activity(agentId, `instruction sent to freelancer ${info.name}: ${text.slice(0, 45)}`);
+
+    const child = spawn('claude', ['-p', '--resume', info.sessionId, text], {
+      cwd: info.cwd || undefined,
+      shell: true,
+      windowsHide: true,
+    });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (data) => {
+      out += String(data);
+      if (out.length > 400_000) out = out.slice(-400_000);
+    });
+    child.stderr.on('data', (data) => {
+      err = (err + String(data)).slice(0, 2000);
+    });
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {}
+    }, SIDECAR_TIMEOUT_MS);
+
+    const settle = (code: number | null) => {
+      clearTimeout(timer);
+      this.#busy.delete(agentId);
+      const reply = out.trim();
+      if (code === 0 && reply) {
+        try {
+          const fileName = `freelancer-${info.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-reply.md`;
+          writeFileSync(
+            join(this.#outboxDir, fileName),
+            `# Freelancer ${info.name} — reply\n\n**Instruction:** ${text}\n\n---\n\n${reply}\n`,
+          );
+          this.#activity(agentId, `freelancer ${info.name} replied — full reply sent to your phone`);
+        } catch {
+          this.#activity(agentId, `freelancer ${info.name} replied (report delivery failed)`);
+        }
+        this.#patch(agentId, info.name, 'idle', reply.replace(/\s+/g, ' ').slice(0, 80));
+      } else {
+        this.#activity(
+          agentId,
+          `freelancer ${info.name} instruction failed${code ? ` (exit ${code})` : ''}: ${(err || reply || 'no output').slice(0, 80)}`,
+        );
+        this.#patch(agentId, info.name, 'idle', 'instruction failed');
+      }
+    };
+    child.on('close', settle);
+    child.on('error', () => settle(-1));
+  }
 }

@@ -31,6 +31,7 @@ export interface CommandHandlers {
   setPermissionMode(mode: 'auto' | 'strict'): void;
   sendFile(name: string, mimeType: string, bytesB64: string, from?: string): void;
   captureScreen(): void;
+  freelancerSend(agentId: string, text: string): void;
 }
 
 export function dispatchCommand(handlers: CommandHandlers, command: ClientCommand): void {
@@ -59,6 +60,8 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
       return handlers.sendFile(command.name, command.mimeType, command.bytesB64, command.from);
     case 'screen.capture':
       return handlers.captureScreen();
+    case 'freelancer.send':
+      return handlers.freelancerSend(command.agentId, command.text);
     case 'pairing.start':
     case 'pairing.cancel':
     case 'device.revoke':

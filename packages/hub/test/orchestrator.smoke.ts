@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
@@ -23,6 +23,7 @@ const hub = await startHub({
   port: PORT,
   dataDir,
   claudeProjectsDir, // isolate the freelancer observer from real sessions
+  freelancerOpenSessions: () => 2, // pretend two terminal sessions are open
   // Tests sandbox the workspace-roots policy to the temp dir.
   workspaceRoots: [{ key: 'tmp', path: tmpdir(), label: 'test sandbox' }],
 });
@@ -472,14 +473,49 @@ try {
       }),
     ].join('\n') + '\n',
   );
+  // A second session that went quiet 10 minutes ago: open (process count
+  // says 2) but idle — it must STAY visible.
+  const idleDir = join(claudeProjectsDir, 'd--Work-Roblox-BuildAndBattle');
+  mkdirSync(idleDir, { recursive: true });
+  const idlePath = join(idleDir, 'sess-bnb-1.jsonl');
+  writeFileSync(
+    idlePath,
+    JSON.stringify({
+      type: 'assistant',
+      cwd: 'D:\\Work\\Roblox\\BuildAndBattle',
+      message: { content: [{ type: 'text', text: 'Battle system refactor is done, awaiting your review.' }] },
+    }) + '\n',
+  );
+  const tenMinutesAgo = new Date(Date.now() - 10 * 60_000);
+  utimesSync(idlePath, tenMinutesAgo, tenMinutesAgo);
+
   const freelancer = await waitFor(
-    'terminal session appears as a freelancer',
+    'active terminal session appears as a working freelancer',
     (e) => e.type === 'agent.updated' && e.agent.role === 'freelancer' && e.agent.name === 'CastleWars',
     12000,
   );
   if (freelancer.type !== 'agent.updated') fail('unreachable');
   if (!freelancer.agent.activity.includes('npm test')) fail('freelancer activity missing the last action');
-  console.log('freelancer observer ok: terminal session visible with project name + last action');
+  const idleFreelancer = await waitFor(
+    'quiet-but-open session appears as an idle freelancer',
+    (e) =>
+      e.type === 'agent.updated' &&
+      e.agent.role === 'freelancer' &&
+      e.agent.name === 'BuildAndBattle' &&
+      e.agent.status === 'idle',
+    12000,
+  );
+  if (idleFreelancer.type !== 'agent.updated') fail('unreachable');
+  console.log('freelancer observer ok: working AND idle sessions visible with project name + last action');
+
+  // Messaging plumbing: an unknown freelancer id fails loudly (real sends
+  // spawn a live claude sidecar — exercised manually, not in smokes).
+  ws.send(encodeCommand({ type: 'freelancer.send', agentId: 'fl-does-not-exist', text: 'status?' }));
+  await waitFor(
+    'freelancer.send reaches the manager',
+    (e) => e.type === 'activity' && e.entry.message.includes('freelancer message failed — session not found'),
+  );
+  console.log('freelancer messaging plumbing ok: command routed to the manager');
 
   console.log('ORCH SMOKE PASS');
   ws.close();

@@ -85,6 +85,9 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
   }),
   // Phone asks the hub for a screenshot of the PC screen.
   z.object({ type: z.literal('screen.capture') }),
+  // Message a freelancer: the hub resumes that terminal session's
+  // conversation headlessly and returns the reply.
+  z.object({ type: z.literal('freelancer.send'), agentId: z.string().min(1), text: z.string().min(1) }),
   // Security commands — the hub only honors these from trusted local
   // clients, never from a device session.
   z.object({ type: z.literal('pairing.start') }),
