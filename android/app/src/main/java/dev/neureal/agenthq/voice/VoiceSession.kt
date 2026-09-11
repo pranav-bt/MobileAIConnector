@@ -12,6 +12,9 @@ object VoiceSession {
     // A spoken task waiting for confirmation ("send") — shown in the overlay
     // with Send/Discard buttons; never submitted without a confirm.
     val draft = MutableStateFlow<String?>(null)
+    // The full text behind the last spoken summary — "hey Jarvis, read more"
+    // (or the overlay's "read all") speaks it in full.
+    val pendingLong = MutableStateFlow<String?>(null)
 
     fun you(text: String) = add(Line(fromYou = true, text = text))
     fun jarvis(text: String) = add(Line(fromYou = false, text = text))

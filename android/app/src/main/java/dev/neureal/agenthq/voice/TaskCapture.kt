@@ -40,6 +40,10 @@ object TaskCapture {
         "cancel", "discard", "no", "nope", "never mind", "nevermind", "forget it",
         "stop", "scrap it", "delete it", "delete",
     )
+    private val READ_MORE_WORDS = setOf(
+        "read more", "read everything", "read it all", "read all", "read the rest",
+        "full version", "hear everything", "read the full report", "more",
+    )
 
     fun submitDraft(context: Context) {
         val text = VoiceSession.draft.value?.trim().orEmpty()
@@ -111,6 +115,14 @@ object TaskCapture {
                         return
                     }
                     if (!confirm) {
+                        // "hey Jarvis, read more" — replay the full text behind
+                        // the last spoken summary instead of drafting a task.
+                        if (normalize(text) in READ_MORE_WORDS) {
+                            VoiceSession.you(text)
+                            VoiceFeedback.readPending()
+                            finish(onDone)
+                            return
+                        }
                         VoiceSession.draft.value = text
                         VoiceSession.you(text)
                         VoiceFeedback.speak("Say send, or keep talking to add more.")

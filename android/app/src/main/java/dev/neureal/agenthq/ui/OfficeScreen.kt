@@ -291,6 +291,7 @@ private fun VoiceOverlay(modifier: Modifier) {
     val listening by dev.neureal.agenthq.voice.VoiceSession.listening.collectAsState()
     val lines by dev.neureal.agenthq.voice.VoiceSession.lines.collectAsState()
     val draft by dev.neureal.agenthq.voice.VoiceSession.draft.collectAsState()
+    val pendingLong by dev.neureal.agenthq.voice.VoiceSession.pendingLong.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
     if (!listening && lines.isEmpty() && draft == null) return
 
@@ -312,6 +313,15 @@ private fun VoiceOverlay(modifier: Modifier) {
                 fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
             )
+            if (pendingLong != null) {
+                Text(
+                    "read all",
+                    color = HQ.accent, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .clickable { dev.neureal.agenthq.voice.VoiceFeedback.readPending() }
+                        .padding(4.dp),
+                )
+            }
             Text(
                 "dismiss",
                 color = HQ.faint, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
