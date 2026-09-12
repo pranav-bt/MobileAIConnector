@@ -22,7 +22,7 @@ const MAX_LOUNGE_IDLE = 3;
 // The PA desk, as the orchestrator sees it.
 interface PaDeskLike {
   setEnabled(enabled: boolean): void;
-  add(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number): void;
+  add(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number, endMs?: number): void;
   toggleTodo(id: string): void;
   remove(kind: 'todo' | 'reminder' | 'event', id: string): void;
   listAdd(list: string, text: string): void;
@@ -451,7 +451,8 @@ export class Orchestrator implements CommandHandlers {
           'You run the PA desk. Its stores are plain files you edit directly (the hub clock fires reminders/event alerts automatically — never poll):\n' +
             `- Todos: ${paths.todos} — [{id, text, done, createdAt}]\n` +
             `- Reminders: ${paths.reminders} — [{id, text, atMs}] (atMs = epoch milliseconds; fired ones gain firedAt)\n` +
-            `- Calendar (custom, the only calendar we use): ${paths.calendar} — [{id, title, startMs}]\n` +
+            `- Calendar (custom, the only calendar we use): ${paths.calendar} — [{id, title, startMs, endMs?}] ` +
+            '(endMs makes an event SPAN days — use one spanning event for a trip plus per-day events for its itinerary items; the owner sees them in a calendar view)\n' +
             `- Owner notes: ${paths.notes} — durable facts/preferences, one bullet per line.\n` +
             `- Reference lists (games to play, movies, books, etc.): any ${paths.dir}\\<name>.json holding a plain ` +
             'array of strings shows up automatically in the PA tab as its own list. Create one directly when the ' +
@@ -1036,8 +1037,8 @@ export class Orchestrator implements CommandHandlers {
     this.#pa?.setEnabled(enabled);
   }
 
-  paAdd(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number): void {
-    this.#pa?.add(kind, text, atMs);
+  paAdd(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number, endMs?: number): void {
+    this.#pa?.add(kind, text, atMs, endMs);
   }
 
   paToggle(id: string): void {

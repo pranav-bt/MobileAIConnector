@@ -37,6 +37,7 @@ interface CalEvent {
   id: string;
   title: string;
   startMs: number;
+  endMs?: number; // spans days (a trip); absent = single moment
   remindedAt?: number;
 }
 
@@ -156,7 +157,7 @@ export class PaDesk {
     this.#publishState();
   }
 
-  add(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number): void {
+  add(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number, endMs?: number): void {
     const clean = text.trim();
     if (!clean) return;
     if (kind === 'todo') {
@@ -185,9 +186,13 @@ export class PaDesk {
       this.#activity(`reminder set for ${when}: ${clean.slice(0, 50)}`);
     } else {
       const events = this.#read<CalEvent[]>('calendar.json', []);
-      events.push({ id: newId(), title: clean, startMs: atMs });
+      const entry: CalEvent = { id: newId(), title: clean, startMs: atMs };
+      if (endMs && Number.isFinite(endMs) && endMs > atMs) entry.endMs = endMs;
+      events.push(entry);
       this.#write('calendar.json', events);
-      this.#activity(`event added ${when}: ${clean.slice(0, 50)}`);
+      this.#activity(
+        `event added ${when}${entry.endMs ? ` → ${new Date(entry.endMs).toLocaleDateString('en-GB')}` : ''}: ${clean.slice(0, 50)}`,
+      );
     }
     this.#publishState();
   }
@@ -239,7 +244,7 @@ export class PaDesk {
         const minutes = Math.max(0, Math.round((event.startMs - now) / 60_000));
         this.#notify(minutes > 0 ? `In ${minutes} min` : 'Now', event.title);
       }
-      const keptEvents = events.filter((e) => !e.remindedAt || now - e.startMs < KEEP_FIRED_MS);
+      const keptEvents = events.filter((e) => !e.remindedAt || now - (e.endMs ?? e.startMs) < KEEP_FIRED_MS);
       if (eventsDirty || keptEvents.length !== events.length) this.#write('calendar.json', keptEvents);
 
       // Catches PA-worker edits to the files too (change-detected inside).

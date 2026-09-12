@@ -96,6 +96,7 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     kind: z.enum(['todo', 'reminder', 'event', 'note']),
     text: z.string().min(1),
     atMs: z.number().optional(),
+    endMs: z.number().optional(), // events only: multi-day span (trips)
   }),
   // PA tab interactions: tick a todo, remove an item.
   z.object({ type: z.literal('pa.toggle'), id: z.string().min(1) }),

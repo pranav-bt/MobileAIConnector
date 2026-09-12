@@ -33,7 +33,7 @@ export interface CommandHandlers {
   captureScreen(): void;
   freelancerSend(agentId: string, text: string): void;
   paSet(enabled: boolean): void;
-  paAdd(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number): void;
+  paAdd(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number, endMs?: number): void;
   paToggle(id: string): void;
   paRemove(kind: 'todo' | 'reminder' | 'event', id: string): void;
   paListAdd(list: string, text: string): void;
@@ -72,7 +72,7 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
     case 'pa.set':
       return handlers.paSet(command.enabled);
     case 'pa.add':
-      return handlers.paAdd(command.kind, command.text, command.atMs);
+      return handlers.paAdd(command.kind, command.text, command.atMs, command.endMs);
     case 'pa.toggle':
       return handlers.paToggle(command.id);
     case 'pa.remove':

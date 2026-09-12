@@ -553,6 +553,134 @@ private fun timeChip(atMs: Double): String {
     return "${at.get(java.util.Calendar.DAY_OF_MONTH)}/${at.get(java.util.Calendar.MONTH) + 1} $time"
 }
 
+private const val DAY_MS = 24L * 60 * 60 * 1000
+private fun dayStartMs(ms: Long): Long {
+    val c = java.util.Calendar.getInstance().apply { timeInMillis = ms }
+    c.set(java.util.Calendar.HOUR_OF_DAY, 0); c.set(java.util.Calendar.MINUTE, 0)
+    c.set(java.util.Calendar.SECOND, 0); c.set(java.util.Calendar.MILLISECOND, 0)
+    return c.timeInMillis
+}
+private fun covers(event: dev.neureal.agenthq.model.PaEvent, day: Long): Boolean =
+    event.startMs < (day + DAY_MS) && (event.endMs ?: event.startMs) >= day
+
+// Compact month grid (Monday-first): dots for events, teal shading for trip
+// spans; tapping a day shows its agenda below — itinerary-friendly.
+@Composable
+private fun PaCalendarCard(pa: dev.neureal.agenthq.model.PaState, hub: dev.neureal.agenthq.net.HubClient) {
+    val today = dayStartMs(System.currentTimeMillis())
+    var monthAnchor by remember { mutableStateOf(dayStartMs(System.currentTimeMillis()).let { ms ->
+        val c = java.util.Calendar.getInstance().apply { timeInMillis = ms; set(java.util.Calendar.DAY_OF_MONTH, 1) }
+        c.timeInMillis
+    }) }
+    var selected by remember { mutableStateOf(today) }
+
+    val anchorCal = java.util.Calendar.getInstance().apply { timeInMillis = monthAnchor }
+    val monthLabel = java.text.SimpleDateFormat("MMMM yyyy", java.util.Locale.UK).format(java.util.Date(monthAnchor))
+    val firstWeekday = ((java.util.Calendar.getInstance().apply { timeInMillis = monthAnchor }.get(java.util.Calendar.DAY_OF_WEEK) + 5) % 7)
+    val firstCell = monthAnchor - firstWeekday * DAY_MS
+    val cells = (0 until 42).map { dayStartMs(firstCell + it * DAY_MS) }
+    val hhmm = java.text.SimpleDateFormat("HH:mm", java.util.Locale.UK)
+
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionLabel("Calendar")
+            Spacer(Modifier.weight(1f))
+            Text("‹", color = HQ.muted, fontSize = 16.sp, modifier = Modifier.clickable {
+                val c = java.util.Calendar.getInstance().apply { timeInMillis = monthAnchor; add(java.util.Calendar.MONTH, -1) }
+                monthAnchor = c.timeInMillis
+            }.padding(horizontal = 8.dp))
+            Text(monthLabel, color = HQ.text, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold)
+            Text("›", color = HQ.muted, fontSize = 16.sp, modifier = Modifier.clickable {
+                val c = java.util.Calendar.getInstance().apply { timeInMillis = monthAnchor; add(java.util.Calendar.MONTH, 1) }
+                monthAnchor = c.timeInMillis
+            }.padding(horizontal = 8.dp))
+        }
+        Row(Modifier.fillMaxWidth()) {
+            listOf("M", "T", "W", "T", "F", "S", "S").forEach { d ->
+                Text(d, color = HQ.faint, fontSize = 9.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center, modifier = Modifier.weight(1f))
+            }
+        }
+        cells.chunked(7).forEach { week ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 1.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                week.forEach { day ->
+                    val inMonth = java.util.Calendar.getInstance().apply { timeInMillis = day }.get(java.util.Calendar.MONTH) == anchorCal.get(java.util.Calendar.MONTH)
+                    val events = pa.events.filter { covers(it, day) }
+                    val hasSpan = events.any { it.endMs != null }
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .weight(1f)
+                            .background(
+                                if (hasSpan) HQ.accentSolid.copy(alpha = 0.13f) else HQ.panel2,
+                                RoundedCornerShape(6.dp),
+                            )
+                            .border(
+                                1.dp,
+                                when {
+                                    day == selected -> HQ.accent
+                                    day == today -> HQ.accent.copy(alpha = 0.4f)
+                                    else -> HQ.line
+                                },
+                                RoundedCornerShape(6.dp),
+                            )
+                            .clickable { selected = day }
+                            .padding(vertical = 4.dp)
+                            .let { if (inMonth) it else it },
+                    ) {
+                        Text(
+                            "${java.util.Calendar.getInstance().apply { timeInMillis = day }.get(java.util.Calendar.DAY_OF_MONTH)}",
+                            color = if (day == today) HQ.accent else if (inMonth) HQ.text2 else HQ.ghost,
+                            fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                            if (events.isNotEmpty()) Box(Modifier.size(4.dp).background(HQ.accent, CircleShape))
+                            if (pa.reminders.any { it.firedAt == null && it.atMs >= day && it.atMs < day + DAY_MS }) {
+                                Box(Modifier.size(4.dp).background(HQ.amber, CircleShape))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Selected-day agenda: a trip day reads like an itinerary.
+        val dayEvents = pa.events.filter { covers(it, selected) }
+            .sortedWith(compareByDescending<dev.neureal.agenthq.model.PaEvent> { it.endMs != null }.thenBy { it.startMs })
+        val dayReminders = pa.reminders.filter { it.firedAt == null && it.atMs >= selected && it.atMs < selected + DAY_MS }.sortedBy { it.atMs }
+        Text(
+            java.text.SimpleDateFormat("EEEE d MMMM", java.util.Locale.UK).format(java.util.Date(selected)),
+            color = HQ.text, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold,
+        )
+        if (dayEvents.isEmpty() && dayReminders.isEmpty()) {
+            Text("nothing this day", color = HQ.ghost, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+        }
+        dayEvents.forEach { event ->
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().background(HQ.panel2, RoundedCornerShape(8.dp)).padding(horizontal = 9.dp, vertical = 6.dp)) {
+                val chip = if (event.endMs != null) {
+                    val dayIndex = ((selected - dayStartMs(event.startMs.toLong())) / DAY_MS) + 1
+                    val total = ((dayStartMs(event.endMs.toLong()) - dayStartMs(event.startMs.toLong())) / DAY_MS) + 1
+                    "day $dayIndex/$total"
+                } else hhmm.format(java.util.Date(event.startMs.toLong()))
+                Text(chip, color = HQ.accent, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                Spacer(Modifier.width(8.dp))
+                Text(event.title, color = HQ.text, fontSize = 12.sp, modifier = Modifier.weight(1f), maxLines = 2)
+                Text("✕", color = HQ.faint, fontSize = 12.sp, modifier = Modifier.clickable {
+                    hub.sendCommand(dev.neureal.agenthq.model.Commands.paRemove("event", event.id))
+                }.padding(4.dp))
+            }
+            Spacer(Modifier.height(4.dp))
+        }
+        dayReminders.forEach { reminder ->
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().background(HQ.panel2, RoundedCornerShape(8.dp)).padding(horizontal = 9.dp, vertical = 6.dp)) {
+                Text("${hhmm.format(java.util.Date(reminder.atMs.toLong()))} ⏰", color = HQ.amber, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                Spacer(Modifier.width(8.dp))
+                Text(reminder.text, color = HQ.text, fontSize = 12.sp, modifier = Modifier.weight(1f), maxLines = 2)
+            }
+            Spacer(Modifier.height(4.dp))
+        }
+    }
+}
+
 // The PA tab: everything the desk maintains — Up next (reminders + custom
 // calendar), Todos (tick/untick), and the shared owner Notes. Live state,
 // zero tokens; interactions are hub commands.
@@ -606,6 +734,8 @@ private fun PaTab(snapshot: Snapshot, connected: Boolean) {
             }
         }
 
+        item { PaCalendarCard(pa, hub) }
+
         item {
             Card {
                 SectionLabel("Up next — reminders & calendar")
@@ -653,9 +783,14 @@ private fun PaTab(snapshot: Snapshot, connected: Boolean) {
                     ) { Text("Remind", color = HQ.accent, fontSize = 11.5.sp) }
                     OutlinedButton(
                         onClick = {
-                            val atMs = parseWhen(whenText)
-                            if (atMs == null || upcomingText.isBlank()) { whenError = true } else {
-                                hub.sendCommand(dev.neureal.agenthq.model.Commands.paAdd("event", upcomingText.trim(), atMs.toDouble()))
+                            // "X to Y" in the time field makes a multi-day event.
+                            val span = Regex("^(.+?)\\s+to\\s+(.+)$", RegexOption.IGNORE_CASE).find(whenText.trim())
+                            val atMs = parseWhen(span?.groupValues?.get(1) ?: whenText)
+                            val endMs = span?.let { parseWhen(it.groupValues[2]) }
+                            if (atMs == null || upcomingText.isBlank() || (span != null && (endMs == null || endMs <= atMs))) {
+                                whenError = true
+                            } else {
+                                hub.sendCommand(dev.neureal.agenthq.model.Commands.paAdd("event", upcomingText.trim(), atMs.toDouble(), endMs?.toDouble()))
                                 whenText = ""; upcomingText = ""
                             }
                         },
@@ -663,7 +798,7 @@ private fun PaTab(snapshot: Snapshot, connected: Boolean) {
                     ) { Text("Event", color = HQ.accent, fontSize = 11.5.sp) }
                 }
                 if (whenError) {
-                    Text("time formats: in 20m/2h/3d · 17:30 · tomorrow 09:00 · 2026-09-14 18:00", color = HQ.amber, fontSize = 9.5.sp)
+                    Text("time formats: in 20m/2h/3d · 17:30 · tomorrow 09:00 · 2026-09-14 18:00 · trips: \"<when> to <when>\" (events)", color = HQ.amber, fontSize = 9.5.sp)
                 }
             }
         }

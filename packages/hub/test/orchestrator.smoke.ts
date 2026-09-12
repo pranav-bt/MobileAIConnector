@@ -626,6 +626,21 @@ try {
     (e) => e.type === 'pa.updated' && !e.pa.todos.some((t) => t.id === milkId),
   );
 
+  // Multi-day event (a trip): endMs survives to the mirrored state.
+  ws.send(
+    encodeCommand({
+      type: 'pa.add',
+      kind: 'event',
+      text: 'Tokyo trip',
+      atMs: Date.now() + 60 * 60_000,
+      endMs: Date.now() + 5 * 24 * 60 * 60_000,
+    }),
+  );
+  await waitFor(
+    'spanning event mirrored with endMs',
+    (e) => e.type === 'pa.updated' && e.pa.events.some((ev) => ev.title === 'Tokyo trip' && typeof ev.endMs === 'number'),
+  );
+
   ws.send(encodeCommand({ type: 'pa.add', kind: 'reminder', text: 'stand up and stretch', atMs: Date.now() + 700 }));
   await waitFor(
     'reminder fires as an activity',

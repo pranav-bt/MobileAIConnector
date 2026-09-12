@@ -205,7 +205,17 @@ export const PaStateSchema = z.object({
   enabled: z.boolean(),
   todos: z.array(z.object({ id: z.string(), text: z.string(), done: z.boolean(), createdAt: z.number() })),
   reminders: z.array(z.object({ id: z.string(), text: z.string(), atMs: z.number(), firedAt: z.number().optional() })),
-  events: z.array(z.object({ id: z.string(), title: z.string(), startMs: z.number(), remindedAt: z.number().optional() })),
+  // endMs makes an event span days (a trip); per-day itinerary items are
+  // just more events inside that span.
+  events: z.array(
+    z.object({
+      id: z.string(),
+      title: z.string(),
+      startMs: z.number(),
+      endMs: z.number().optional(),
+      remindedAt: z.number().optional(),
+    }),
+  ),
   notes: z.string(),
   // Reference lists (games to play, movies, books, …) — plain string arrays,
   // one per data/pa/<name>.json file, keyed by name. Not to-dos: no done

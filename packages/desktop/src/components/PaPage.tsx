@@ -83,6 +83,153 @@ function ListCard(props: {
   );
 }
 
+const dayMs = 24 * 60 * 60 * 1000;
+const dayStart = (ms: number): number => new Date(new Date(ms).setHours(0, 0, 0, 0)).getTime();
+const covers = (event: { startMs: number; endMs?: number }, day: number): boolean =>
+  event.startMs < day + dayMs && (event.endMs ?? event.startMs) >= day;
+
+// Month grid (Monday-first) + a day panel: spanning events (trips) shade
+// every day they cover; clicking a day shows its full agenda.
+function MonthCalendar(props: {
+  events: { id: string; title: string; startMs: number; endMs?: number }[];
+  reminders: { id: string; text: string; atMs: number; firedAt?: number }[];
+  send: (command: ClientCommand) => void;
+  onPrefill: (isoDay: string) => void;
+}): JSX.Element {
+  const today = dayStart(Date.now());
+  const [monthAnchor, setMonthAnchor] = useState(() => new Date(new Date().setDate(1)).setHours(0, 0, 0, 0));
+  const [selected, setSelected] = useState(today);
+
+  const anchor = new Date(monthAnchor);
+  const monthLabel = anchor.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+  const firstCell = (() => {
+    const first = new Date(anchor);
+    const weekday = (first.getDay() + 6) % 7; // Monday = 0
+    return dayStart(first.getTime() - weekday * dayMs);
+  })();
+  const cells = Array.from({ length: 42 }, (_, index) => dayStart(firstCell + index * dayMs));
+
+  const dayEvents = (day: number) => props.events.filter((event) => covers(event, day));
+  const dayReminders = (day: number) => props.reminders.filter((r) => !r.firedAt && r.atMs >= day && r.atMs < day + dayMs);
+  const selectedEvents = dayEvents(selected).sort((a, b) => (b.endMs ? 1 : 0) - (a.endMs ? 1 : 0) || a.startMs - b.startMs);
+  const selectedReminders = dayReminders(selected).sort((a, b) => a.atMs - b.atMs);
+  const hhmm = (ms: number) => new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  const shiftMonth = (delta: number) => {
+    const next = new Date(monthAnchor);
+    next.setMonth(next.getMonth() + delta);
+    setMonthAnchor(next.getTime());
+  };
+
+  return (
+    <div className="room">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div className="lbl">Calendar</div>
+        <div style={{ flexGrow: 1 }} />
+        <span style={{ ...smallBtn, padding: '3px 9px' }} onClick={() => shiftMonth(-1)}>‹</span>
+        <span className="nm" style={{ fontSize: 12, minWidth: 120, textAlign: 'center' }}>{monthLabel}</span>
+        <span style={{ ...smallBtn, padding: '3px 9px' }} onClick={() => shiftMonth(1)}>›</span>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 14, marginTop: 10, alignItems: 'start' }}>
+        <div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4 }}>
+            {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((label) => (
+              <div key={label} className="act" style={{ color: 'var(--faint)', textAlign: 'center', fontSize: 10 }}>{label}</div>
+            ))}
+            {cells.map((day) => {
+              const inMonth = new Date(day).getMonth() === anchor.getMonth();
+              const events = dayEvents(day);
+              const spanning = events.filter((e) => e.endMs);
+              const isToday = day === today;
+              const isSelected = day === selected;
+              return (
+                <div
+                  key={day}
+                  onClick={() => setSelected(day)}
+                  style={{
+                    minHeight: 58,
+                    background: spanning.length > 0 ? 'rgba(79,216,196,0.07)' : 'var(--panel-2)',
+                    border: `1px solid ${isSelected ? 'var(--accent)' : isToday ? 'rgba(79,216,196,0.45)' : 'var(--line-chip)'}`,
+                    borderRadius: 8,
+                    padding: '4px 6px',
+                    cursor: 'pointer',
+                    opacity: inMonth ? 1 : 0.38,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div style={{ display: 'flex', gap: 4, alignItems: 'baseline' }}>
+                    <span className="act" style={{ color: isToday ? 'var(--accent)' : 'var(--muted)', fontSize: 10.5, fontWeight: 600 }}>
+                      {new Date(day).getDate()}
+                    </span>
+                    {dayReminders(day).length > 0 && <span style={{ color: 'var(--amber)', fontSize: 9 }}>⏰</span>}
+                  </div>
+                  {events.slice(0, 2).map((event) => (
+                    <div
+                      key={event.id}
+                      className="act"
+                      style={{
+                        color: event.endMs ? 'var(--accent)' : 'var(--text-2)',
+                        fontSize: 9.5,
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                      }}
+                    >
+                      {event.endMs ? '↔ ' : ''}{event.title}
+                    </div>
+                  ))}
+                  {events.length > 2 && <div className="act" style={{ color: 'var(--faint)', fontSize: 9 }}>+{events.length - 2} more</div>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Selected-day agenda — where a trip day reads like an itinerary. */}
+        <div>
+          <div className="nm" style={{ fontSize: 12.5 }}>
+            {new Date(selected).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8, maxHeight: 300, overflowY: 'auto' }}>
+            {selectedEvents.length === 0 && selectedReminders.length === 0 && (
+              <span className="empty-note">nothing this day</span>
+            )}
+            {selectedEvents.map((event) => (
+              <div key={event.id} className="chip" style={{ width: '100%' }}>
+                <span className="tag" style={{ color: 'var(--accent)', whiteSpace: 'nowrap' }}>
+                  {event.endMs
+                    ? `day ${Math.floor((selected - dayStart(event.startMs)) / dayMs) + 1}/${Math.floor((dayStart(event.endMs) - dayStart(event.startMs)) / dayMs) + 1}`
+                    : hhmm(event.startMs)}
+                </span>
+                <div className="nm" style={{ flexGrow: 1, minWidth: 0, fontWeight: 500 }}>{event.title}</div>
+                <span
+                  className="act"
+                  style={{ cursor: 'pointer', color: 'var(--faint)' }}
+                  onClick={() => props.send({ type: 'pa.remove', kind: 'event', id: event.id })}
+                >
+                  ✕
+                </span>
+              </div>
+            ))}
+            {selectedReminders.map((reminder) => (
+              <div key={reminder.id} className="chip" style={{ width: '100%' }}>
+                <span className="tag" style={{ color: 'var(--amber)' }}>{hhmm(reminder.atMs)} ⏰</span>
+                <div className="nm" style={{ flexGrow: 1, minWidth: 0, fontWeight: 500 }}>{reminder.text}</div>
+              </div>
+            ))}
+          </div>
+          <button
+            style={{ ...smallBtn, marginTop: 8 }}
+            onClick={() => props.onPrefill(`${new Date(selected).getFullYear()}-${String(new Date(selected).getMonth() + 1).padStart(2, '0')}-${String(new Date(selected).getDate()).padStart(2, '0')} 09:00`)}
+          >
+            + add on this day
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function PaPage(props: { state: HubState; send: (command: ClientCommand) => void }): JSX.Element {
   const { state, send } = props;
   const pa = state.pa;
@@ -113,13 +260,16 @@ export function PaPage(props: { state: HubState; send: (command: ClientCommand) 
   };
 
   const addTimed = (kind: 'reminder' | 'event') => {
-    const atMs = parseWhen(whenText);
-    if (atMs === null || !upcomingText.trim()) {
-      setWhenError(WHEN_HELP);
+    // "2026-09-20 09:00 to 2026-09-27 18:00" makes a multi-day event (a trip).
+    const spanMatch = whenText.match(/^(.+?)\s+to\s+(.+)$/i);
+    const atMs = parseWhen(spanMatch ? spanMatch[1]! : whenText);
+    const endMs = spanMatch ? parseWhen(spanMatch[2]!) : null;
+    if (atMs === null || !upcomingText.trim() || (spanMatch && (endMs === null || endMs <= atMs))) {
+      setWhenError(`${WHEN_HELP} — a span: "<when> to <when>" (events only)`);
       return;
     }
     setWhenError(null);
-    send({ type: 'pa.add', kind, text: upcomingText.trim(), atMs });
+    send({ type: 'pa.add', kind, text: upcomingText.trim(), atMs, ...(kind === 'event' && endMs ? { endMs } : {}) });
     setUpcomingText('');
     setWhenText('');
   };
@@ -283,6 +433,16 @@ export function PaPage(props: { state: HubState; send: (command: ClientCommand) 
           </div>
         </div>
       </div>
+
+      <MonthCalendar
+        events={pa.events}
+        reminders={pa.reminders}
+        send={send}
+        onPrefill={(isoDay) => {
+          setWhenText(isoDay);
+          setWhenError(null);
+        }}
+      />
 
       {/* Reference lists: any data/pa/<name>.json array-of-strings file — games, movies, books, etc. */}
       <div className="room">

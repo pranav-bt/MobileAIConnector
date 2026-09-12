@@ -101,7 +101,13 @@ data class PaTodo(val id: String, val text: String, val done: Boolean = false, v
 data class PaReminder(val id: String, val text: String, val atMs: Double, val firedAt: Double? = null)
 
 @Serializable
-data class PaEvent(val id: String, val title: String, val startMs: Double, val remindedAt: Double? = null)
+data class PaEvent(
+    val id: String,
+    val title: String,
+    val startMs: Double,
+    val endMs: Double? = null, // spans days (a trip)
+    val remindedAt: Double? = null,
+)
 
 @Serializable
 data class PaState(
@@ -209,11 +215,12 @@ object Commands {
         put("enabled", enabled)
     }
 
-    fun paAdd(kind: String, text: String, atMs: Double? = null): JsonObject = buildJsonObject {
+    fun paAdd(kind: String, text: String, atMs: Double? = null, endMs: Double? = null): JsonObject = buildJsonObject {
         put("type", "pa.add")
         put("kind", kind)
         put("text", text)
         if (atMs != null) put("atMs", atMs)
+        if (endMs != null) put("endMs", endMs)
     }
 
     fun paToggle(id: String): JsonObject = buildJsonObject {
