@@ -38,6 +38,51 @@ function timeChip(atMs: number): string {
   return `${at.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })} ${time}`;
 }
 
+function ListCard(props: {
+  name: string;
+  items: string[];
+  send: (command: ClientCommand) => void;
+}): JSX.Element {
+  const { name, items, send } = props;
+  const [text, setText] = useState('');
+  const addItem = () => {
+    if (!text.trim()) return;
+    send({ type: 'pa.list.add', list: name, text: text.trim() });
+    setText('');
+  };
+  return (
+    <div className="room">
+      <div className="lbl" style={{ textTransform: 'capitalize' }}>{name}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10, maxHeight: 260, overflowY: 'auto' }}>
+        {items.length === 0 && <span className="empty-note">empty</span>}
+        {items.map((item, index) => (
+          <div key={index} className="chip" style={{ width: '100%' }}>
+            <div className="nm" style={{ flexGrow: 1, minWidth: 0, fontWeight: 500 }}>{item}</div>
+            <span
+              className="act"
+              style={{ cursor: 'pointer', color: 'var(--faint)' }}
+              onClick={() => send({ type: 'pa.list.remove', list: name, index })}
+            >
+              ✕
+            </span>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+        <input
+          style={{ ...inputStyle, flexGrow: 1 }}
+          placeholder="add an item… (Enter)"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') addItem();
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function PaPage(props: { state: HubState; send: (command: ClientCommand) => void }): JSX.Element {
   const { state, send } = props;
   const pa = state.pa;
@@ -46,6 +91,8 @@ export function PaPage(props: { state: HubState; send: (command: ClientCommand) 
   const [whenText, setWhenText] = useState('');
   const [upcomingText, setUpcomingText] = useState('');
   const [whenError, setWhenError] = useState<string | null>(null);
+  const [newListName, setNewListName] = useState('');
+  const [newListItem, setNewListItem] = useState('');
 
   const upcoming = [
     ...pa.reminders.filter((r) => !r.firedAt).map((r) => ({ id: r.id, kind: 'reminder' as const, text: r.text, atMs: r.atMs })),
@@ -55,6 +102,15 @@ export function PaPage(props: { state: HubState; send: (command: ClientCommand) 
   const openTodos = pa.todos.filter((t) => !t.done).sort((a, b) => b.createdAt - a.createdAt);
   const doneTodos = pa.todos.filter((t) => t.done).slice(-8).reverse();
   const noteLines = pa.notes.split('\n').filter((line) => line.trim() && !line.startsWith('#'));
+
+  const lists = Object.entries(pa.lists).sort(([a], [b]) => a.localeCompare(b));
+
+  const createList = () => {
+    if (!newListName.trim() || !newListItem.trim()) return;
+    send({ type: 'pa.list.add', list: newListName.trim(), text: newListItem.trim() });
+    setNewListName('');
+    setNewListItem('');
+  };
 
   const addTimed = (kind: 'reminder' | 'event') => {
     const atMs = parseWhen(whenText);
@@ -225,6 +281,38 @@ export function PaPage(props: { state: HubState; send: (command: ClientCommand) 
               }}
             />
           </div>
+        </div>
+      </div>
+
+      {/* Reference lists: any data/pa/<name>.json array-of-strings file — games, movies, books, etc. */}
+      <div className="room">
+        <div className="lbl">Lists — reference, not to-dos</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 14, marginTop: 10 }}>
+          {lists.length === 0 && <span className="empty-note">no reference lists yet</span>}
+          {lists.map(([name, items]) => (
+            <ListCard key={name} name={name} items={items} send={send} />
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 6, marginTop: 12 }}>
+          <input
+            style={{ ...inputStyle, width: 160 }}
+            placeholder="new list name…"
+            value={newListName}
+            onChange={(e) => setNewListName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') createList();
+            }}
+          />
+          <input
+            style={{ ...inputStyle, flexGrow: 1 }}
+            placeholder="first item…"
+            value={newListItem}
+            onChange={(e) => setNewListItem(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') createList();
+            }}
+          />
+          <button style={smallBtn} onClick={createList}>create</button>
         </div>
       </div>
     </div>

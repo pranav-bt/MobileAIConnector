@@ -574,6 +574,9 @@ private fun PaTab(snapshot: Snapshot, connected: Boolean) {
     val openTodos = pa.todos.filter { !it.done }.sortedByDescending { it.createdAt }
     val doneTodos = pa.todos.filter { it.done }.takeLast(6).reversed()
     val noteLines = pa.notes.split('\n').filter { it.isNotBlank() && !it.startsWith("#") }
+    val lists = pa.lists.entries.sortedBy { it.key }
+    var newListName by remember { mutableStateOf("") }
+    var newListItem by remember { mutableStateOf("") }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().background(HQ.bg).padding(horizontal = 16.dp),
@@ -739,7 +742,81 @@ private fun PaTab(snapshot: Snapshot, connected: Boolean) {
             }
         }
 
+        item {
+            Card {
+                SectionLabel("Lists — reference, not to-dos")
+                if (lists.isEmpty()) Text("no reference lists yet", color = HQ.ghost, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                lists.forEach { (name, items) -> PaListCard(name, items, hub) }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = newListName, onValueChange = { newListName = it },
+                        modifier = Modifier.width(120.dp),
+                        placeholder = { Text("list name…", color = HQ.faint, fontSize = 11.sp) },
+                        textStyle = androidx.compose.ui.text.TextStyle(color = HQ.text, fontSize = 12.sp),
+                        singleLine = true,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    OutlinedTextField(
+                        value = newListItem, onValueChange = { newListItem = it },
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text("first item…", color = HQ.faint, fontSize = 11.sp) },
+                        textStyle = androidx.compose.ui.text.TextStyle(color = HQ.text, fontSize = 12.sp),
+                        singleLine = true,
+                    )
+                }
+                OutlinedButton(
+                    onClick = {
+                        if (newListName.isNotBlank() && newListItem.isNotBlank()) {
+                            hub.sendCommand(dev.neureal.agenthq.model.Commands.paListAdd(newListName.trim(), newListItem.trim()))
+                            newListName = ""; newListItem = ""
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(36.dp), shape = RoundedCornerShape(9.dp),
+                ) { Text("Create list", color = HQ.accent, fontSize = 11.5.sp) }
+            }
+        }
+
         item { Spacer(Modifier.height(8.dp)) }
+    }
+}
+
+// One reference list (games to play, movies, books, …): a plain string
+// array under data/pa/<name>.json, shown and edited in place.
+@Composable
+private fun PaListCard(name: String, items: List<String>, hub: dev.neureal.agenthq.net.HubClient) {
+    var text by remember(name) { mutableStateOf("") }
+    Column(Modifier.padding(vertical = 6.dp)) {
+        Text(name.replaceFirstChar { it.uppercase() }, color = HQ.text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(4.dp))
+        if (items.isEmpty()) Text("empty", color = HQ.ghost, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+        items.forEachIndexed { index, item ->
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                Text(item, color = HQ.text2, fontSize = 12.sp, modifier = Modifier.weight(1f), maxLines = 2)
+                Text(
+                    "✕", color = HQ.faint, fontSize = 12.sp,
+                    modifier = Modifier.clickable { hub.sendCommand(dev.neureal.agenthq.model.Commands.paListRemove(name, index)) }.padding(4.dp),
+                )
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = text, onValueChange = { text = it },
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("add an item…", color = HQ.faint, fontSize = 11.sp) },
+                textStyle = androidx.compose.ui.text.TextStyle(color = HQ.text, fontSize = 12.sp),
+                singleLine = true,
+            )
+            Spacer(Modifier.width(6.dp))
+            OutlinedButton(
+                onClick = {
+                    if (text.isNotBlank()) {
+                        hub.sendCommand(dev.neureal.agenthq.model.Commands.paListAdd(name, text.trim()))
+                        text = ""
+                    }
+                },
+                modifier = Modifier.height(36.dp), shape = RoundedCornerShape(9.dp),
+            ) { Text("Add", color = HQ.accent, fontSize = 11.5.sp) }
+        }
     }
 }
 
@@ -751,11 +828,33 @@ private fun TasksTab(snapshot: Snapshot, connected: Boolean, onSubmitTask: (Stri
     val parked = snapshot.tasks.filter { it.status == "paused" || it.status == "failed" }.sortedByDescending { it.updatedAt }.take(5)
     var composer by remember { mutableStateOf("") }
 
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val hub = dev.neureal.agenthq.net.HubHolder.get(context.applicationContext)
+
     LazyColumn(
         modifier = Modifier.fillMaxSize().background(HQ.bg).padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         item { Spacer(Modifier.height(4.dp)); Header(connected) }
+
+        // Global task controls: pause holds new work, resume drains queues,
+        // kill stops everything running and clears the queues.
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { hub.sendCommand(dev.neureal.agenthq.model.Commands.tasksControl("pause")) },
+                    modifier = Modifier.weight(1f).height(36.dp), shape = RoundedCornerShape(9.dp),
+                ) { Text("⏸ Pause", color = HQ.muted, fontSize = 11.sp) }
+                OutlinedButton(
+                    onClick = { hub.sendCommand(dev.neureal.agenthq.model.Commands.tasksControl("resume")) },
+                    modifier = Modifier.weight(1f).height(36.dp), shape = RoundedCornerShape(9.dp),
+                ) { Text("▶ Resume", color = HQ.accent, fontSize = 11.sp) }
+                OutlinedButton(
+                    onClick = { hub.sendCommand(dev.neureal.agenthq.model.Commands.tasksControl("killall")) },
+                    modifier = Modifier.weight(1f).height(36.dp), shape = RoundedCornerShape(9.dp),
+                ) { Text("■ Kill all", color = HQ.red, fontSize = 11.sp) }
+            }
+        }
 
         item {
             SectionLabel("New task")

@@ -318,6 +318,9 @@ export function startDemo(bus: HubBus, options: DemoOptions = {}): {
     },
     paToggle() {},
     paRemove() {},
+    paListAdd() {},
+    paListRemove() {},
+    tasksControl() {},
   };
 
   return {

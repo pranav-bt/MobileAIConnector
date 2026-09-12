@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PaState } from '@agent-hq/shared';
 import type { HubBus } from './bus.js';
@@ -9,9 +9,17 @@ import type { HubBus } from './bus.js';
 // rest. PA workers edit the same files when a task needs judgment; every
 // other team is told where the shared notes live.
 //
+// Reference lists (games to play, movies, books, …) are any other
+// data/pa/<name>.json file holding a plain string array — no schema
+// registration needed. Drop one in and it appears in the PA tab as its own
+// list; PA workers create these directly when the owner asks to track a
+// reference list that isn't a to-do.
+//
 // One switch gates all of it: pa.set / "/pa off". While off, nothing fires
 // and nothing is written by the clock; pending items are kept and fire after
 // re-enable. The stores stay editable either way.
+
+const CORE_FILES = new Set(['todos.json', 'reminders.json', 'calendar.json']);
 
 interface Todo {
   id: string;
@@ -99,6 +107,7 @@ export class PaDesk {
           return '';
         }
       })(),
+      lists: Object.fromEntries(this.#listNames().map((name) => [name, this.#readList(name)])),
     };
     const serialized = JSON.stringify(pa);
     if (serialized === this.#lastPublished) return;
@@ -183,6 +192,28 @@ export class PaDesk {
     this.#publishState();
   }
 
+  listAdd(list: string, text: string): void {
+    const name = this.#sanitizeListName(list);
+    const clean = text.trim();
+    if (!name || !clean) return;
+    const items = this.#readList(name);
+    items.push(clean);
+    this.#write(`${name}.json`, items);
+    this.#activity(`${name} list: added "${clean.slice(0, 50)}"`);
+    this.#publishState();
+  }
+
+  listRemove(list: string, index: number): void {
+    const name = this.#sanitizeListName(list);
+    if (!name) return;
+    const items = this.#readList(name);
+    if (index < 0 || index >= items.length) return;
+    const [removed] = items.splice(index, 1);
+    this.#write(`${name}.json`, items);
+    this.#activity(`${name} list: removed "${(removed ?? '').slice(0, 50)}"`);
+    this.#publishState();
+  }
+
   #tick(): void {
     if (!this.#enabled) return;
     try {
@@ -249,5 +280,28 @@ export class PaDesk {
 
   #write(file: string, value: unknown): void {
     writeFileSync(join(this.#dir, file), JSON.stringify(value, null, 2) + '\n');
+  }
+
+  // Every *.json file in the PA dir besides the three core stores is a
+  // reference list, named by its filename.
+  #listNames(): string[] {
+    try {
+      return readdirSync(this.#dir)
+        .filter((f) => f.endsWith('.json') && !CORE_FILES.has(f))
+        .map((f) => f.slice(0, -5));
+    } catch {
+      return [];
+    }
+  }
+
+  #readList(name: string): string[] {
+    const raw = this.#read<unknown>(`${name}.json`, []);
+    return Array.isArray(raw) ? raw.filter((item): item is string => typeof item === 'string') : [];
+  }
+
+  // Filesystem-safe slug so a list name can never escape the PA dir.
+  #sanitizeListName(name: string): string | null {
+    const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+    return slug && !CORE_FILES.has(`${slug}.json`) ? slug : null;
   }
 }

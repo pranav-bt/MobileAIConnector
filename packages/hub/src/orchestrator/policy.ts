@@ -23,6 +23,9 @@ const BASH_ESCALATIONS: Escalation[] = [
   { pattern: /\b(winget|choco|scoop|apt(-get)?|brew|dnf|pacman)\b/i, flag: 'system package manager' },
   { pattern: /\bgit\s+push\b|\bnpm\s+publish\b|\bgh\s+(pr\s+create|release|repo\s+(create|delete))\b/i, flag: 'publishes / pushes' },
   { pattern: /\brm\s+-\w*[rf]|\bRemove-Item\b|\brmdir\b|\bdel\s+\/|\bgit\s+(reset\s+--hard|clean\s+-\w*f|push\s+--force)\b|Format-|mkfs/i, flag: 'destructive' },
+  // Killing processes needs a card — a worker once killed the hub (its own
+  // host process) to "restart" it, freezing every task with it.
+  { pattern: /\bStop-Process\b|\btaskkill\b|\bkill\s+(-\d+\s+)?\d+|\bpkill\b/i, flag: 'kills processes' },
   // Plain network READS (fetching a page, downloading a reference) are
   // routine research and run silently; what escalates is SENDING data out…
   {

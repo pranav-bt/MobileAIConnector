@@ -31,7 +31,7 @@ export interface HubState {
 }
 
 export function emptyPa(): PaState {
-  return { enabled: true, todos: [], reminders: [], events: [], notes: '' };
+  return { enabled: true, todos: [], reminders: [], events: [], notes: '', lists: {} };
 }
 
 export function emptySecurity(): SecurityState {

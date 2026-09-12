@@ -110,6 +110,9 @@ data class PaState(
     val reminders: List<PaReminder> = emptyList(),
     val events: List<PaEvent> = emptyList(),
     val notes: String = "",
+    // Reference lists (games to play, movies, books, …) — one per
+    // data/pa/<name>.json file, keyed by name.
+    val lists: Map<String, List<String>> = emptyMap(),
 )
 
 @Serializable
@@ -222,6 +225,23 @@ object Commands {
         put("type", "pa.remove")
         put("kind", kind)
         put("id", id)
+    }
+
+    fun tasksControl(action: String): JsonObject = buildJsonObject {
+        put("type", "tasks.control")
+        put("action", action)
+    }
+
+    fun paListAdd(list: String, text: String): JsonObject = buildJsonObject {
+        put("type", "pa.list.add")
+        put("list", list)
+        put("text", text)
+    }
+
+    fun paListRemove(list: String, index: Int): JsonObject = buildJsonObject {
+        put("type", "pa.list.remove")
+        put("list", list)
+        put("index", index)
     }
 
     // Phone -> PC: the hub lands this in its data/inbox for the teams.

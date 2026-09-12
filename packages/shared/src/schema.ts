@@ -207,6 +207,10 @@ export const PaStateSchema = z.object({
   reminders: z.array(z.object({ id: z.string(), text: z.string(), atMs: z.number(), firedAt: z.number().optional() })),
   events: z.array(z.object({ id: z.string(), title: z.string(), startMs: z.number(), remindedAt: z.number().optional() })),
   notes: z.string(),
+  // Reference lists (games to play, movies, books, …) — plain string arrays,
+  // one per data/pa/<name>.json file, keyed by name. Not to-dos: no done
+  // state. New files dropped in that directory show up here automatically.
+  lists: z.record(z.string(), z.array(z.string())).default({}),
 });
 export type PaState = z.infer<typeof PaStateSchema>;
 

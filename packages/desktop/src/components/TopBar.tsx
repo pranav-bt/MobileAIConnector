@@ -3,7 +3,7 @@ import type { ClientCommand, HubState, WorkspaceRoot } from '@agent-hq/shared';
 import { isActive } from '../status';
 
 const HELP =
-  '/project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /permissions auto|strict · /todo <text> · /note <text> · /remind <when> <text> · /event <when> <title> · /pa on|off';
+  '/project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /permissions auto|strict · /todo <text> · /note <text> · /remind <when> <text> · /event <when> <title> · /pa on|off · /tasks pause|resume|killall';
 
 export const WHEN_HELP = '<when>: "in 20m|2h|3d", "17:30", "tomorrow 09:00", or "2026-09-14 18:00"';
 
@@ -100,6 +100,11 @@ function parseSlashCommand(
     return { command: { type: 'project.remove', projectId: slug(match[1]) }, note: `removing project ${match[1]}` };
   }
   // PA desk: deterministic capture + the master switch.
+  match = text.match(/^\/tasks (pause|resume|killall)$/i);
+  if (match && match[1]) {
+    const action = match[1].toLowerCase() as 'pause' | 'resume' | 'killall';
+    return { command: { type: 'tasks.control', action }, note: `tasks: ${action}` };
+  }
   match = text.match(/^\/pa (on|off)$/i);
   if (match && match[1]) {
     const enabled = match[1].toLowerCase() === 'on';

@@ -25,6 +25,8 @@ interface PaDeskLike {
   add(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number): void;
   toggleTodo(id: string): void;
   remove(kind: 'todo' | 'reminder' | 'event', id: string): void;
+  listAdd(list: string, text: string): void;
+  listRemove(list: string, index: number): void;
   paths: { dir: string; todos: string; reminders: string; calendar: string; notes: string };
 }
 
@@ -35,6 +37,7 @@ interface FreelancerRunner {
     agentId: string,
     text: string,
   ): Promise<{ ok: true; name: string; reply: string } | { ok: false; name: string; error: string }>;
+  killAll?(): void;
 }
 
 // Synthetic team for freelancer work: gives the standard review prompt a
@@ -71,6 +74,9 @@ export class Orchestrator implements CommandHandlers {
   #stopping = new Set<string>();
   #qaSource = new Map<string, string>(); // [QA] taskId -> source taskId
   #scaleAsked = new Set<string>(); // teams with an open scale-up card
+  // Global pause: nothing new starts (everything queues); running work
+  // finishes. killall stops running work too.
+  #pausedAll = false;
   // Follow-up generation per task (0 = user-submitted). QA passes, fixes,
   // and master-dispatched handovers each add one; past MAX the master stops
   // spawning and escalates to the owner instead of looping.
@@ -333,16 +339,7 @@ export class Orchestrator implements CommandHandlers {
       `routed "${decision.title}" → ${team.name} · ${project.name}${decision.fallback ? ' (keyword fallback)' : ''}`,
     );
 
-    const active = this.#activeWorkers.get(team.id) ?? 0;
-    if (active >= team.maxConcurrentWorkers) {
-      this.#patchTask(taskId, { status: 'queued' });
-      const queue = this.#queues.get(team.id) ?? [];
-      queue.push(taskId);
-      this.#queues.set(team.id, queue);
-      this.#maybeAskToScale(team);
-    } else {
-      void this.#runTask(taskId, team);
-    }
+    this.#startOrQueue(taskId, team, true);
     this.#masterStatus();
   }
 
@@ -383,7 +380,7 @@ export class Orchestrator implements CommandHandlers {
       this.#publishTask(record);
 
       // Respect the team's concurrency cap without jumping its queue forever.
-      while ((this.#activeWorkers.get(team.id) ?? 0) >= team.maxConcurrentWorkers) {
+      while (this.#pausedAll || (this.#activeWorkers.get(team.id) ?? 0) >= team.maxConcurrentWorkers) {
         if (this.#stopping.has(taskId) || ['paused', 'failed'].includes(this.#bus.state.tasks[taskId]?.status ?? '')) return;
         await delay(2000);
       }
@@ -421,7 +418,8 @@ export class Orchestrator implements CommandHandlers {
       const rootList = this.#projects.roots.map((root) => `${root.path} (${root.label})`).join(' · ');
       sections.push(
         `File locations policy: you have full READ/SEARCH access to everything under these roots, including ALL subdirectories at any depth — recurse into them when searching: ${rootList}. ` +
-          "Keep all new files inside this project's workspace; brand-new projects or standalone tools belong only under those roots.",
+          "Keep all new files inside this project's workspace; brand-new projects or standalone tools belong only under those roots. " +
+          'NEVER kill or restart the Agent HQ hub (port 4517) — you are running INSIDE it and would kill your own task; when hub code changes need a restart, say so in your report and the owner restarts it.',
       );
     }
     if (this.#outboxDir) {
@@ -455,6 +453,10 @@ export class Orchestrator implements CommandHandlers {
             `- Reminders: ${paths.reminders} — [{id, text, atMs}] (atMs = epoch milliseconds; fired ones gain firedAt)\n` +
             `- Calendar (custom, the only calendar we use): ${paths.calendar} — [{id, title, startMs}]\n` +
             `- Owner notes: ${paths.notes} — durable facts/preferences, one bullet per line.\n` +
+            `- Reference lists (games to play, movies, books, etc.): any ${paths.dir}\\<name>.json holding a plain ` +
+            'array of strings shows up automatically in the PA tab as its own list. Create one directly when the ' +
+            'owner wants something tracked as a simple reference list rather than a to-do — no code change needed, ' +
+            'and no done state or tags.\n' +
             'When asked to add/complete/list/reschedule any of these, edit the files; when summarizing (agenda, open todos), read them.',
         );
       }
@@ -636,7 +638,7 @@ export class Orchestrator implements CommandHandlers {
   // Respect the team's cap: run now or join the FIFO queue (and maybe ask
   // the owner for an extra worker).
   #startOrQueue(taskId: string, team: Team, autoQa: boolean): void {
-    if ((this.#activeWorkers.get(team.id) ?? 0) >= team.maxConcurrentWorkers) {
+    if (this.#pausedAll || (this.#activeWorkers.get(team.id) ?? 0) >= team.maxConcurrentWorkers) {
       this.#patchTask(taskId, { status: 'queued' });
       const queue = this.#queues.get(team.id) ?? [];
       queue.push(taskId);
@@ -854,6 +856,7 @@ export class Orchestrator implements CommandHandlers {
   }
 
   #drainQueue(teamId: string): void {
+    if (this.#pausedAll) return;
     const team = this.#registry.get(teamId);
     const queue = this.#queues.get(teamId) ?? [];
     if (queue.length === 0) this.#scaleAsked.delete(teamId); // eligible to ask again next backlog
@@ -1043,6 +1046,41 @@ export class Orchestrator implements CommandHandlers {
 
   paRemove(kind: 'todo' | 'reminder' | 'event', id: string): void {
     this.#pa?.remove(kind, id);
+  }
+
+  paListAdd(list: string, text: string): void {
+    this.#pa?.listAdd(list, text);
+  }
+
+  paListRemove(list: string, index: number): void {
+    this.#pa?.listRemove(list, index);
+  }
+
+  // Global task controls: pause holds everything new (running work finishes
+  // and then queues); resume drains; killall stops running work too.
+  tasksControl(action: 'pause' | 'resume' | 'killall'): void {
+    if (action === 'pause') {
+      if (this.#pausedAll) return;
+      this.#pausedAll = true;
+      this.#activity('master', null, 'ALL TASKS PAUSED — running work finishes, nothing new starts until resume');
+      return;
+    }
+    if (action === 'resume') {
+      if (!this.#pausedAll) return;
+      this.#pausedAll = false;
+      this.#activity('master', null, 'tasks resumed — draining queues');
+      for (const teamId of [...this.#queues.keys()]) this.#drainQueue(teamId);
+      return;
+    }
+    // killall: stop every non-terminal task (aborts workers, expires cards,
+    // empties queues) and kill any freelancer sidecars.
+    const active = Object.values(this.#bus.state.tasks).filter(
+      (task) => !['done', 'failed', 'paused'].includes(task.status),
+    );
+    for (const task of active) this.stopTask(task.id);
+    this.#queues.clear();
+    this.#freelancers?.killAll?.();
+    this.#activity('master', null, `KILL ALL — stopped ${active.length} task(s); queues cleared`);
   }
 
   // The freelancer manager is created alongside the hub and attached here so

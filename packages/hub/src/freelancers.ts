@@ -106,6 +106,7 @@ export class FreelancerManager {
   #published = new Map<string, number>(); // agentId -> mtime last published
   #registry = new Map<string, SessionInfo>();
   #busy = new Set<string>(); // sidecar instruction in flight
+  #children = new Map<string, { kill: () => void }>(); // live sidecar processes
   #openCount = -1; // test/fallback path only
   #openWorkspaces: string[] = []; // lowercased folders from live IDE locks
   #locksSeen = false;
@@ -363,6 +364,13 @@ export class FreelancerManager {
     });
   }
 
+  // The owner's "kill all": stop every running sidecar instruction now.
+  killAll(): void {
+    for (const child of this.#children.values()) child.kill();
+    this.#children.clear();
+    this.#busy.clear();
+  }
+
   // Continue the freelancer's conversation with an instruction. Resolves
   // with the session's reply (also pushed to the phone in full); the CALLER
   // (orchestrator) owns the task lifecycle, review, and QA around it.
@@ -412,6 +420,7 @@ export class FreelancerManager {
         shell: true,
         windowsHide: true,
       });
+      this.#children.set(agentId, { kill: () => { try { child.kill(); } catch {} } });
       let out = '';
       let err = '';
       child.stdout.on('data', (data) => {
@@ -430,6 +439,7 @@ export class FreelancerManager {
       const settle = (code: number | null) => {
         clearTimeout(timer);
         this.#busy.delete(agentId);
+        this.#children.delete(agentId);
         const reply = out.trim();
         if (code === 0 && reply) {
           deliver(reply);

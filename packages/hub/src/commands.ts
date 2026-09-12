@@ -36,6 +36,9 @@ export interface CommandHandlers {
   paAdd(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number): void;
   paToggle(id: string): void;
   paRemove(kind: 'todo' | 'reminder' | 'event', id: string): void;
+  paListAdd(list: string, text: string): void;
+  paListRemove(list: string, index: number): void;
+  tasksControl(action: 'pause' | 'resume' | 'killall'): void;
 }
 
 export function dispatchCommand(handlers: CommandHandlers, command: ClientCommand): void {
@@ -74,6 +77,12 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
       return handlers.paToggle(command.id);
     case 'pa.remove':
       return handlers.paRemove(command.kind, command.id);
+    case 'pa.list.add':
+      return handlers.paListAdd(command.list, command.text);
+    case 'pa.list.remove':
+      return handlers.paListRemove(command.list, command.index);
+    case 'tasks.control':
+      return handlers.tasksControl(command.action);
     case 'pairing.start':
     case 'pairing.cancel':
     case 'device.revoke':

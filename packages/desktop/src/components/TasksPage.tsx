@@ -82,9 +82,42 @@ export function TasksPage(props: {
   const current = tasks.filter((task) => CURRENT_STATUSES.includes(task.status));
   const recent = tasks.filter((task) => !CURRENT_STATUSES.includes(task.status)).slice(0, 5);
 
+  const controlBtn: React.CSSProperties = {
+    background: 'transparent',
+    border: '1px solid var(--line-chip)',
+    borderRadius: 8,
+    color: 'var(--muted)',
+    cursor: 'pointer',
+    fontSize: 11,
+    padding: '5px 10px',
+  };
+
   return (
     <div style={{ flexGrow: 1, padding: '18px 20px', overflowY: 'auto' }}>
-      <div className="sect">Current · {current.length}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <div className="sect" style={{ flexGrow: 1 }}>Current · {current.length}</div>
+        <button
+          style={controlBtn}
+          title="Running work finishes; nothing new starts until resume"
+          onClick={() => props.send({ type: 'tasks.control', action: 'pause' })}
+        >
+          ⏸ Pause all
+        </button>
+        <button
+          style={{ ...controlBtn, color: 'var(--accent)' }}
+          title="Drain the queues and start working again"
+          onClick={() => props.send({ type: 'tasks.control', action: 'resume' })}
+        >
+          ▶ Resume
+        </button>
+        <button
+          style={{ ...controlBtn, color: 'var(--red)', borderColor: 'rgba(232,90,90,0.45)' }}
+          title="Stop every running task and clear all queues"
+          onClick={() => props.send({ type: 'tasks.control', action: 'killall' })}
+        >
+          ■ Kill all
+        </button>
+      </div>
       {current.length === 0 && <span className="empty-note">nothing running — give the master agent a task above</span>}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {current.map((task) => (

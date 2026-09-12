@@ -100,6 +100,12 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
   // PA tab interactions: tick a todo, remove an item.
   z.object({ type: z.literal('pa.toggle'), id: z.string().min(1) }),
   z.object({ type: z.literal('pa.remove'), kind: z.enum(['todo', 'reminder', 'event']), id: z.string().min(1) }),
+  // Reference lists: append (creates the list/file if new) or remove by index.
+  z.object({ type: z.literal('pa.list.add'), list: z.string().min(1).max(40), text: z.string().min(1) }),
+  z.object({ type: z.literal('pa.list.remove'), list: z.string().min(1).max(40), index: z.number().int().nonnegative() }),
+  // Global task controls: pause (nothing new starts; running work finishes),
+  // resume (queues drain), killall (stop everything now).
+  z.object({ type: z.literal('tasks.control'), action: z.enum(['pause', 'resume', 'killall']) }),
   // Security commands — the hub only honors these from trusted local
   // clients, never from a device session.
   z.object({ type: z.literal('pairing.start') }),

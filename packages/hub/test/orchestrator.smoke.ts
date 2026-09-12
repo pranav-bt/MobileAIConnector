@@ -654,6 +654,46 @@ try {
   );
   console.log('PA desk ok: capture persisted, clock fires to phone, /pa off holds and /pa on releases');
 
+  // 22. Global task controls: pause holds new work, resume drains, killall
+  // stops everything and clears queues.
+  ws.send(encodeCommand({ type: 'tasks.control', action: 'pause' }));
+  await waitFor('pause announced', (e) => e.type === 'activity' && e.entry.message.startsWith('ALL TASKS PAUSED'));
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding slow-test paused-probe feature' }));
+  const held = await waitFor(
+    'task queued while paused',
+    (e) => e.type === 'task.updated' && e.task.detail.includes('paused-probe') && e.task.status === 'queued',
+  );
+  if (held.type !== 'task.updated') fail('unreachable');
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  if (events.some((e) => e.type === 'task.updated' && e.task.id === held.task.id && e.task.status === 'in_flight')) {
+    fail('paused hub started a task anyway');
+  }
+  ws.send(encodeCommand({ type: 'tasks.control', action: 'resume' }));
+  await waitFor('resume announced', (e) => e.type === 'activity' && e.entry.message.startsWith('tasks resumed'));
+  await waitFor(
+    'held task ran after resume',
+    (e) => e.type === 'task.updated' && e.task.id === held.task.id && e.task.status === 'done',
+    20000,
+  );
+
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding slow-test killme-one' }));
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding slow-test killme-two' }));
+  await waitFor(
+    'a killme task is running',
+    (e) => e.type === 'task.updated' && e.task.detail.includes('killme') && e.task.status === 'in_flight',
+    15000,
+  );
+  ws.send(encodeCommand({ type: 'tasks.control', action: 'killall' }));
+  await waitFor('kill all announced', (e) => e.type === 'activity' && e.entry.message.startsWith('KILL ALL'));
+  for (const which of ['killme-one', 'killme-two']) {
+    await waitFor(
+      `${which} stopped`,
+      (e) => e.type === 'task.updated' && e.task.detail.includes(which) && e.task.status === 'paused',
+      15000,
+    );
+  }
+  console.log('task controls ok: pause held, resume drained, killall stopped everything');
+
   console.log('ORCH SMOKE PASS');
   ws.close();
   await hub.close();
