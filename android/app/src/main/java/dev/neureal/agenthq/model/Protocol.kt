@@ -95,6 +95,24 @@ data class Usage(
 )
 
 @Serializable
+data class PaTodo(val id: String, val text: String, val done: Boolean = false, val createdAt: Double = 0.0)
+
+@Serializable
+data class PaReminder(val id: String, val text: String, val atMs: Double, val firedAt: Double? = null)
+
+@Serializable
+data class PaEvent(val id: String, val title: String, val startMs: Double, val remindedAt: Double? = null)
+
+@Serializable
+data class PaState(
+    val enabled: Boolean = true,
+    val todos: List<PaTodo> = emptyList(),
+    val reminders: List<PaReminder> = emptyList(),
+    val events: List<PaEvent> = emptyList(),
+    val notes: String = "",
+)
+
+@Serializable
 data class Snapshot(
     val agents: List<Agent> = emptyList(),
     val teams: List<Team> = emptyList(),
@@ -102,6 +120,7 @@ data class Snapshot(
     val permissions: List<PermissionRequest> = emptyList(),
     val projects: List<Project> = emptyList(),
     val usage: Usage = Usage(),
+    val pa: PaState = PaState(),
 )
 
 @Serializable
@@ -127,6 +146,7 @@ sealed interface HubEvent {
     data class ProjectUpdated(val project: Project) : HubEvent
     data class ProjectRemoved(val projectId: String) : HubEvent
     data class UsageUpdated(val usage: Usage) : HubEvent
+    data class PaUpdated(val pa: PaState) : HubEvent
     data class FileShared(val file: SharedFile) : HubEvent
     data object Ignored : HubEvent
 }
@@ -146,6 +166,7 @@ fun decodeEnvelope(raw: String): HubEvent? {
             "project.updated" -> HubEvent.ProjectUpdated(json.decodeFromJsonElement(event["project"]!!))
             "project.removed" -> HubEvent.ProjectRemoved(event["projectId"]!!.jsonPrimitive.content)
             "usage.updated" -> HubEvent.UsageUpdated(json.decodeFromJsonElement(event["usage"]!!))
+            "pa.updated" -> HubEvent.PaUpdated(json.decodeFromJsonElement(event["pa"]!!))
             "file.shared" -> HubEvent.FileShared(json.decodeFromJsonElement(event["file"]!!))
             else -> HubEvent.Ignored
         }
@@ -177,6 +198,30 @@ object Commands {
         put("type", "freelancer.send")
         put("agentId", agentId)
         put("text", text)
+    }
+
+    // PA desk: master switch + capture + tab interactions.
+    fun paSet(enabled: Boolean): JsonObject = buildJsonObject {
+        put("type", "pa.set")
+        put("enabled", enabled)
+    }
+
+    fun paAdd(kind: String, text: String, atMs: Double? = null): JsonObject = buildJsonObject {
+        put("type", "pa.add")
+        put("kind", kind)
+        put("text", text)
+        if (atMs != null) put("atMs", atMs)
+    }
+
+    fun paToggle(id: String): JsonObject = buildJsonObject {
+        put("type", "pa.toggle")
+        put("id", id)
+    }
+
+    fun paRemove(kind: String, id: String): JsonObject = buildJsonObject {
+        put("type", "pa.remove")
+        put("kind", kind)
+        put("id", id)
     }
 
     // Phone -> PC: the hub lands this in its data/inbox for the teams.

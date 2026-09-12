@@ -97,6 +97,9 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     text: z.string().min(1),
     atMs: z.number().optional(),
   }),
+  // PA tab interactions: tick a todo, remove an item.
+  z.object({ type: z.literal('pa.toggle'), id: z.string().min(1) }),
+  z.object({ type: z.literal('pa.remove'), kind: z.enum(['todo', 'reminder', 'event']), id: z.string().min(1) }),
   // Security commands — the hub only honors these from trusted local
   // clients, never from a device session.
   z.object({ type: z.literal('pairing.start') }),

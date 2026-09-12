@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { PaState } from '@agent-hq/shared';
 import type { HubBus } from './bus.js';
 
 // The PA desk: the deterministic half of the Personal Assistant. Plain-data
@@ -80,7 +81,33 @@ export class PaDesk {
     };
   }
 
+  #lastPublished = '';
+
+  // Mirror the stores into client state (both apps render the PA tab from
+  // this). Published on every change — including PA-worker file edits, which
+  // the clock notices within one tick.
+  #publishState(): void {
+    const pa: PaState = {
+      enabled: this.#enabled,
+      todos: this.#read('todos.json', []),
+      reminders: this.#read('reminders.json', []),
+      events: this.#read('calendar.json', []),
+      notes: (() => {
+        try {
+          return readFileSync(join(this.#dir, 'notes.md'), 'utf8').slice(0, 8000);
+        } catch {
+          return '';
+        }
+      })(),
+    };
+    const serialized = JSON.stringify(pa);
+    if (serialized === this.#lastPublished) return;
+    this.#lastPublished = serialized;
+    this.#bus.publish({ type: 'pa.updated', pa });
+  }
+
   start(): void {
+    this.#publishState();
     this.#interval = setInterval(() => this.#tick(), this.#intervalMs);
   }
 
@@ -97,6 +124,27 @@ export class PaDesk {
         ? 'PA desk switched ON — reminders and event alerts will fire (missed ones fire now)'
         : 'PA desk switched OFF — nothing will fire or notify until "/pa on"',
     );
+    this.#publishState();
+  }
+
+  toggleTodo(id: string): void {
+    const todos = this.#read<Todo[]>('todos.json', []);
+    const todo = todos.find((t) => t.id === id);
+    if (!todo) return;
+    todo.done = !todo.done;
+    this.#write('todos.json', todos);
+    this.#activity(`todo ${todo.done ? 'done' : 'reopened'}: ${todo.text.slice(0, 50)}`);
+    this.#publishState();
+  }
+
+  remove(kind: 'todo' | 'reminder' | 'event', id: string): void {
+    const file = kind === 'todo' ? 'todos.json' : kind === 'reminder' ? 'reminders.json' : 'calendar.json';
+    const items = this.#read<{ id: string; text?: string; title?: string }[]>(file, []);
+    const item = items.find((entry) => entry.id === id);
+    if (!item) return;
+    this.#write(file, items.filter((entry) => entry.id !== id));
+    this.#activity(`${kind} removed: ${(item.text ?? item.title ?? '').slice(0, 50)}`);
+    this.#publishState();
   }
 
   add(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number): void {
@@ -107,11 +155,13 @@ export class PaDesk {
       todos.push({ id: newId(), text: clean, done: false, createdAt: Date.now() });
       this.#write('todos.json', todos);
       this.#activity(`todo added: ${clean.slice(0, 60)}`);
+      this.#publishState();
       return;
     }
     if (kind === 'note') {
       appendFileSync(join(this.#dir, 'notes.md'), `- ${new Date().toISOString().slice(0, 10)}: ${clean}\n`);
       this.#activity(`noted: ${clean.slice(0, 60)}`);
+      this.#publishState();
       return;
     }
     if (!atMs || !Number.isFinite(atMs) || atMs < Date.now() - 60_000) {
@@ -130,6 +180,7 @@ export class PaDesk {
       this.#write('calendar.json', events);
       this.#activity(`event added ${when}: ${clean.slice(0, 50)}`);
     }
+    this.#publishState();
   }
 
   #tick(): void {
@@ -159,6 +210,9 @@ export class PaDesk {
       }
       const keptEvents = events.filter((e) => !e.remindedAt || now - e.startMs < KEEP_FIRED_MS);
       if (eventsDirty || keptEvents.length !== events.length) this.#write('calendar.json', keptEvents);
+
+      // Catches PA-worker edits to the files too (change-detected inside).
+      this.#publishState();
     } catch {
       /* a bad tick never kills the clock; next one retries */
     }

@@ -3,6 +3,7 @@ import type {
   Agent,
   HubEvent,
   HubInfo,
+  PaState,
   PermissionRequest,
   Project,
   SecurityState,
@@ -26,6 +27,11 @@ export interface HubState {
   security: SecurityState;
   activityLog: ActivityEntry[];
   info: HubInfo;
+  pa: PaState;
+}
+
+export function emptyPa(): PaState {
+  return { enabled: true, todos: [], reminders: [], events: [], notes: '' };
 }
 
 export function emptySecurity(): SecurityState {
@@ -59,6 +65,7 @@ export function emptyState(): HubState {
     security: emptySecurity(),
     activityLog: [],
     info: emptyInfo(),
+    pa: emptyPa(),
   };
 }
 
@@ -73,6 +80,7 @@ export function toSnapshot(state: HubState): Snapshot {
     security: state.security,
     activityLog: state.activityLog,
     info: state.info,
+    pa: state.pa,
   };
 }
 
@@ -89,6 +97,7 @@ export function fromSnapshot(snapshot: Snapshot): HubState {
     security: snapshot.security,
     activityLog: snapshot.activityLog,
     info: snapshot.info,
+    pa: snapshot.pa ?? emptyPa(),
   };
 }
 
@@ -127,6 +136,8 @@ export function applyEvent(state: HubState, event: HubEvent): HubState {
     }
     case 'usage.updated':
       return { ...state, usage: event.usage };
+    case 'pa.updated':
+      return { ...state, pa: event.pa };
     case 'security.updated':
       return { ...state, security: event.security };
     case 'hub.updated':

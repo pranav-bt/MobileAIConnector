@@ -608,6 +608,23 @@ try {
   await waitFor('todo captured', (e) => e.type === 'activity' && e.entry.message === 'todo added: buy milk');
   const todosOnDisk = JSON.parse(readFileSync(join(dataDir, 'pa', 'todos.json'), 'utf8'));
   if (!todosOnDisk.some((t: { text: string }) => t.text === 'buy milk')) fail('todo not persisted to data/pa');
+  // The PA tab renders from mirrored state: pa.updated carries the stores.
+  const paMirror = await waitFor(
+    'pa state mirrored to clients',
+    (e) => e.type === 'pa.updated' && e.pa.todos.some((t) => t.text === 'buy milk'),
+  );
+  if (paMirror.type !== 'pa.updated') fail('unreachable');
+  const milkId = paMirror.pa.todos.find((t) => t.text === 'buy milk')!.id;
+  ws.send(encodeCommand({ type: 'pa.toggle', id: milkId }));
+  await waitFor(
+    'todo ticked via the tab command',
+    (e) => e.type === 'pa.updated' && e.pa.todos.some((t) => t.id === milkId && t.done),
+  );
+  ws.send(encodeCommand({ type: 'pa.remove', kind: 'todo', id: milkId }));
+  await waitFor(
+    'todo removed via the tab command',
+    (e) => e.type === 'pa.updated' && !e.pa.todos.some((t) => t.id === milkId),
+  );
 
   ws.send(encodeCommand({ type: 'pa.add', kind: 'reminder', text: 'stand up and stretch', atMs: Date.now() + 700 }));
   await waitFor(

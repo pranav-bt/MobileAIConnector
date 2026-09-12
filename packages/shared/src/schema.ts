@@ -199,6 +199,17 @@ export const HubInfoSchema = z.object({
 });
 export type HubInfo = z.infer<typeof HubInfoSchema>;
 
+// Everything the PA desk maintains, mirrored to clients so both apps can
+// render a PA tab straight from state (files stay the source of truth).
+export const PaStateSchema = z.object({
+  enabled: z.boolean(),
+  todos: z.array(z.object({ id: z.string(), text: z.string(), done: z.boolean(), createdAt: z.number() })),
+  reminders: z.array(z.object({ id: z.string(), text: z.string(), atMs: z.number(), firedAt: z.number().optional() })),
+  events: z.array(z.object({ id: z.string(), title: z.string(), startMs: z.number(), remindedAt: z.number().optional() })),
+  notes: z.string(),
+});
+export type PaState = z.infer<typeof PaStateSchema>;
+
 export const SnapshotSchema = z.object({
   agents: z.array(AgentSchema),
   teams: z.array(TeamSchema),
@@ -208,6 +219,7 @@ export const SnapshotSchema = z.object({
   usage: UsageSchema,
   security: SecurityStateSchema,
   activityLog: z.array(ActivityEntrySchema),
+  pa: PaStateSchema.optional(), // absent in snapshots from older hubs
   info: HubInfoSchema,
 });
 export type Snapshot = z.infer<typeof SnapshotSchema>;
@@ -223,6 +235,7 @@ export const HubEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('project.updated'), project: ProjectSchema }),
   z.object({ type: z.literal('project.removed'), projectId: z.string() }),
   z.object({ type: z.literal('usage.updated'), usage: UsageSchema }),
+  z.object({ type: z.literal('pa.updated'), pa: PaStateSchema }),
   z.object({ type: z.literal('security.updated'), security: SecurityStateSchema }),
   z.object({ type: z.literal('hub.updated'), info: HubInfoSchema }),
   z.object({ type: z.literal('activity'), entry: ActivityEntrySchema }),

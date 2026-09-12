@@ -34,6 +34,8 @@ export interface CommandHandlers {
   freelancerSend(agentId: string, text: string): void;
   paSet(enabled: boolean): void;
   paAdd(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number): void;
+  paToggle(id: string): void;
+  paRemove(kind: 'todo' | 'reminder' | 'event', id: string): void;
 }
 
 export function dispatchCommand(handlers: CommandHandlers, command: ClientCommand): void {
@@ -68,6 +70,10 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
       return handlers.paSet(command.enabled);
     case 'pa.add':
       return handlers.paAdd(command.kind, command.text, command.atMs);
+    case 'pa.toggle':
+      return handlers.paToggle(command.id);
+    case 'pa.remove':
+      return handlers.paRemove(command.kind, command.id);
     case 'pairing.start':
     case 'pairing.cancel':
     case 'device.revoke':

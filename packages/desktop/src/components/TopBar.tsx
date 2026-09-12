@@ -5,10 +5,10 @@ import { isActive } from '../status';
 const HELP =
   '/project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /permissions auto|strict · /todo <text> · /note <text> · /remind <when> <text> · /event <when> <title> · /pa on|off';
 
-const WHEN_HELP = '<when>: "in 20m|2h|3d", "17:30", "tomorrow 09:00", or "2026-09-14 18:00"';
+export const WHEN_HELP = '<when>: "in 20m|2h|3d", "17:30", "tomorrow 09:00", or "2026-09-14 18:00"';
 
 // Deterministic time parsing (zero tokens): returns epoch ms or null.
-function parseWhen(raw: string): number | null {
+export function parseWhen(raw: string): number | null {
   const text = raw.trim().toLowerCase();
   const now = new Date();
   let match = text.match(/^in\s+(\d+)\s*(m|min|minutes?|h|hours?|d|days?)$/);

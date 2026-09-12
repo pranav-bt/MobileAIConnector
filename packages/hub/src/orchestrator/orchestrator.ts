@@ -23,6 +23,8 @@ const MAX_LOUNGE_IDLE = 3;
 interface PaDeskLike {
   setEnabled(enabled: boolean): void;
   add(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number): void;
+  toggleTodo(id: string): void;
+  remove(kind: 'todo' | 'reminder' | 'event', id: string): void;
   paths: { dir: string; todos: string; reminders: string; calendar: string; notes: string };
 }
 
@@ -1033,6 +1035,14 @@ export class Orchestrator implements CommandHandlers {
 
   paAdd(kind: 'todo' | 'reminder' | 'event' | 'note', text: string, atMs?: number): void {
     this.#pa?.add(kind, text, atMs);
+  }
+
+  paToggle(id: string): void {
+    this.#pa?.toggleTodo(id);
+  }
+
+  paRemove(kind: 'todo' | 'reminder' | 'event', id: string): void {
+    this.#pa?.remove(kind, id);
   }
 
   // The freelancer manager is created alongside the hub and attached here so

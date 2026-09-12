@@ -5,6 +5,7 @@ import { Rail, type View } from './components/Rail';
 import { TopBar } from './components/TopBar';
 import { Office } from './components/Office';
 import { TasksPage } from './components/TasksPage';
+import { PaPage } from './components/PaPage';
 import { ResourcesPage } from './components/ResourcesPage';
 import { HistoryPage } from './components/HistoryPage';
 import { SecurityPage } from './components/SecurityPage';
@@ -26,6 +27,7 @@ export function App(): JSX.Element {
         <TopBar state={state} send={send} />
         {view === 'office' && <Office state={state} send={send} />}
         {view === 'tasks' && <TasksPage state={state} send={send} />}
+        {view === 'pa' && <PaPage state={state} send={send} />}
         {view === 'resources' && <ResourcesPage state={state} />}
         {view === 'history' && <HistoryPage state={state} />}
         {view === 'security' && <SecurityPage state={state} send={send} />}

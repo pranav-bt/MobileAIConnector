@@ -1,0 +1,232 @@
+import { useState } from 'react';
+import type { ClientCommand, HubState } from '@agent-hq/shared';
+import { parseWhen, WHEN_HELP } from './TopBar';
+
+// The PA tab: everything the desk maintains, readable and editable in place —
+// Up next (reminders + custom calendar), Todos, and the shared owner Notes.
+// All zero-token: rows come from live pa state; interactions are commands.
+
+const inputStyle: React.CSSProperties = {
+  background: 'var(--panel-2)',
+  border: '1px solid var(--line-chip)',
+  borderRadius: 8,
+  color: 'var(--text)',
+  fontSize: 12,
+  padding: '7px 9px',
+  outline: 'none',
+};
+
+const smallBtn: React.CSSProperties = {
+  background: 'transparent',
+  border: '1px solid var(--line-chip)',
+  borderRadius: 8,
+  color: 'var(--muted)',
+  cursor: 'pointer',
+  fontSize: 11,
+  padding: '6px 10px',
+};
+
+function timeChip(atMs: number): string {
+  const at = new Date(atMs);
+  const now = new Date();
+  const sameDay = at.toDateString() === now.toDateString();
+  const time = at.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  if (sameDay) return `today ${time}`;
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+  if (at.toDateString() === tomorrow.toDateString()) return `tmrw ${time}`;
+  return `${at.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })} ${time}`;
+}
+
+export function PaPage(props: { state: HubState; send: (command: ClientCommand) => void }): JSX.Element {
+  const { state, send } = props;
+  const pa = state.pa;
+  const [todoText, setTodoText] = useState('');
+  const [noteText, setNoteText] = useState('');
+  const [whenText, setWhenText] = useState('');
+  const [upcomingText, setUpcomingText] = useState('');
+  const [whenError, setWhenError] = useState<string | null>(null);
+
+  const upcoming = [
+    ...pa.reminders.filter((r) => !r.firedAt).map((r) => ({ id: r.id, kind: 'reminder' as const, text: r.text, atMs: r.atMs })),
+    ...pa.events.map((e) => ({ id: e.id, kind: 'event' as const, text: e.title, atMs: e.startMs })),
+  ].sort((a, b) => a.atMs - b.atMs);
+  const fired = pa.reminders.filter((r) => r.firedAt).sort((a, b) => (b.firedAt ?? 0) - (a.firedAt ?? 0)).slice(0, 6);
+  const openTodos = pa.todos.filter((t) => !t.done).sort((a, b) => b.createdAt - a.createdAt);
+  const doneTodos = pa.todos.filter((t) => t.done).slice(-8).reverse();
+  const noteLines = pa.notes.split('\n').filter((line) => line.trim() && !line.startsWith('#'));
+
+  const addTimed = (kind: 'reminder' | 'event') => {
+    const atMs = parseWhen(whenText);
+    if (atMs === null || !upcomingText.trim()) {
+      setWhenError(WHEN_HELP);
+      return;
+    }
+    setWhenError(null);
+    send({ type: 'pa.add', kind, text: upcomingText.trim(), atMs });
+    setUpcomingText('');
+    setWhenText('');
+  };
+
+  return (
+    <div style={{ padding: 18, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* Header: what this is + the master switch */}
+      <div className="room" style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        <div style={{ flexGrow: 1 }}>
+          <div className="lbl">PA Desk</div>
+          <div className="act" style={{ color: 'var(--faint)', marginTop: 3 }}>
+            todos · reminders · calendar · shared notes — kept as plain files, fired by the hub clock, zero tokens at rest
+          </div>
+        </div>
+        <button
+          style={{
+            ...smallBtn,
+            borderColor: pa.enabled ? 'rgba(79,216,196,0.5)' : 'rgba(232,90,90,0.5)',
+            color: pa.enabled ? 'var(--accent)' : 'var(--red)',
+            fontWeight: 600,
+          }}
+          onClick={() => send({ type: 'pa.set', enabled: !pa.enabled })}
+          title="The single switch: off = nothing fires or notifies; items hold and fire on re-enable"
+        >
+          {pa.enabled ? 'ON — click to switch off' : 'OFF — click to switch on'}
+        </button>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1.25fr 1fr 1fr', gap: 14, alignItems: 'start' }}>
+        {/* Up next: reminders + custom calendar, merged chronologically */}
+        <div className="room">
+          <div className="lbl">Up next — reminders & calendar</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10, maxHeight: 380, overflowY: 'auto' }}>
+            {upcoming.length === 0 && <span className="empty-note">nothing scheduled</span>}
+            {upcoming.map((item) => (
+              <div key={item.id} className="chip" style={{ width: '100%' }}>
+                <span
+                  className="tag"
+                  style={{ color: item.kind === 'event' ? 'var(--accent)' : 'var(--amber)', whiteSpace: 'nowrap' }}
+                >
+                  {timeChip(item.atMs)}
+                </span>
+                <div className="nm" style={{ flexGrow: 1, minWidth: 0, fontWeight: 500 }}>{item.text}</div>
+                <span
+                  className="act"
+                  style={{ cursor: 'pointer', color: 'var(--faint)' }}
+                  onClick={() => send({ type: 'pa.remove', kind: item.kind, id: item.id })}
+                >
+                  ✕
+                </span>
+              </div>
+            ))}
+            {fired.length > 0 && (
+              <>
+                <div className="act" style={{ color: 'var(--faint)', marginTop: 6 }}>recently fired</div>
+                {fired.map((reminder) => (
+                  <div key={reminder.id} className="chip dim" style={{ width: '100%' }}>
+                    <span className="tag">{timeChip(reminder.atMs)}</span>
+                    <div className="act" style={{ flexGrow: 1 }}>{reminder.text}</div>
+                    <span
+                      className="act"
+                      style={{ cursor: 'pointer', color: 'var(--faint)' }}
+                      onClick={() => send({ type: 'pa.remove', kind: 'reminder', id: reminder.id })}
+                    >
+                      ✕
+                    </span>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+            <input
+              style={{ ...inputStyle, width: 130 }}
+              placeholder="in 20m · 17:30"
+              value={whenText}
+              onChange={(e) => setWhenText(e.target.value)}
+            />
+            <input
+              style={{ ...inputStyle, flexGrow: 1 }}
+              placeholder="what…"
+              value={upcomingText}
+              onChange={(e) => setUpcomingText(e.target.value)}
+            />
+            <button style={smallBtn} onClick={() => addTimed('reminder')}>remind</button>
+            <button style={smallBtn} onClick={() => addTimed('event')}>event</button>
+          </div>
+          {whenError && <div className="act" style={{ color: 'var(--amber)', marginTop: 5 }}>{whenError}</div>}
+        </div>
+
+        {/* Todos */}
+        <div className="room">
+          <div className="lbl">Todos</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10, maxHeight: 400, overflowY: 'auto' }}>
+            {openTodos.length === 0 && <span className="empty-note">nothing open</span>}
+            {[...openTodos, ...doneTodos].map((todo) => (
+              <div key={todo.id} className={`chip${todo.done ? ' dim' : ''}`} style={{ width: '100%' }}>
+                <span
+                  style={{ cursor: 'pointer', fontSize: 14, color: todo.done ? 'var(--green)' : 'var(--faint)' }}
+                  title={todo.done ? 'reopen' : 'mark done'}
+                  onClick={() => send({ type: 'pa.toggle', id: todo.id })}
+                >
+                  {todo.done ? '☑' : '☐'}
+                </span>
+                <div
+                  className="nm"
+                  style={{ flexGrow: 1, minWidth: 0, fontWeight: 500, textDecoration: todo.done ? 'line-through' : 'none' }}
+                >
+                  {todo.text}
+                </div>
+                <span
+                  className="act"
+                  style={{ cursor: 'pointer', color: 'var(--faint)' }}
+                  onClick={() => send({ type: 'pa.remove', kind: 'todo', id: todo.id })}
+                >
+                  ✕
+                </span>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+            <input
+              style={{ ...inputStyle, flexGrow: 1 }}
+              placeholder="add a todo…"
+              value={todoText}
+              onChange={(e) => setTodoText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && todoText.trim()) {
+                  send({ type: 'pa.add', kind: 'todo', text: todoText.trim() });
+                  setTodoText('');
+                }
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Shared notes */}
+        <div className="room">
+          <div className="lbl">Notes — shared with every team</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 10, maxHeight: 400, overflowY: 'auto' }}>
+            {noteLines.length === 0 && <span className="empty-note">no notes yet — facts here reach every worker</span>}
+            {noteLines.map((line, index) => (
+              <div key={index} className="act" style={{ color: 'var(--text-2)', lineHeight: 1.5 }}>
+                {line.replace(/^\s*-\s*/, '• ')}
+              </div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+            <input
+              style={{ ...inputStyle, flexGrow: 1 }}
+              placeholder="add a note… (Enter)"
+              value={noteText}
+              onChange={(e) => setNoteText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && noteText.trim()) {
+                  send({ type: 'pa.add', kind: 'note', text: noteText.trim() });
+                  setNoteText('');
+                }
+              }}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

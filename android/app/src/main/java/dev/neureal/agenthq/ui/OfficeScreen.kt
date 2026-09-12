@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -223,6 +224,7 @@ fun MainScreen(
                 val items = listOf(
                     Triple("Office", Icons.Filled.Home, pending.size),
                     Triple("Tasks", Icons.Filled.Menu, 0),
+                    Triple("PA", Icons.Filled.Person, 0),
                     Triple("History", Icons.Filled.DateRange, 0),
                     Triple("Link", Icons.Filled.Settings, 0),
                 )
@@ -256,7 +258,8 @@ fun MainScreen(
             when (tab) {
                 0 -> OfficeTab(snapshot, connected, pending, onRespond, onFreelancerSend)
                 1 -> TasksTab(snapshot, connected, onSubmitTask)
-                2 -> HistoryTab(snapshot)
+                2 -> PaTab(snapshot, connected)
+                3 -> HistoryTab(snapshot)
                 else -> LinkTab(snapshot, connected, pairedHost, backgroundEnabled, onToggleBackground, jarvisEnabled, onToggleJarvis, onSendFile, onUnpair)
             }
             VoiceOverlay(Modifier.align(Alignment.BottomCenter))
@@ -500,6 +503,238 @@ private fun OfficeTab(
                             ) { Text("Send instruction", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
                         }
                     }
+                }
+            }
+        }
+
+        item { Spacer(Modifier.height(8.dp)) }
+    }
+}
+
+// Same deterministic <when> grammar as the desktop composer.
+private fun parseWhen(raw: String): Long? {
+    val text = raw.trim().lowercase()
+    val now = java.util.Calendar.getInstance()
+    Regex("^in\\s+(\\d+)\\s*(m|min|minutes?|h|hours?|d|days?)$").find(text)?.let { m ->
+        val n = m.groupValues[1].toLong()
+        val unit = m.groupValues[2].first()
+        val ms = when (unit) { 'm' -> 60_000L; 'h' -> 3_600_000L; else -> 86_400_000L }
+        return now.timeInMillis + n * ms
+    }
+    Regex("^(\\d{4})-(\\d{2})-(\\d{2})\\s+(\\d{1,2}):(\\d{2})$").find(text)?.let { m ->
+        val c = java.util.Calendar.getInstance()
+        c.set(m.groupValues[1].toInt(), m.groupValues[2].toInt() - 1, m.groupValues[3].toInt(), m.groupValues[4].toInt(), m.groupValues[5].toInt(), 0)
+        c.set(java.util.Calendar.MILLISECOND, 0)
+        return c.timeInMillis
+    }
+    Regex("^(tomorrow\\s+)?(\\d{1,2}):(\\d{2})$").find(text)?.let { m ->
+        val c = java.util.Calendar.getInstance()
+        c.set(java.util.Calendar.HOUR_OF_DAY, m.groupValues[2].toInt())
+        c.set(java.util.Calendar.MINUTE, m.groupValues[3].toInt())
+        c.set(java.util.Calendar.SECOND, 0)
+        c.set(java.util.Calendar.MILLISECOND, 0)
+        if (m.groupValues[1].isNotEmpty() || c.timeInMillis <= now.timeInMillis) c.add(java.util.Calendar.DAY_OF_YEAR, 1)
+        return c.timeInMillis
+    }
+    return null
+}
+
+private fun timeChip(atMs: Double): String {
+    val at = java.util.Calendar.getInstance().apply { timeInMillis = atMs.toLong() }
+    val now = java.util.Calendar.getInstance()
+    val time = String.format(java.util.Locale.US, "%02d:%02d", at.get(java.util.Calendar.HOUR_OF_DAY), at.get(java.util.Calendar.MINUTE))
+    val sameDay = at.get(java.util.Calendar.DAY_OF_YEAR) == now.get(java.util.Calendar.DAY_OF_YEAR) &&
+        at.get(java.util.Calendar.YEAR) == now.get(java.util.Calendar.YEAR)
+    if (sameDay) return "today $time"
+    now.add(java.util.Calendar.DAY_OF_YEAR, 1)
+    val tomorrow = at.get(java.util.Calendar.DAY_OF_YEAR) == now.get(java.util.Calendar.DAY_OF_YEAR) &&
+        at.get(java.util.Calendar.YEAR) == now.get(java.util.Calendar.YEAR)
+    if (tomorrow) return "tmrw $time"
+    return "${at.get(java.util.Calendar.DAY_OF_MONTH)}/${at.get(java.util.Calendar.MONTH) + 1} $time"
+}
+
+// The PA tab: everything the desk maintains — Up next (reminders + custom
+// calendar), Todos (tick/untick), and the shared owner Notes. Live state,
+// zero tokens; interactions are hub commands.
+@Composable
+private fun PaTab(snapshot: Snapshot, connected: Boolean) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val hub = dev.neureal.agenthq.net.HubHolder.get(context.applicationContext)
+    val pa = snapshot.pa
+    var todoText by remember { mutableStateOf("") }
+    var noteText by remember { mutableStateOf("") }
+    var whenText by remember { mutableStateOf("") }
+    var upcomingText by remember { mutableStateOf("") }
+    var whenError by remember { mutableStateOf(false) }
+
+    val upcoming = (
+        pa.reminders.filter { it.firedAt == null }.map { Triple(it.id, "reminder", it.text) to it.atMs } +
+            pa.events.map { Triple(it.id, "event", it.title) to it.startMs }
+        ).sortedBy { it.second }
+    val openTodos = pa.todos.filter { !it.done }.sortedByDescending { it.createdAt }
+    val doneTodos = pa.todos.filter { it.done }.takeLast(6).reversed()
+    val noteLines = pa.notes.split('\n').filter { it.isNotBlank() && !it.startsWith("#") }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().background(HQ.bg).padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        item { Spacer(Modifier.height(4.dp)); Header(connected) }
+
+        item {
+            Card {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        SectionLabel("PA desk")
+                        Text(
+                            "todos · reminders · calendar · shared notes",
+                            color = HQ.muted, fontSize = 10.5.sp,
+                        )
+                    }
+                    Switch(
+                        checked = pa.enabled,
+                        onCheckedChange = { hub.sendCommand(dev.neureal.agenthq.model.Commands.paSet(it)) },
+                        colors = SwitchDefaults.colors(checkedTrackColor = HQ.accentSolid),
+                    )
+                }
+                if (!pa.enabled) {
+                    Text("switched off — nothing fires or notifies until re-enabled", color = HQ.amber, fontSize = 10.sp)
+                }
+            }
+        }
+
+        item {
+            Card {
+                SectionLabel("Up next — reminders & calendar")
+                if (upcoming.isEmpty()) Text("nothing scheduled", color = HQ.ghost, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                upcoming.forEach { (meta, atMs) ->
+                    val (id, kind, label) = meta
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().background(HQ.panel2, RoundedCornerShape(8.dp)).padding(horizontal = 9.dp, vertical = 7.dp)) {
+                        Text(timeChip(atMs), color = if (kind == "event") HQ.accent else HQ.amber, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                        Spacer(Modifier.width(8.dp))
+                        Text(label, color = HQ.text, fontSize = 12.sp, modifier = Modifier.weight(1f), maxLines = 2)
+                        Text(
+                            "✕", color = HQ.faint, fontSize = 12.sp,
+                            modifier = Modifier.clickable { hub.sendCommand(dev.neureal.agenthq.model.Commands.paRemove(kind, id)) }.padding(4.dp),
+                        )
+                    }
+                    Spacer(Modifier.height(5.dp))
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = whenText, onValueChange = { whenText = it; whenError = false },
+                        modifier = Modifier.width(120.dp),
+                        placeholder = { Text("in 20m", color = HQ.faint, fontSize = 11.sp) },
+                        textStyle = androidx.compose.ui.text.TextStyle(color = HQ.text, fontSize = 12.sp),
+                        singleLine = true,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    OutlinedTextField(
+                        value = upcomingText, onValueChange = { upcomingText = it },
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text("what…", color = HQ.faint, fontSize = 11.sp) },
+                        textStyle = androidx.compose.ui.text.TextStyle(color = HQ.text, fontSize = 12.sp),
+                        singleLine = true,
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            val atMs = parseWhen(whenText)
+                            if (atMs == null || upcomingText.isBlank()) { whenError = true } else {
+                                hub.sendCommand(dev.neureal.agenthq.model.Commands.paAdd("reminder", upcomingText.trim(), atMs.toDouble()))
+                                whenText = ""; upcomingText = ""
+                            }
+                        },
+                        modifier = Modifier.weight(1f).height(36.dp), shape = RoundedCornerShape(9.dp),
+                    ) { Text("Remind", color = HQ.accent, fontSize = 11.5.sp) }
+                    OutlinedButton(
+                        onClick = {
+                            val atMs = parseWhen(whenText)
+                            if (atMs == null || upcomingText.isBlank()) { whenError = true } else {
+                                hub.sendCommand(dev.neureal.agenthq.model.Commands.paAdd("event", upcomingText.trim(), atMs.toDouble()))
+                                whenText = ""; upcomingText = ""
+                            }
+                        },
+                        modifier = Modifier.weight(1f).height(36.dp), shape = RoundedCornerShape(9.dp),
+                    ) { Text("Event", color = HQ.accent, fontSize = 11.5.sp) }
+                }
+                if (whenError) {
+                    Text("time formats: in 20m/2h/3d · 17:30 · tomorrow 09:00 · 2026-09-14 18:00", color = HQ.amber, fontSize = 9.5.sp)
+                }
+            }
+        }
+
+        item {
+            Card {
+                SectionLabel("Todos")
+                if (openTodos.isEmpty() && doneTodos.isEmpty()) Text("nothing open", color = HQ.ghost, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                (openTodos + doneTodos).forEach { todo ->
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                        Text(
+                            if (todo.done) "☑" else "☐",
+                            color = if (todo.done) HQ.green else HQ.faint, fontSize = 15.sp,
+                            modifier = Modifier.clickable { hub.sendCommand(dev.neureal.agenthq.model.Commands.paToggle(todo.id)) }.padding(4.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            todo.text,
+                            color = if (todo.done) HQ.faint else HQ.text, fontSize = 12.sp,
+                            modifier = Modifier.weight(1f), maxLines = 2,
+                        )
+                        Text(
+                            "✕", color = HQ.faint, fontSize = 12.sp,
+                            modifier = Modifier.clickable { hub.sendCommand(dev.neureal.agenthq.model.Commands.paRemove("todo", todo.id)) }.padding(4.dp),
+                        )
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = todoText, onValueChange = { todoText = it },
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text("add a todo…", color = HQ.faint, fontSize = 11.sp) },
+                        textStyle = androidx.compose.ui.text.TextStyle(color = HQ.text, fontSize = 12.sp),
+                        singleLine = true,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    OutlinedButton(
+                        onClick = {
+                            if (todoText.isNotBlank()) {
+                                hub.sendCommand(dev.neureal.agenthq.model.Commands.paAdd("todo", todoText.trim()))
+                                todoText = ""
+                            }
+                        },
+                        modifier = Modifier.height(36.dp), shape = RoundedCornerShape(9.dp),
+                    ) { Text("Add", color = HQ.accent, fontSize = 11.5.sp) }
+                }
+            }
+        }
+
+        item {
+            Card {
+                SectionLabel("Notes — shared with every team")
+                if (noteLines.isEmpty()) Text("no notes yet — facts here reach every worker", color = HQ.ghost, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                noteLines.forEach { line ->
+                    Text("• " + line.removePrefix("- ").trim(), color = HQ.text2, fontSize = 11.5.sp, lineHeight = 16.sp)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = noteText, onValueChange = { noteText = it },
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text("add a note…", color = HQ.faint, fontSize = 11.sp) },
+                        textStyle = androidx.compose.ui.text.TextStyle(color = HQ.text, fontSize = 12.sp),
+                        singleLine = true,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    OutlinedButton(
+                        onClick = {
+                            if (noteText.isNotBlank()) {
+                                hub.sendCommand(dev.neureal.agenthq.model.Commands.paAdd("note", noteText.trim()))
+                                noteText = ""
+                            }
+                        },
+                        modifier = Modifier.height(36.dp), shape = RoundedCornerShape(9.dp),
+                    ) { Text("Add", color = HQ.accent, fontSize = 11.5.sp) }
                 }
             }
         }

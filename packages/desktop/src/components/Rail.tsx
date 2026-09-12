@@ -1,11 +1,12 @@
 import type { ClientCommand, HubState } from '@agent-hq/shared';
 import type { ConnectionStatus } from '../hub';
 
-export type View = 'office' | 'tasks' | 'resources' | 'history' | 'security' | 'settings';
+export type View = 'office' | 'tasks' | 'pa' | 'resources' | 'history' | 'security' | 'settings';
 
 const NAV_ITEMS: { label: string; view: View }[] = [
   { label: 'Office', view: 'office' },
   { label: 'Tasks', view: 'tasks' },
+  { label: 'PA', view: 'pa' },
   { label: 'Resources', view: 'resources' },
   { label: 'History', view: 'history' },
   { label: 'Security', view: 'security' },

@@ -316,6 +316,8 @@ export function startDemo(bus: HubBus, options: DemoOptions = {}): {
     paAdd() {
       /* the PA desk runs in engine mode */
     },
+    paToggle() {},
+    paRemove() {},
   };
 
   return {
