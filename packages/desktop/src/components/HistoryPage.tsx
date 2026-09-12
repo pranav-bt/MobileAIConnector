@@ -36,7 +36,7 @@ export function HistoryPage(props: { state: HubState }): JSX.Element {
                 {new Date(task.updatedAt).toLocaleString()}
               </div>
               {task.synopsis && (
-                <div style={{ fontSize: 12, color: 'var(--text-2)', lineHeight: 1.5, marginTop: 7 }}>{task.synopsis}</div>
+                <div style={{ fontSize: 12, color: 'var(--text-2)', lineHeight: 1.55, marginTop: 7, whiteSpace: 'pre-line' }}>{task.synopsis}</div>
               )}
             </div>
           );

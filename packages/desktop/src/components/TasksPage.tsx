@@ -40,7 +40,7 @@ function TaskRow(props: {
             <div style={{ fontSize: 12, color: 'var(--text-2)', lineHeight: 1.5, marginBottom: 8 }}>{task.detail}</div>
           )}
           {task.synopsis && (
-            <div style={{ fontSize: 12, color: 'var(--text-2)', lineHeight: 1.5, marginBottom: 8 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-2)', lineHeight: 1.55, marginBottom: 8, whiteSpace: 'pre-line' }}>
               <span className="sect" style={{ display: 'block' }}>Synopsis</span>
               {task.synopsis}
             </div>

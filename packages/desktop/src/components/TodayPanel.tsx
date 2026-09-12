@@ -19,7 +19,7 @@ function TaskCard(props: { state: HubState; task: Task; showProgress?: boolean }
         </div>
       )}
       {task.status === 'done' && task.synopsis && (
-        <div className="act" style={{ marginTop: 6, color: 'var(--text-2)' }}>{task.synopsis}</div>
+        <div className="act" style={{ marginTop: 6, color: 'var(--text-2)', whiteSpace: 'pre-line', lineHeight: 1.55 }}>{task.synopsis}</div>
       )}
     </div>
   );
