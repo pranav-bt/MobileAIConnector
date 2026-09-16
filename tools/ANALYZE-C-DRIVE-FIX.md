@@ -33,41 +33,46 @@ Re-implemented the analysis using a **synchronous approach** that completes all 
 - Program Files: 34.5 GB
 - Program Files (x86): 26.29 GB
 - ProgramData: 14.61 GB
-- Chrome Cache: 16.63 GB
+- VS Code Extensions: 35.62 GB
+- NVIDIA Shader Cache (DXCache + GLCache): 15.95 GB
+- Chrome Cache: 0.64 GB
+- Edge Cache: 1.16 GB
 - Roblox Cache: 10.64 GB
 - Temp Files: 7.69 GB
-- NVIDIA Driver Cache: 1.24 GB
-- Edge Cache: 1.16 GB
 - Package Cache: 0.03 GB
 
-**Clearable Caches:** 37.39 GB
+**Clearable Caches:** ~52.2 GB
+- VS Code Extensions: 35.62 GB (recoverable via safe restart method)
+- NVIDIA Shader Cache: 15.95 GB (DXCache + GLCache, drivers reinstall on reboot)
+- Chrome Cache: 0.64 GB (recreates on next launch)
 - All cache locations produce size metrics without hanging
 - Results complete within ~90 seconds total
 
 ## Cleanup Recommendations
 
-### VS Code Extensions Cache (~35.6 GB recoverable)
+### VS Code Extensions Cache (~35.62 GB recoverable)
 **Safe method (RECOMMENDED):**
 1. Close VS Code completely
 2. Relaunch VS Code
 
-VS Code automatically prunes obsolete extension cache folders during startup (~35.6 GB can be recovered this way). This is safe because:
+VS Code automatically prunes obsolete extension versions during startup (~35.62 GB can be recovered this way). This is safe because:
 - Active extensions are retained and auto-restored on restart
 - Obsolete cached versions are removed without affecting functionality
 - Zero risk of breaking your dev toolchain
 
 **Why NOT to delete the folder manually:**
-The extensions folder at `C:\Users\prana\AppData\Local\Code` mixes active and obsolete versions side by side:
+The extensions folder at `C:\Users\prana\.vscode\extensions` mixes active and obsolete versions side by side:
 - 27 active extensions total (~1.84 GB) that are currently in use
 - Deleting the entire folder would remove these active extensions without auto-reinstalling them
 - You'd need to manually rebuild your development toolchain, which is time-consuming and error-prone
 
-### NVIDIA Driver Cache (~15.95 GB recoverable)
+### NVIDIA Shader Cache (~15.95 GB recoverable)
 Safe to delete:
 ```powershell
-Remove-Item -Path 'C:\ProgramData\NVIDIA' -Recurse -Force
+Remove-Item -Path 'C:\Users\prana\AppData\Local\NVIDIA\DXCache' -Recurse -Force
+Remove-Item -Path 'C:\Users\prana\AppData\Local\NVIDIA\GLCache' -Recurse -Force
 ```
-Drivers reinstall automatically on next reboot. No active tools depend on cached driver files.
+These are shader caches (DirectX and OpenGL). Drivers reinstall automatically on next reboot. No active tools depend on cached shader files.
 
 ### Chrome Cache (~0.64 GB recoverable)
 Safe to delete:
@@ -77,9 +82,10 @@ Remove-Item -Path 'C:\Users\prana\AppData\Local\Google\Chrome\User Data\Default\
 Chrome recreates cache on next launch. No user data is lost.
 
 ### Summary
-- **Immediate win:** Quit and relaunch VS Code → ~35.6 GB recovered, zero risk
-- **Secondary:** Delete NVIDIA cache → ~15.95 GB more, drivers auto-reinstall
-- **Total recoverable:** ~54 GB with no risk to active tools or configurations
+- **Immediate win:** Quit and relaunch VS Code → ~35.62 GB recovered, zero risk
+- **Secondary:** Delete NVIDIA shader cache → ~15.95 GB more, drivers auto-reinstall
+- **Bonus:** Clear Chrome cache → ~0.64 GB, recreates on next launch
+- **Total recoverable:** ~52.2 GB with no risk to active tools or configurations
 
 ## Ready for Re-QA
 The fixed implementation:
