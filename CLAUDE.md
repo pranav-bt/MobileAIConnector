@@ -35,6 +35,8 @@ npm run hub            # the hub — REAL Claude agents (default; empty until ta
 npm run hub:demo       # scripted showcase scenario (no real agents, no usage) — opt-in only
 npm run hub:mock       # orchestrator with deterministic mock engine (offline dev)
 npm run desktop        # office UI on http://localhost:5173
+"Agent HQ.exe" (Desktop)  # one click: starts hub + UI if down, then opens the app window
+                       # source tools/launcher/AgentHqLauncher.cs, rebuild: toolslauncheruild.ps1
 npm run smoke          # e2e smokes: demo hub + orchestrator (mock engine, no usage)
 npx tsx test/engine.live.ts   # (from packages/hub) LIVE Claude-engine validation — spends usage
 npm run build          # build all packages (shared first)
