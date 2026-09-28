@@ -31,7 +31,7 @@ export function App(): JSX.Element {
         {view === 'resources' && <ResourcesPage state={state} />}
         {view === 'history' && <HistoryPage state={state} />}
         {view === 'security' && <SecurityPage state={state} send={send} />}
-        {view === 'settings' && <SettingsPage state={state} />}
+        {view === 'settings' && <SettingsPage state={state} send={send} />}
       </main>
       <TodayPanel state={state} send={send} />
     </div>

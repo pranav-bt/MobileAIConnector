@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  ModelOverridesSchema,
   HubEventSchema,
   ModelTierSchema,
   PermissionDecisionSchema,
@@ -73,6 +74,8 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('project.remove'), projectId: z.string() }),
   z.object({ type: z.literal('permissions.set'), mode: z.enum(['auto', 'strict']) }),
+  // Owner's model choices (full replace; { teams: {} } = back to defaults).
+  z.object({ type: z.literal('models.set'), overrides: ModelOverridesSchema }),
   // Move a file across the link. From the desktop (default) it broadcasts
   // out to the phone; from: 'phone' routes it INTO the hub's inbox on disk,
   // where workers can pick it up.

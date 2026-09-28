@@ -74,13 +74,14 @@ export async function routeTask(
   defaultProjectId: string,
   text: string,
   forcedProjectId: string | null,
+  model: ModelTier = MASTER_MODEL,
 ): Promise<RoutingDecision> {
   const fallbackTeam = keywordFallback(teams, text);
   const fallbackTitle = text.slice(0, 60);
   try {
     const { text: reply, tokens } = await engine.complete({
       prompt: routingPrompt(teams, projects, forcedProjectId ?? defaultProjectId, text),
-      model: MASTER_MODEL,
+      model,
     });
     const jsonMatch = reply.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('no JSON in routing reply');
@@ -150,6 +151,7 @@ export async function coordinateFollowUp(
   sourceTeam: Team,
   taskTitle: string,
   synopsis: string,
+  model: ModelTier = 'haiku',
 ): Promise<{ dispatch: FollowUpDispatch[]; tokens: number }> {
   const teamLines = teams
     .filter((team) => team.id !== sourceTeam.id)
@@ -176,7 +178,7 @@ export async function coordinateFollowUp(
     'Use {"dispatch": []} when nothing is needed.',
   ].join('\n');
   try {
-    const { text, tokens } = await engine.complete({ prompt, model: 'haiku' });
+    const { text, tokens } = await engine.complete({ prompt, model });
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return { dispatch: [], tokens };
     const parsed = JSON.parse(jsonMatch[0]) as { dispatch?: unknown };
@@ -205,6 +207,7 @@ export async function coordinateFollowUp(
 export async function evaluateQaReport(
   engine: OrchestratorEngine,
   qaSynopsis: string,
+  model: ModelTier = 'haiku',
 ): Promise<{ verdict: 'pass' | 'issues'; summary: string; tokens: number }> {
   const prompt = [
     'You are the master agent. A QA report on completed work just came in.',
@@ -215,7 +218,7 @@ export async function evaluateQaReport(
     'Reply with ONLY JSON: {"verdict": "pass" | "issues", "summary": "<the concrete issues to fix, or empty>"}',
   ].join('\n');
   try {
-    const { text, tokens } = await engine.complete({ prompt, model: 'haiku' });
+    const { text, tokens } = await engine.complete({ prompt, model });
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]) as { verdict?: unknown; summary?: unknown };

@@ -39,7 +39,7 @@ export function emptySecurity(): SecurityState {
 }
 
 export function emptyInfo(): HubInfo {
-  return { mode: 'demo', workspaceDir: '', dataDir: '', version: '', workspaceRoots: [], permissionMode: 'auto' };
+  return { mode: 'demo', workspaceDir: '', dataDir: '', version: '', workspaceRoots: [], permissionMode: 'auto', modelOverrides: { teams: {} } };
 }
 
 export function emptyUsage(): Usage {

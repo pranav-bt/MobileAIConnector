@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { ModelOverridesSchema, type ModelOverrides } from '@agent-hq/shared';
 
 // Hub-level configuration (data/config.json). Workspace roots are the ONLY
 // places projects and files may live; project registration outside them is
@@ -17,6 +18,7 @@ export interface HubConfig {
   workspaceRoots: WorkspaceRoot[];
   permissionMode: PermissionMode;
   paEnabled: boolean; // the PA desk master switch (/pa on|off)
+  modelOverrides: ModelOverrides; // owner model choices over the defaults
 }
 
 const DEFAULT_CONFIG: HubConfig = {
@@ -27,6 +29,7 @@ const DEFAULT_CONFIG: HubConfig = {
   ],
   permissionMode: 'auto',
   paEnabled: true,
+  modelOverrides: { teams: {} },
 };
 
 export function loadHubConfig(dataDir: string): HubConfig {
@@ -42,6 +45,10 @@ export function loadHubConfig(dataDir: string): HubConfig {
             : DEFAULT_CONFIG.workspaceRoots,
         permissionMode: parsed.permissionMode === 'strict' ? 'strict' : 'auto',
         paEnabled: parsed.paEnabled !== false,
+        modelOverrides: (() => {
+          const result = ModelOverridesSchema.safeParse(parsed.modelOverrides ?? {});
+          return result.success ? result.data : { teams: {} };
+        })(),
       };
     } catch {
       /* unreadable — fall through to defaults */
@@ -61,4 +68,10 @@ export function savePaEnabled(dataDir: string, enabled: boolean): void {
   const configPath = join(dataDir, 'config.json');
   const config = loadHubConfig(dataDir);
   writeFileSync(configPath, JSON.stringify({ ...config, paEnabled: enabled }, null, 2));
+}
+
+export function saveModelOverrides(dataDir: string, overrides: ModelOverrides): void {
+  const configPath = join(dataDir, 'config.json');
+  const config = loadHubConfig(dataDir);
+  writeFileSync(configPath, JSON.stringify({ ...config, modelOverrides: overrides }, null, 2));
 }

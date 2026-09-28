@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Agent, ModelTier, PermissionRequest, Task, Team, Usage } from '@agent-hq/shared';
+import { MODEL_DEFAULTS, type Agent, type ModelOverrides, type ModelTier, type PermissionRequest, type Task, type Team, type Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine } from '../engine/types.js';
@@ -86,6 +86,9 @@ export class Orchestrator implements CommandHandlers {
   #runningCwds = new Map<string, string>();
   #routingCount = 0;
   #tokensByModel: Record<ModelTier, number> = { opus: 0, sonnet: 0, haiku: 0 };
+  // Owner's model choices (a layer over defaults; see ModelOverridesSchema).
+  #models: ModelOverrides = { teams: {} };
+  #onModelsChange: (overrides: ModelOverrides) => void = () => {};
 
   #projects: ProjectRegistry;
   #policy: { mode: PermissionMode };
@@ -143,7 +146,7 @@ export class Orchestrator implements CommandHandlers {
         teamId: team.id,
         status: 'idle',
         activity: 'standing by',
-        model: team.leadModel,
+        model: this.#withModels(team).leadModel,
         taskId: null,
         tokensUsed: 0,
         updatedAt: now(),
@@ -156,7 +159,7 @@ export class Orchestrator implements CommandHandlers {
       teamId: null,
       status: 'idle',
       activity: 'standing by',
-      model: 'opus',
+      model: this.#masterModel(),
       taskId: null,
       tokensUsed: 0,
       updatedAt: now(),
@@ -306,6 +309,7 @@ export class Orchestrator implements CommandHandlers {
     this.#routingCount += 1;
     this.#patchAgent('master', { status: 'working', activity: `routing: ${text.slice(0, 50)}` });
 
+    const masterModel = this.#masterModel();
     const decision = await routeTask(
       this.#engine,
       this.#registry.all(),
@@ -313,8 +317,9 @@ export class Orchestrator implements CommandHandlers {
       this.#projects.defaultProject().id,
       text,
       forcedProjectId,
+      masterModel,
     );
-    this.#recordTokens('opus', decision.tokens);
+    this.#recordTokens(masterModel, decision.tokens);
     this.#routingCount -= 1;
 
     const team = this.#registry.get(decision.teamId);
@@ -468,6 +473,7 @@ export class Orchestrator implements CommandHandlers {
   // Returns the final synopsis on success, or null if the task failed or was
   // stopped (chains use this to decide whether to continue).
   async #runTask(taskId: string, team: Team, autoQa = true): Promise<string | null> {
+    team = this.#withModels(team);
     const task = this.#bus.state.tasks[taskId];
     if (!task) return null;
     let outcome: string | null = null;
@@ -676,14 +682,16 @@ export class Orchestrator implements CommandHandlers {
     const task = this.#bus.state.tasks[taskId];
     if (!task) return;
 
+    const checksModel = this.#checksModel();
     const { dispatch, tokens } = await coordinateFollowUp(
       this.#engine,
       this.#registry.all(),
       team,
       task.title,
       synopsis,
+      checksModel,
     );
-    this.#recordTokens('haiku', tokens);
+    this.#recordTokens(checksModel, tokens);
 
     for (const item of dispatch) {
       const target = this.#registry.get(item.teamId);
@@ -733,8 +741,9 @@ export class Orchestrator implements CommandHandlers {
     const qa = this.#qaTeam();
     if (!sourceTeam || !qa) return;
 
-    const evaluation = await evaluateQaReport(this.#engine, qaSynopsis);
-    this.#recordTokens('haiku', evaluation.tokens);
+    const checksModel = this.#checksModel();
+    const evaluation = await evaluateQaReport(this.#engine, qaSynopsis, checksModel);
+    this.#recordTokens(checksModel, evaluation.tokens);
     if (evaluation.verdict === 'pass') {
       this.#activity('master', qaTaskId, `QA verdict: pass — ${source.title.slice(0, 45)}`);
       return;
@@ -952,7 +961,7 @@ export class Orchestrator implements CommandHandlers {
       teamId: team.id,
       status: 'idle',
       activity: 'standing by',
-      model: team.leadModel,
+      model: this.#withModels(team).leadModel,
       taskId: null,
       tokensUsed: 0,
       updatedAt: now(),
@@ -1154,8 +1163,9 @@ export class Orchestrator implements CommandHandlers {
     // the standard prompts, QA gate, and coordination all apply unchanged.
     this.#patchTask(taskId, { status: 'review', progressPct: 90 });
     const task = this.#bus.state.tasks[taskId];
-    const review = await reviewWorkerReport(this.#engine, FREELANCE_DESK, task?.title ?? text, result.reply);
-    this.#recordTokens(FREELANCE_DESK.leadModel, review.tokens);
+    const desk = this.#withModels(FREELANCE_DESK);
+    const review = await reviewWorkerReport(this.#engine, desk, task?.title ?? text, result.reply);
+    this.#recordTokens(desk.leadModel, review.tokens);
     this.#patchTask(taskId, { status: 'done', progressPct: 100, synopsis: review.synopsis || result.reply.slice(0, 400) });
     this.#activity(agentId, taskId, `freelancer ${result.name} replied — full reply sent to your phone`);
 
@@ -1166,6 +1176,51 @@ export class Orchestrator implements CommandHandlers {
     }
     void this.#coordinate(taskId, FREELANCE_DESK, review.synopsis || '');
     this.#masterStatus();
+  }
+
+  // --- model choices -------------------------------------------------------
+
+  configureModels(initial: ModelOverrides, onChange: (overrides: ModelOverrides) => void): void {
+    this.#models = initial;
+    this.#onModelsChange = onChange;
+  }
+
+  #masterModel(): ModelTier {
+    return this.#models.master ?? MODEL_DEFAULTS.master;
+  }
+
+  #checksModel(): ModelTier {
+    return this.#models.checks ?? MODEL_DEFAULTS.checks;
+  }
+
+  // Team records are never mutated by model choices, so clearing the
+  // overrides restores exactly each team's defaults.
+  #withModels(team: Team): Team {
+    const perTeam = this.#models.teams[team.id] ?? {};
+    return {
+      ...team,
+      leadModel: perTeam.lead ?? this.#models.lead ?? team.leadModel,
+      workerModel: perTeam.worker ?? this.#models.worker ?? team.workerModel,
+    };
+  }
+
+  setModels(overrides: ModelOverrides): void {
+    this.#models = overrides;
+    this.#onModelsChange(overrides);
+    for (const team of this.#registry.all()) {
+      this.#patchAgent(`${team.id}-lead`, { model: this.#withModels(team).leadModel });
+    }
+    this.#patchAgent('master', { model: this.#masterModel() });
+    const custom =
+      [overrides.master, overrides.checks, overrides.lead, overrides.worker].filter(Boolean).length +
+      Object.values(overrides.teams).reduce((sum, choice) => sum + (choice.lead ? 1 : 0) + (choice.worker ? 1 : 0), 0);
+    this.#activity(
+      'master',
+      null,
+      custom === 0
+        ? 'models reset to defaults'
+        : `model settings updated — ${custom} custom choice${custom > 1 ? 's' : ''}; applies to work that starts from now`,
+    );
   }
 
   setPermissionMode(mode: PermissionMode): void {

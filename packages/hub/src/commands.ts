@@ -1,4 +1,4 @@
-import type { ClientCommand } from '@agent-hq/shared';
+import type { ClientCommand, ModelOverrides } from '@agent-hq/shared';
 
 // The server parses wire frames into ClientCommands and hands them here.
 // The demo driver and the orchestrator each provide an implementation.
@@ -39,6 +39,7 @@ export interface CommandHandlers {
   paListAdd(list: string, text: string): void;
   paListRemove(list: string, index: number): void;
   tasksControl(action: 'pause' | 'resume' | 'killall'): void;
+  setModels(overrides: ModelOverrides): void;
 }
 
 export function dispatchCommand(handlers: CommandHandlers, command: ClientCommand): void {
@@ -83,6 +84,8 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
       return handlers.paListRemove(command.list, command.index);
     case 'tasks.control':
       return handlers.tasksControl(command.action);
+    case 'models.set':
+      return handlers.setModels(command.overrides);
     case 'pairing.start':
     case 'pairing.cancel':
     case 'device.revoke':

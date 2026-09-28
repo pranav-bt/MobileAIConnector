@@ -17,7 +17,7 @@ import { ProjectRegistry } from './orchestrator/projects.js';
 import { PairingManager } from './security/pairing.js';
 import { SecurityController } from './security/controller.js';
 import { startLimitsPoller } from './usage/limits.js';
-import { loadHubConfig, savePaEnabled, savePermissionMode, type PermissionMode, type WorkspaceRoot } from './config.js';
+import { loadHubConfig, saveModelOverrides, savePaEnabled, savePermissionMode, type PermissionMode, type WorkspaceRoot } from './config.js';
 import type { CommandHandlers } from './commands.js';
 
 export interface HubOptions {
@@ -68,6 +68,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   const config = loadHubConfig(dataDir);
   const workspaceRoots = options.workspaceRoots ?? config.workspaceRoots;
   const permissionPolicy: { mode: PermissionMode } = { mode: config.permissionMode };
+  let modelOverrides = config.modelOverrides;
 
   const bus = new HubBus();
   const stopLog = startEventLog(bus, dataDir);
@@ -114,6 +115,11 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
       outbox.outboxDir,
       inboxDir,
     );
+    orchestrator.configureModels(modelOverrides, (overrides) => {
+      modelOverrides = overrides;
+      saveModelOverrides(dataDir, overrides);
+      bus.publish({ type: 'hub.updated', info: makeInfo() });
+    });
     orchestrator.init();
     workerCwds = () => orchestrator.activeWorkerCwds();
     attachFreelancers = (manager) => orchestrator.attachFreelancers(manager);
@@ -149,6 +155,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     version: getHubVersion(),
     workspaceRoots,
     permissionMode: permissionPolicy.mode,
+    modelOverrides,
   });
   bus.publish({ type: 'hub.updated', info: makeInfo() });
 

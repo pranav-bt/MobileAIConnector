@@ -81,6 +81,12 @@ npm run typecheck      # tsc across workspaces
   <name>: <charter> · /team workers <team> <n> · /team remove <team> ·
   /project add <name> <path> [description] · /project remove <project>.
   Prefixing a task with @<project> pins it to that project.
+- Model choices (Settings > Models, `models.set`) are an override LAYER in
+  `data/config.json` (`modelOverrides`) over the built-in defaults (master
+  opus, quick checks haiku) and each team record's `leadModel`/`workerModel`.
+  Never write overrides into team records — keeping them untouched is what
+  makes "Reset all to defaults" exact. Precedence: per-team > all-leads /
+  all-workers > team record; resolve via the orchestrator's `#withModels`.
 - Image generation (`tools/generate-image.mjs`) is LOCAL FIRST: on-demand
   ComfyUI at D:\AI\comfyui (boots per job, watchdog kills it after ~2 min
   idle — zero background footprint; models: FLUX schnell fp8 default, SDXL

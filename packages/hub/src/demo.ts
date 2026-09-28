@@ -321,6 +321,7 @@ export function startDemo(bus: HubBus, options: DemoOptions = {}): {
     paListAdd() {},
     paListRemove() {},
     tasksControl() {},
+    setModels() {},
   };
 
   return {

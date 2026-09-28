@@ -186,6 +186,23 @@ export const WorkspaceRootSchema = z.object({
 });
 export type WorkspaceRoot = z.infer<typeof WorkspaceRootSchema>;
 
+// The owner's model choices — an override LAYER over the built-in defaults
+// and each team record's leadModel/workerModel (which are never mutated, so
+// clearing the layer restores exactly the defaults). A missing field means
+// 'default'. Precedence for a team: per-team > all-leads/all-workers > team
+// record.
+export const ModelOverridesSchema = z.object({
+  master: ModelTierSchema.optional(), // routes every task
+  checks: ModelTierSchema.optional(), // master's quick checks: handovers + QA verdicts
+  lead: ModelTierSchema.optional(), // every team lead's review
+  worker: ModelTierSchema.optional(), // every team's workers
+  teams: z
+    .record(z.string(), z.object({ lead: ModelTierSchema.optional(), worker: ModelTierSchema.optional() }))
+    .default({}),
+});
+export type ModelOverrides = z.infer<typeof ModelOverridesSchema>;
+export const MODEL_DEFAULTS = { master: 'opus', checks: 'haiku' } as const;
+
 export const HubInfoSchema = z.object({
   mode: z.enum(['demo', 'claude', 'mock']),
   workspaceDir: z.string(),
@@ -196,6 +213,7 @@ export const HubInfoSchema = z.object({
   // auto: routine work runs, only installs/network/destructive/pushes ask.
   // strict: every gated tool asks.
   permissionMode: z.enum(['auto', 'strict']),
+  modelOverrides: ModelOverridesSchema.default({ teams: {} }),
 });
 export type HubInfo = z.infer<typeof HubInfoSchema>;
 

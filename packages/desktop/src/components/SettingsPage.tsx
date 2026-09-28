@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import type { HubState } from '@agent-hq/shared';
+import type { ClientCommand, HubState } from '@agent-hq/shared';
 import { DEFAULT_HUB_PORT } from '@agent-hq/shared';
 import { HUB_URL_STORAGE_KEY, currentHubUrl } from '../hub';
+import { ModelsCard } from './ModelsCard';
 
-export function SettingsPage(props: { state: HubState }): JSX.Element {
+export function SettingsPage(props: { state: HubState; send: (command: ClientCommand) => void }): JSX.Element {
   const { info } = props.state;
   const [hubUrl, setHubUrl] = useState(currentHubUrl());
 
@@ -25,6 +26,8 @@ export function SettingsPage(props: { state: HubState }): JSX.Element {
 
   return (
     <div style={{ flexGrow: 1, padding: '18px 20px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, alignContent: 'start', overflowY: 'auto' }}>
+      <ModelsCard state={props.state} send={props.send} />
+
       <div className="tcard" style={{ padding: 16 }}>
         <div className="sect">Hub</div>
         {row('Mode', info.mode === 'claude' ? 'claude — real agents' : info.mode === 'demo' ? 'demo — scripted, no usage' : 'mock — fake engine')}
