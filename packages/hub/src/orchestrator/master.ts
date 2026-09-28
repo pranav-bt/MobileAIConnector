@@ -1,4 +1,4 @@
-import type { ModelTier, Project, Team } from '@agent-hq/shared';
+import { resolveModel, type ModelSpec, type ModelTier, type Project, type Team } from '@agent-hq/shared';
 import type { OrchestratorEngine } from '../engine/types.js';
 
 // The master agent's intake: one model call that reads the task and picks a
@@ -74,7 +74,7 @@ export async function routeTask(
   defaultProjectId: string,
   text: string,
   forcedProjectId: string | null,
-  model: ModelTier = MASTER_MODEL,
+  model: ModelSpec = resolveModel(MASTER_MODEL),
 ): Promise<RoutingDecision> {
   const fallbackTeam = keywordFallback(teams, text);
   const fallbackTitle = text.slice(0, 60);
@@ -151,7 +151,7 @@ export async function coordinateFollowUp(
   sourceTeam: Team,
   taskTitle: string,
   synopsis: string,
-  model: ModelTier = 'haiku',
+  model: ModelSpec = resolveModel('haiku'),
 ): Promise<{ dispatch: FollowUpDispatch[]; tokens: number }> {
   const teamLines = teams
     .filter((team) => team.id !== sourceTeam.id)
@@ -207,7 +207,7 @@ export async function coordinateFollowUp(
 export async function evaluateQaReport(
   engine: OrchestratorEngine,
   qaSynopsis: string,
-  model: ModelTier = 'haiku',
+  model: ModelSpec = resolveModel('haiku'),
 ): Promise<{ verdict: 'pass' | 'issues'; summary: string; tokens: number }> {
   const prompt = [
     'You are the master agent. A QA report on completed work just came in.',
@@ -239,6 +239,7 @@ export async function reviewWorkerReport(
   team: Team,
   taskTitle: string,
   workerSynopsis: string,
+  model: ModelSpec = resolveModel(team.leadModel),
 ): Promise<{ synopsis: string; memoryNote: string | null; tokens: number }> {
   const prompt = [
     `You are the lead of the ${team.name} (charter: ${team.charter}).`,
@@ -261,7 +262,7 @@ export async function reviewWorkerReport(
     '{"synopsis": "<see above>", "memoryNote": "<one short lesson, or null>"}',
   ].join('\n');
   try {
-    const { text, tokens } = await engine.complete({ prompt, model: team.leadModel });
+    const { text, tokens } = await engine.complete({ prompt, model });
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]) as { synopsis?: unknown; memoryNote?: unknown };

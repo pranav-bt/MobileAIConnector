@@ -1,4 +1,4 @@
-import type { ModelTier, Team } from '@agent-hq/shared';
+import type { ModelSpec, Team } from '@agent-hq/shared';
 
 // The engine boundary. Anything that can run an agent (Claude Agent SDK
 // today, a Codex adapter later) implements this and emits nothing but the
@@ -21,12 +21,12 @@ export interface WorkerRunResult {
 
 export interface OrchestratorEngine {
   // One model call, no tools — what master routing and lead reviews use.
-  complete(args: { prompt: string; model: ModelTier }): Promise<{ text: string; tokens: number }>;
+  complete(args: { prompt: string; model: ModelSpec }): Promise<{ text: string; tokens: number }>;
 
   runWorker(args: {
     prompt: string;
     team: Team;
-    model: ModelTier;
+    model: ModelSpec;
     cwd: string;
     // Extra directory roots the worker's tools may roam (all subdirectories).
     extraDirs?: string[];

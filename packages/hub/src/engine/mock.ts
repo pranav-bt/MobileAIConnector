@@ -1,10 +1,10 @@
-import type { ModelTier, Team } from '@agent-hq/shared';
+import type { ModelSpec, Team } from '@agent-hq/shared';
 import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './types.js';
 
 // Deterministic engine for tests and offline development: routes by team-id
 // keyword, "installs" trigger a permission request, everything resolves fast.
 export class MockEngine implements OrchestratorEngine {
-  async complete(args: { prompt: string; model: ModelTier }): Promise<{ text: string; tokens: number }> {
+  async complete(args: { prompt: string; model: ModelSpec }): Promise<{ text: string; tokens: number }> {
     // Coordination prompts expect {"dispatch": [...]} — checked before the
     // routing branch because their format line also mentions "teamId".
     if (args.prompt.includes('"dispatch"')) {
@@ -93,7 +93,7 @@ export class MockEngine implements OrchestratorEngine {
   async runWorker(args: {
     prompt: string;
     team: Team;
-    model: ModelTier;
+    model: ModelSpec;
     cwd: string;
     extraDirs?: string[];
     callbacks: WorkerRunCallbacks;
@@ -103,6 +103,7 @@ export class MockEngine implements OrchestratorEngine {
     // Keyword triggers must fire on the task itself, not on the appended
     // background-context section (project history can mention "install").
     const taskText = (args.prompt.split('\n---\n')[0] ?? args.prompt).toLowerCase();
+    callbacks.onActivity(`mock: model ${args.model.id} · effort ${args.model.effort ?? 'default'}`);
     callbacks.onActivity('mock: examining the task');
     // "edit-test" exercises the Edit permission path (auto-allowed by policy).
     if (taskText.includes('edit-test')) {

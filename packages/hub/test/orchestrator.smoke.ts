@@ -709,42 +709,52 @@ try {
   }
   console.log('task controls ok: pause held, resume drained, killall stopped everything');
 
-  // 23. Model choices: an override layer over the team defaults. All-workers
-  // applies everywhere, per-team beats it, chips follow, it persists, and
-  // reset restores the untouched team defaults.
+  // 23. Model + effort choices: an override layer over the team defaults.
+  // Fields resolve independently (per-team > all-role > default), the engine
+  // receives the exact model id and effort, an effort the model can't take
+  // (Haiku) is dropped, chips follow, it persists, and reset restores all.
   const since = (mark: number, test: (e: HubEvent) => boolean) => (e: HubEvent) => events.indexOf(e) >= mark && test(e);
+  const ranOn = (mark: number, label: string, expected: string) =>
+    waitFor(label, since(mark, (e) => e.type === 'activity' && e.entry.message === `mock: model ${expected}`), 15000);
   ws.send(
     encodeCommand({
       type: 'models.set',
-      overrides: { master: 'sonnet', worker: 'haiku', teams: { design: { lead: 'sonnet', worker: 'opus' } } },
+      overrides: {
+        master: { model: 'claude-sonnet-5' },
+        worker: { model: 'claude-haiku-4-5-20251001', effort: 'low' },
+        teams: {
+          design: { lead: { model: 'claude-sonnet-5' }, worker: { model: 'claude-opus-5-5', effort: 'max' } },
+          tools: { worker: { model: 'claude-sonnet-5-5' } },
+        },
+      },
     }),
   );
   await waitFor(
     'overrides published in hub info',
-    (e) => e.type === 'hub.updated' && e.info.modelOverrides.worker === 'haiku' && e.info.modelOverrides.teams['design']?.worker === 'opus',
+    (e) =>
+      e.type === 'hub.updated' &&
+      e.info.modelOverrides.worker?.model === 'claude-haiku-4-5-20251001' &&
+      e.info.modelOverrides.teams['design']?.worker?.effort === 'max',
   );
-  await waitFor('master chip follows', (e) => e.type === 'agent.updated' && e.agent.id === 'master' && e.agent.model === 'sonnet');
+  await waitFor('master chip follows (family)', (e) => e.type === 'agent.updated' && e.agent.id === 'master' && e.agent.model === 'sonnet');
   await waitFor('design lead chip follows its per-team pick', (e) => e.type === 'agent.updated' && e.agent.id === 'design-lead' && e.agent.model === 'sonnet');
   const savedConfig = JSON.parse(readFileSync(join(dataDir, 'config.json'), 'utf8'));
-  if (savedConfig.modelOverrides?.worker !== 'haiku') fail('model overrides were not persisted to config.json');
+  if (savedConfig.modelOverrides?.worker?.model !== 'claude-haiku-4-5-20251001') fail('model overrides were not persisted to config.json');
 
   let mark = events.length;
   ws.send(encodeCommand({ type: 'task.submit', text: 'coding: models-probe-one' }));
-  await waitFor(
-    'coding worker runs on the all-workers pick',
-    since(mark, (e) => e.type === 'agent.updated' && e.agent.role === 'worker' && e.agent.teamId === 'coding' && e.agent.model === 'haiku'),
-    15000,
-  );
+  // all-workers Haiku; its 'low' effort is dropped (Haiku has no effort control)
+  await ranOn(mark, 'coding worker on the all-workers model, effort dropped for Haiku', 'claude-haiku-4-5-20251001 · effort default');
   mark = events.length;
   ws.send(encodeCommand({ type: 'task.submit', text: 'design models-probe-two' }));
+  await ranOn(mark, 'per-team model + effort beat all-workers', 'claude-opus-5-5 · effort max');
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: 'tools models-probe-tools' }));
+  // per-team model only: effort falls through to all-workers 'low' (Sonnet 5.5 supports it)
+  await ranOn(mark, 'per-team model composes with the all-workers effort', 'claude-sonnet-5-5 · effort low');
   await waitFor(
-    'per-team pick beats all-workers',
-    since(mark, (e) => e.type === 'agent.updated' && e.agent.role === 'worker' && e.agent.teamId === 'design' && e.agent.model === 'opus'),
-    15000,
-  );
-  await waitFor(
-    'design probe done',
-    (e) => e.type === 'task.updated' && e.task.detail.includes('models-probe-two') && e.task.status === 'done',
+    'tools probe done',
+    (e) => e.type === 'task.updated' && e.task.detail.includes('models-probe-tools') && e.task.status === 'done',
     15000,
   );
 
@@ -753,14 +763,10 @@ try {
   await waitFor('master chip back to its default', (e) => e.type === 'agent.updated' && e.agent.id === 'master' && e.agent.model === 'opus');
   mark = events.length;
   ws.send(encodeCommand({ type: 'task.submit', text: 'coding: models-probe-three' }));
-  await waitFor(
-    'after reset the coding worker is back on its team default',
-    since(mark, (e) => e.type === 'agent.updated' && e.agent.role === 'worker' && e.agent.teamId === 'coding' && e.agent.model === 'sonnet'),
-    15000,
-  );
+  await ranOn(mark, 'after reset the coding worker is back on its team default', 'claude-sonnet-5 · effort default');
   const resetConfig = JSON.parse(readFileSync(join(dataDir, 'config.json'), 'utf8'));
   if (resetConfig.modelOverrides?.worker !== undefined) fail('reset did not clear the persisted overrides');
-  console.log('model choices ok: all-role + per-team precedence, chips follow, persisted, reset restores defaults');
+  console.log('model choices ok: per-field precedence, exact id + effort reach the engine, Haiku effort dropped, persisted, reset restores defaults');
 
   console.log('ORCH SMOKE PASS');
   ws.close();

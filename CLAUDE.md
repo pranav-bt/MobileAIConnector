@@ -85,8 +85,14 @@ npm run typecheck      # tsc across workspaces
   `data/config.json` (`modelOverrides`) over the built-in defaults (master
   opus, quick checks haiku) and each team record's `leadModel`/`workerModel`.
   Never write overrides into team records — keeping them untouched is what
-  makes "Reset all to defaults" exact. Precedence: per-team > all-leads /
-  all-workers > team record; resolve via the orchestrator's `#withModels`.
+  makes "Reset all to defaults" exact. Each choice sets `model` (a catalog
+  id) and `effort` independently; precedence per field: per-team >
+  all-leads/all-workers > default, via `resolveModel` in shared. The engine
+  runs a `ModelSpec` (exact id + optional effort; no effort = the model's own
+  default). `MODEL_CATALOG` (shared/schema.ts) lists only ids verified live
+  — after an Agent SDK update re-run `test/probe-models.ts --live` and
+  `test/probe-effort-defaults.ts` (packages/hub) and refresh ids/defaults.
+  Opus 5.5 needs Agent SDK >= 0.3.280.
 - Image generation (`tools/generate-image.mjs`) is LOCAL FIRST: on-demand
   ComfyUI at D:\AI\comfyui (boots per job, watchdog kills it after ~2 min
   idle — zero background footprint; models: FLUX schnell fp8 default, SDXL

@@ -1,6 +1,7 @@
-// Drives the Settings > Models card against the LIVE hub: renders it, makes
-// one custom pick (All workers = Haiku), checks the count + hub state, then
-// hits "Reset all to defaults" and confirms it's back to all-default.
+// Drives the Settings > Models card against the LIVE hub: renders it, picks
+// Opus 5.5 at Max effort for the master and Haiku for all workers, checks the
+// hub stored exactly that (and that Haiku's effort control is disabled),
+// then hits "Reset all to defaults" and confirms it's back to all-default.
 // Ends in the same state it started (assumes you start at all-default).
 import { chromium } from 'playwright-core';
 
@@ -22,7 +23,7 @@ const hubOverrides = () =>
   });
 
 const browser = await chromium.launch({ channel: 'msedge', headless: true });
-const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
 page.on('console', (message) => {
   if (message.type() === 'error') errors.push(message.text());
 });
@@ -33,21 +34,32 @@ await page.waitForSelector('text=Master office', { timeout: 20000 });
 await page.click('button:has-text("Settings")');
 await page.waitForSelector('text=Reset all to defaults', { timeout: 8000 });
 await page.waitForSelector('text=all default', { timeout: 8000 });
-await page.screenshot({ path: `${SHOTS}/models-default.png` });
+await page.screenshot({ path: `${SHOTS}/models-default.png`, fullPage: true });
 
-// Selects in order: master, checks, all leads, all workers, then per team.
-await page.locator('select').nth(3).selectOption('haiku');
+// Select order: master model, master effort, checks model, checks effort,
+// all-leads model, all-leads effort, all-workers model, all-workers effort,
+// then per team: lead model, lead effort, worker model, worker effort.
+const selects = page.locator('select');
+await selects.nth(0).selectOption('claude-opus-5-5');
 await page.waitForSelector('text=1 custom', { timeout: 8000 });
-const afterPick = await hubOverrides();
-if (afterPick.worker !== 'haiku') throw new Error(`hub did not store the pick: ${JSON.stringify(afterPick)}`);
-await page.screenshot({ path: `${SHOTS}/models-custom.png` });
+await selects.nth(1).selectOption('max');
+await page.waitForSelector('text=2 custom', { timeout: 8000 });
+await selects.nth(6).selectOption('claude-haiku-4-5-20251001');
+await page.waitForSelector('text=3 custom', { timeout: 8000 });
+
+const stored = await hubOverrides();
+if (stored.master?.model !== 'claude-opus-5-5' || stored.master?.effort !== 'max' || stored.worker?.model !== 'claude-haiku-4-5-20251001') {
+  throw new Error(`hub did not store the picks: ${JSON.stringify(stored)}`);
+}
+if (!(await selects.nth(7).isDisabled())) throw new Error('all-workers effort should be disabled for Haiku');
+await page.screenshot({ path: `${SHOTS}/models-custom.png`, fullPage: true });
 
 await page.click('button:has-text("Reset all to defaults")');
 await page.waitForSelector('text=all default', { timeout: 8000 });
 const afterReset = await hubOverrides();
-if (afterReset.worker !== undefined) throw new Error(`reset did not clear: ${JSON.stringify(afterReset)}`);
+if (afterReset.master || afterReset.worker) throw new Error(`reset did not clear: ${JSON.stringify(afterReset)}`);
 
-console.log(`selects on the card: ${await page.locator('select').count()}`);
-console.log(errors.length ? `CONSOLE ERRORS:\n${errors.join('\n')}` : 'models card: rendered, pick stored in hub, reset cleared it, no console errors');
+console.log(`selects on the card: ${await selects.count()}`);
+console.log(errors.length ? `CONSOLE ERRORS:\n${errors.join('\n')}` : 'models card: model + effort picks stored in hub, Haiku effort disabled, reset cleared it, no console errors');
 await browser.close();
 process.exit(errors.length ? 1 : 0);

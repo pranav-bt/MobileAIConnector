@@ -1,5 +1,5 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { MODEL_IDS } from '@agent-hq/shared';
+import type { ModelSpec } from '@agent-hq/shared';
 import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './types.js';
 
 // Tools whose use flows through the policy (which instantly allows the
@@ -37,13 +37,14 @@ function describeAssistantMessage(message: Record<string, unknown>): string | nu
 }
 
 export class ClaudeEngine implements OrchestratorEngine {
-  async complete(args: { prompt: string; model: 'opus' | 'sonnet' | 'haiku' }): Promise<{ text: string; tokens: number }> {
+  async complete(args: { prompt: string; model: ModelSpec }): Promise<{ text: string; tokens: number }> {
     let text = '';
     let tokens = 0;
     const stream = query({
       prompt: args.prompt,
       options: {
-        model: MODEL_IDS[args.model],
+        model: args.model.id,
+        ...(args.model.effort ? { effort: args.model.effort } : {}),
         maxTurns: 1,
         allowedTools: [],
       },
@@ -66,7 +67,7 @@ export class ClaudeEngine implements OrchestratorEngine {
   async runWorker(args: {
     prompt: string;
     team: { blockedTools: string[]; charter: string; mcpServers?: Record<string, unknown> };
-    model: 'opus' | 'sonnet' | 'haiku';
+    model: ModelSpec;
     cwd: string;
     extraDirs?: string[];
     callbacks: WorkerRunCallbacks;
@@ -95,7 +96,8 @@ export class ClaudeEngine implements OrchestratorEngine {
       prompt: args.prompt,
       options: {
         abortController,
-        model: MODEL_IDS[args.model],
+        model: args.model.id,
+        ...(args.model.effort ? { effort: args.model.effort } : {}),
         cwd: args.cwd,
         additionalDirectories: args.extraDirs ?? [],
         ...(mcpServers ? { mcpServers } : {}),

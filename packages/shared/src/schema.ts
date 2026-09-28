@@ -186,22 +186,75 @@ export const WorkspaceRootSchema = z.object({
 });
 export type WorkspaceRoot = z.infer<typeof WorkspaceRootSchema>;
 
+export const EffortLevelSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
+export type EffortLevel = z.infer<typeof EffortLevelSchema>;
+
+// The models Settings > Models offers. Every id was verified to run through
+// the hub's Agent SDK (packages/hub/test/probe-models.ts --live), and
+// defaultEffort is the level Claude Code actually applied when the hub sent
+// none (packages/hub/test/probe-effort-defaults.ts, measured 2026-09-28 on
+// SDK 0.3.284) — re-run both after an SDK update. 'tier' is the family
+// bucket the usage meters and office chips use (Fable counts as top tier).
+export interface CatalogModel {
+  id: string;
+  label: string;
+  tier: ModelTier;
+  description: string;
+  efforts: EffortLevel[]; // empty = no effort control
+  defaultEffort: EffortLevel | null;
+}
+const ALL_EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+export const MODEL_CATALOG: CatalogModel[] = [
+  { id: 'claude-opus-5-5', label: 'Opus 5.5', tier: 'opus', description: 'Best for everyday, complex tasks', efforts: ALL_EFFORTS, defaultEffort: 'high' },
+  { id: 'claude-opus-5', label: 'Opus 5', tier: 'opus', description: 'Best for everyday, complex tasks', efforts: ALL_EFFORTS, defaultEffort: 'high' },
+  { id: 'claude-fable-5-1', label: 'Fable 5.1', tier: 'opus', description: 'Most capable, for the hardest and longest-running tasks; heaviest on usage limits', efforts: ALL_EFFORTS, defaultEffort: 'medium' },
+  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', tier: 'sonnet', description: 'Efficient for routine tasks', efforts: ALL_EFFORTS, defaultEffort: 'medium' },
+  { id: 'claude-sonnet-5', label: 'Sonnet 5', tier: 'sonnet', description: 'Efficient for routine tasks', efforts: ALL_EFFORTS, defaultEffort: 'xhigh' },
+  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', tier: 'haiku', description: 'Fastest for quick answers; no effort control', efforts: [], defaultEffort: null },
+];
+export const catalogModel = (id: string): CatalogModel | undefined => MODEL_CATALOG.find((model) => model.id === id);
+
+// One role's choice: model and effort are independent, so "all workers:
+// effort low" composes with "Coding workers: Opus 5.5". Missing = default.
+export const ModelChoiceSchema = z.object({
+  model: z.string().optional(),
+  effort: EffortLevelSchema.optional(),
+});
+export type ModelChoice = z.infer<typeof ModelChoiceSchema>;
+
 // The owner's model choices — an override LAYER over the built-in defaults
 // and each team record's leadModel/workerModel (which are never mutated, so
-// clearing the layer restores exactly the defaults). A missing field means
-// 'default'. Precedence for a team: per-team > all-leads/all-workers > team
-// record.
+// clearing the layer restores exactly the defaults). Precedence per field:
+// per-team > all-leads/all-workers > team record / built-in default.
 export const ModelOverridesSchema = z.object({
-  master: ModelTierSchema.optional(), // routes every task
-  checks: ModelTierSchema.optional(), // master's quick checks: handovers + QA verdicts
-  lead: ModelTierSchema.optional(), // every team lead's review
-  worker: ModelTierSchema.optional(), // every team's workers
+  master: ModelChoiceSchema.optional(), // routes every task
+  checks: ModelChoiceSchema.optional(), // master's quick checks: handovers + QA verdicts
+  lead: ModelChoiceSchema.optional(), // every team lead's review
+  worker: ModelChoiceSchema.optional(), // every team's workers
   teams: z
-    .record(z.string(), z.object({ lead: ModelTierSchema.optional(), worker: ModelTierSchema.optional() }))
+    .record(z.string(), z.object({ lead: ModelChoiceSchema.optional(), worker: ModelChoiceSchema.optional() }))
     .default({}),
 });
 export type ModelOverrides = z.infer<typeof ModelOverridesSchema>;
 export const MODEL_DEFAULTS = { master: 'opus', checks: 'haiku' } as const;
+
+// What the engine runs: a concrete id, an optional effort, and the family.
+export interface ModelSpec {
+  id: string;
+  tier: ModelTier;
+  effort?: EffortLevel;
+}
+
+// Resolve a role's model. Layers are most-specific first and each field
+// resolves on its own; an effort the final model can't take is dropped
+// (e.g. any effort on Haiku 4.5), so the model runs at its own default.
+export function resolveModel(fallbackTier: ModelTier, ...layers: (ModelChoice | undefined)[]): ModelSpec {
+  const id = layers.find((layer) => layer?.model)?.model ?? MODEL_IDS[fallbackTier];
+  const entry = catalogModel(id);
+  const requested = layers.find((layer) => layer?.effort)?.effort;
+  const effort = requested && entry?.efforts.includes(requested) ? requested : undefined;
+  return { id, tier: entry?.tier ?? fallbackTier, ...(effort ? { effort } : {}) };
+}
 
 export const HubInfoSchema = z.object({
   mode: z.enum(['demo', 'claude', 'mock']),

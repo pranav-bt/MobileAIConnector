@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { MODEL_DEFAULTS, type Agent, type ModelOverrides, type ModelTier, type PermissionRequest, type Task, type Team, type Usage } from '@agent-hq/shared';
+import { MODEL_DEFAULTS, resolveModel, type Agent, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Task, type Team, type Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine } from '../engine/types.js';
@@ -146,7 +146,7 @@ export class Orchestrator implements CommandHandlers {
         teamId: team.id,
         status: 'idle',
         activity: 'standing by',
-        model: this.#withModels(team).leadModel,
+        model: this.#leadSpec(team).tier,
         taskId: null,
         tokensUsed: 0,
         updatedAt: now(),
@@ -159,7 +159,7 @@ export class Orchestrator implements CommandHandlers {
       teamId: null,
       status: 'idle',
       activity: 'standing by',
-      model: this.#masterModel(),
+      model: this.#masterModel().tier,
       taskId: null,
       tokensUsed: 0,
       updatedAt: now(),
@@ -319,7 +319,7 @@ export class Orchestrator implements CommandHandlers {
       forcedProjectId,
       masterModel,
     );
-    this.#recordTokens(masterModel, decision.tokens);
+    this.#recordTokens(masterModel.tier, decision.tokens);
     this.#routingCount -= 1;
 
     const team = this.#registry.get(decision.teamId);
@@ -473,7 +473,8 @@ export class Orchestrator implements CommandHandlers {
   // Returns the final synopsis on success, or null if the task failed or was
   // stopped (chains use this to decide whether to continue).
   async #runTask(taskId: string, team: Team, autoQa = true): Promise<string | null> {
-    team = this.#withModels(team);
+    const workerSpec = this.#workerSpec(team);
+    const leadSpec = this.#leadSpec(team);
     const task = this.#bus.state.tasks[taskId];
     if (!task) return null;
     let outcome: string | null = null;
@@ -492,7 +493,7 @@ export class Orchestrator implements CommandHandlers {
       teamId: team.id,
       status: 'working',
       activity: 'starting…',
-      model: team.workerModel,
+      model: workerSpec.tier,
       taskId,
       tokensUsed: 0,
       updatedAt: now(),
@@ -508,7 +509,7 @@ export class Orchestrator implements CommandHandlers {
       const result = await this.#engine.runWorker({
         prompt: this.#buildWorkerPrompt(task),
         team,
-        model: team.workerModel,
+        model: workerSpec,
         cwd: project.workspaceDir || this.#workspaceDir,
         extraDirs: this.#extraDirs(project.workspaceDir || this.#workspaceDir),
         signal: controller.signal,
@@ -525,7 +526,7 @@ export class Orchestrator implements CommandHandlers {
             const previous = this.#bus.state.agents[workerId]?.tokensUsed ?? 0;
             this.#patchAgent(workerId, { tokensUsed: totalTokens });
             this.#patchTask(taskId, { tokensUsed: totalTokens });
-            this.#recordTokens(team.workerModel, totalTokens - previous);
+            this.#recordTokens(workerSpec.tier, totalTokens - previous);
             const ledger = this.#projects.addTokens(project.id, totalTokens - previous);
             if (ledger) {
               this.#bus.publish({ type: 'project.updated', project: ledger.project });
@@ -552,8 +553,8 @@ export class Orchestrator implements CommandHandlers {
       this.#patchTask(taskId, { status: 'review', progressPct: 95 });
       this.#patchAgent(workerId, { status: 'reporting', activity: 'reporting to lead' });
       this.#patchAgent(`${team.id}-lead`, { status: 'working', activity: `reviewing: ${task.title.slice(0, 40)}` });
-      const review = await reviewWorkerReport(this.#engine, team, task.title, result.synopsis);
-      this.#recordTokens(team.leadModel, review.tokens);
+      const review = await reviewWorkerReport(this.#engine, team, task.title, result.synopsis, leadSpec);
+      this.#recordTokens(leadSpec.tier, review.tokens);
       if (review.memoryNote) {
         this.#registry.appendMemory(team.id, review.memoryNote);
         this.#activity(`${team.id}-lead`, taskId, `noted for the team: ${review.memoryNote.slice(0, 80)}`);
@@ -691,7 +692,7 @@ export class Orchestrator implements CommandHandlers {
       synopsis,
       checksModel,
     );
-    this.#recordTokens(checksModel, tokens);
+    this.#recordTokens(checksModel.tier, tokens);
 
     for (const item of dispatch) {
       const target = this.#registry.get(item.teamId);
@@ -743,7 +744,7 @@ export class Orchestrator implements CommandHandlers {
 
     const checksModel = this.#checksModel();
     const evaluation = await evaluateQaReport(this.#engine, qaSynopsis, checksModel);
-    this.#recordTokens(checksModel, evaluation.tokens);
+    this.#recordTokens(checksModel.tier, evaluation.tokens);
     if (evaluation.verdict === 'pass') {
       this.#activity('master', qaTaskId, `QA verdict: pass — ${source.title.slice(0, 45)}`);
       return;
@@ -961,7 +962,7 @@ export class Orchestrator implements CommandHandlers {
       teamId: team.id,
       status: 'idle',
       activity: 'standing by',
-      model: this.#withModels(team).leadModel,
+      model: this.#leadSpec(team).tier,
       taskId: null,
       tokensUsed: 0,
       updatedAt: now(),
@@ -1163,9 +1164,9 @@ export class Orchestrator implements CommandHandlers {
     // the standard prompts, QA gate, and coordination all apply unchanged.
     this.#patchTask(taskId, { status: 'review', progressPct: 90 });
     const task = this.#bus.state.tasks[taskId];
-    const desk = this.#withModels(FREELANCE_DESK);
-    const review = await reviewWorkerReport(this.#engine, desk, task?.title ?? text, result.reply);
-    this.#recordTokens(desk.leadModel, review.tokens);
+    const deskLead = this.#leadSpec(FREELANCE_DESK);
+    const review = await reviewWorkerReport(this.#engine, FREELANCE_DESK, task?.title ?? text, result.reply, deskLead);
+    this.#recordTokens(deskLead.tier, review.tokens);
     this.#patchTask(taskId, { status: 'done', progressPct: 100, synopsis: review.synopsis || result.reply.slice(0, 400) });
     this.#activity(agentId, taskId, `freelancer ${result.name} replied — full reply sent to your phone`);
 
@@ -1185,35 +1186,39 @@ export class Orchestrator implements CommandHandlers {
     this.#onModelsChange = onChange;
   }
 
-  #masterModel(): ModelTier {
-    return this.#models.master ?? MODEL_DEFAULTS.master;
+  #masterModel(): ModelSpec {
+    return resolveModel(MODEL_DEFAULTS.master, this.#models.master);
   }
 
-  #checksModel(): ModelTier {
-    return this.#models.checks ?? MODEL_DEFAULTS.checks;
+  #checksModel(): ModelSpec {
+    return resolveModel(MODEL_DEFAULTS.checks, this.#models.checks);
   }
 
   // Team records are never mutated by model choices, so clearing the
   // overrides restores exactly each team's defaults.
-  #withModels(team: Team): Team {
-    const perTeam = this.#models.teams[team.id] ?? {};
-    return {
-      ...team,
-      leadModel: perTeam.lead ?? this.#models.lead ?? team.leadModel,
-      workerModel: perTeam.worker ?? this.#models.worker ?? team.workerModel,
-    };
+  #leadSpec(team: Team): ModelSpec {
+    return resolveModel(team.leadModel, this.#models.teams[team.id]?.lead, this.#models.lead);
+  }
+
+  #workerSpec(team: Team): ModelSpec {
+    return resolveModel(team.workerModel, this.#models.teams[team.id]?.worker, this.#models.worker);
   }
 
   setModels(overrides: ModelOverrides): void {
     this.#models = overrides;
     this.#onModelsChange(overrides);
     for (const team of this.#registry.all()) {
-      this.#patchAgent(`${team.id}-lead`, { model: this.#withModels(team).leadModel });
+      this.#patchAgent(`${team.id}-lead`, { model: this.#leadSpec(team).tier });
     }
-    this.#patchAgent('master', { model: this.#masterModel() });
-    const custom =
-      [overrides.master, overrides.checks, overrides.lead, overrides.worker].filter(Boolean).length +
-      Object.values(overrides.teams).reduce((sum, choice) => sum + (choice.lead ? 1 : 0) + (choice.worker ? 1 : 0), 0);
+    this.#patchAgent('master', { model: this.#masterModel().tier });
+    const choices = [
+      overrides.master,
+      overrides.checks,
+      overrides.lead,
+      overrides.worker,
+      ...Object.values(overrides.teams).flatMap((choice) => [choice.lead, choice.worker]),
+    ];
+    const custom = choices.reduce((sum, choice) => sum + (choice?.model ? 1 : 0) + (choice?.effort ? 1 : 0), 0);
     this.#activity(
       'master',
       null,
