@@ -99,6 +99,10 @@ export const TaskSchema = z.object({
   // user-facing task they build. They show while running, but never in
   // finished lists or project history — the parent's report covers them.
   parentTaskId: z.string().nullable().optional(),
+  // The owner's own words, set only on tasks the owner submitted (never on
+  // QA/fix/follow-up/split tasks). Routing reads these to follow the
+  // conversation thread instead of guessing a project from topic words.
+  ownerAsk: z.string().nullable().optional(),
 });
 export type Task = z.infer<typeof TaskSchema>;
 

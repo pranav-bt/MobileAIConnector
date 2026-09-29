@@ -12,6 +12,7 @@ import {
   routeTask,
   type ParallelPlan,
   type PlanStep,
+  type RoutingThread,
 } from './master.js';
 import { capturePcScreen, saveIncomingFile, shareFile } from '../files.js';
 import { evaluatePermission } from './policy.js';
@@ -336,6 +337,20 @@ export class Orchestrator implements CommandHandlers {
     this.#activity('master', taskId, `task stopped by you: ${task.title.slice(0, 50)}`);
   }
 
+  // The owner's conversation so far: the project of their latest ask (what an
+  // unnamed follow-up inherits) and their last few asks as routing context.
+  // Stopped tasks don't count — a misrouted task the owner killed must not
+  // drag the next ask into the same wrong project.
+  #routingThread(excludeTaskId: string): RoutingThread {
+    const asks = Object.values(this.#bus.state.tasks)
+      .filter((task) => task.ownerAsk && task.projectId && task.id !== excludeTaskId && task.status !== 'paused')
+      .sort((a, b) => a.createdAt - b.createdAt);
+    return {
+      projectId: asks[asks.length - 1]?.projectId ?? null,
+      recent: asks.slice(-4).map((task) => `"${task.ownerAsk!.replace(/\s+/g, ' ').slice(0, 200)}" → ${task.title}`),
+    };
+  }
+
   async #intake(rawText: string): Promise<void> {
     // "@<project> do something" pins the task to a project explicitly.
     let text = rawText.trim();
@@ -357,6 +372,7 @@ export class Orchestrator implements CommandHandlers {
       detail: text,
       projectId: forcedProjectId,
       teamId: null,
+      ownerAsk: text,
       status: 'routing',
       progressPct: 0,
       agentIds: [],
@@ -378,6 +394,7 @@ export class Orchestrator implements CommandHandlers {
       text,
       forcedProjectId,
       masterModel,
+      this.#routingThread(taskId),
     );
     this.#recordTokens(masterModel.tier, decision.tokens);
     this.#routingCount -= 1;
@@ -434,6 +451,7 @@ export class Orchestrator implements CommandHandlers {
         detail,
         projectId,
         teamId: team.id,
+        ownerAsk: index === 0 ? this.#bus.state.tasks[taskId]?.ownerAsk ?? null : null,
         status: 'queued',
         progressPct: 0,
         agentIds: [],

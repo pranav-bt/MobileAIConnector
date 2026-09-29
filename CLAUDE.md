@@ -106,6 +106,14 @@ npm run typecheck      # tsc across workspaces
   outside the workspace raises a card even in auto mode, while shell READS
   across the drives stay silent. Containment goes through `realPath`, so a
   junction can't tunnel out.
+- The master never guesses a project from topic words ("the map", "the
+  bases"). `routeTask` resolves it deterministically: `@project` pin >
+  projects the owner named in the text (`namedProjects`, spacing-insensitive
+  whole words; the model may pick only among those + the thread's) > the
+  thread's project (latest non-stopped task carrying `ownerAsk`) > default.
+  When nothing is named the prompt shows only that one project, and a model
+  title naming any other project is replaced by the owner's words.
+  Regression: `npx tsx test/routing.smoke.ts` (part of `npm run smoke`).
 - Composer slash-commands (parsed client-side, deterministic): /team add
   <name>: <charter> · /team workers <team> <n> · /team remove <team> ·
   /project add <name> <path> [description] · /project remove <project>.

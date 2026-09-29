@@ -26,13 +26,51 @@ export interface RoutingDecision {
 
 const MASTER_MODEL: ModelTier = 'opus';
 
-function routingPrompt(teams: Team[], projects: Project[], defaultProjectId: string, text: string): string {
+// Projects the owner actually named in the text (by id or name, any spacing:
+// "castle wars", "CastleWars", "castle-wars"). Only a named project may
+// override the thread's project; a bare noun ("the map", "the bases") never
+// counts as naming one.
+export function namedProjects(projects: Project[], text: string): Project[] {
+  const words = (label: string) =>
+    label
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .split(/[^A-Za-z0-9]+/)
+      .filter(Boolean)
+      .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return projects.filter((project) =>
+    [project.id, project.name].some((label) => {
+      const parts = words(label);
+      return parts.length > 0 && new RegExp(`\\b${parts.join('[\\s_-]*')}\\b`, 'i').test(text);
+    }),
+  );
+}
+
+function routingPrompt(
+  teams: Team[],
+  candidates: Project[],
+  fallbackProjectId: string,
+  projectFixed: boolean,
+  recent: string[],
+  text: string,
+): string {
   const teamLines = teams
     .map((team) => `- id: ${team.id}\n  name: ${team.name}\n  charter: ${team.charter}`)
     .join('\n');
-  const projectLines = projects
+  const projectLines = candidates
     .map((project) => `* project: ${project.id} | ${project.name} | ${project.description || '(no description)'}`)
     .join('\n');
+  const projectRule = projectFixed
+    ? [
+        'Project (fixed — the owner did not name another one, so this task continues the current thread;',
+        'do NOT pick, mention or title it after any other project):',
+        projectLines,
+      ]
+    : [
+        'Projects (only these may be picked — the owner named them or it is the current thread):',
+        projectLines,
+        '',
+        `If none clearly matches, use "${fallbackProjectId}".`,
+      ];
   return [
     'You are the master agent of Agent HQ. Route the incoming task to the team whose charter fits best,',
     'and to the project it concerns.',
@@ -40,11 +78,16 @@ function routingPrompt(teams: Team[], projects: Project[], defaultProjectId: str
     'Teams:',
     teamLines,
     '',
-    'Projects:',
-    projectLines,
+    ...projectRule,
     '',
-    `If no project clearly matches, use "${defaultProjectId}".`,
-    '',
+    ...(recent.length
+      ? [
+          'Recent conversation with the owner (oldest first) — the task most likely continues it, so',
+          'resolve vague references ("the game", "the map") against these, not against project names:',
+          ...recent.map((line) => `- ${line}`),
+          '',
+        ]
+      : []),
     `Task: "${text}"`,
     '',
     'Reply with ONLY a JSON object, no other text.',
@@ -67,6 +110,13 @@ function keywordFallback(teams: Team[], text: string): Team {
   return hit ?? teams.find((team) => team.id === 'coding') ?? teams[0]!;
 }
 
+// Where the owner's conversation currently is: the project to inherit when
+// they don't name one, plus a few recent asks so vague references resolve.
+export interface RoutingThread {
+  projectId: string | null;
+  recent: string[];
+}
+
 export async function routeTask(
   engine: OrchestratorEngine,
   teams: Team[],
@@ -75,12 +125,25 @@ export async function routeTask(
   text: string,
   forcedProjectId: string | null,
   model: ModelSpec = resolveModel(MASTER_MODEL),
+  thread: RoutingThread = { projectId: null, recent: [] },
 ): Promise<RoutingDecision> {
   const fallbackTeam = keywordFallback(teams, text);
   const fallbackTitle = text.slice(0, 60);
+  // The model never guesses a project from topic words: an explicit @project
+  // wins, then projects named in the text (the model picks among those and
+  // the thread's), and otherwise the task stays in the thread's project.
+  const threadProject =
+    projects.find((project) => project.id === thread.projectId) ??
+    projects.find((project) => project.id === defaultProjectId);
+  const inheritedProjectId = forcedProjectId ?? threadProject?.id ?? defaultProjectId;
+  const named = forcedProjectId ? [] : namedProjects(projects, text);
+  const projectFixed = named.length === 0;
+  const candidates = projectFixed
+    ? projects.filter((project) => project.id === inheritedProjectId)
+    : [...new Set([...named, ...(threadProject ? [threadProject] : [])])];
   try {
     const { text: reply, tokens } = await engine.complete({
-      prompt: routingPrompt(teams, projects, forcedProjectId ?? defaultProjectId, text),
+      prompt: routingPrompt(teams, candidates, inheritedProjectId, projectFixed, thread.recent, text),
       model,
     });
     const jsonMatch = reply.match(/\{[\s\S]*\}/);
@@ -92,11 +155,16 @@ export async function routeTask(
       reason?: unknown;
       plan?: unknown;
     };
-    const routedProject = projects.find((candidate) => candidate.id === parsed.projectId);
-    // An explicit @project from the user always beats the model's pick.
-    const projectId = forcedProjectId ?? routedProject?.id ?? defaultProjectId;
-    const title =
-      typeof parsed.title === 'string' && parsed.title.trim() ? parsed.title.trim().slice(0, 60) : fallbackTitle;
+    const routedProject = projectFixed ? undefined : candidates.find((candidate) => candidate.id === parsed.projectId);
+    const projectId = routedProject?.id ?? inheritedProjectId;
+    // A model title that drags in a project the owner didn't name would put
+    // the wrong game on the task card; the owner's own words replace it.
+    const strays = projects.filter((project) => project.id !== projectId && !named.includes(project));
+    const cleanTitle = (raw: unknown, max: number, fallback: string): string =>
+      typeof raw === 'string' && raw.trim() && namedProjects(strays, raw).length === 0
+        ? raw.trim().slice(0, max)
+        : fallback;
+    const title = cleanTitle(parsed.title, 60, fallbackTitle);
     const reason = typeof parsed.reason === 'string' ? parsed.reason : '';
 
     if (Array.isArray(parsed.plan) && parsed.plan.length >= 2) {
@@ -108,7 +176,7 @@ export async function routeTask(
         if (!team || typeof step.instruction !== 'string' || !step.instruction.trim()) continue;
         steps.push({
           teamId: team.id,
-          title: typeof step.title === 'string' && step.title.trim() ? step.title.trim().slice(0, 50) : team.name,
+          title: cleanTitle(step.title, 50, team.name),
           instruction: step.instruction.trim(),
         });
       }
@@ -124,7 +192,7 @@ export async function routeTask(
     console.warn('[orchestrator] routing call failed, using keyword fallback:', error);
     return {
       teamId: fallbackTeam.id,
-      projectId: forcedProjectId ?? defaultProjectId,
+      projectId: inheritedProjectId,
       title: fallbackTitle,
       reason: 'keyword fallback',
       tokens: 0,
