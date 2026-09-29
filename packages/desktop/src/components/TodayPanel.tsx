@@ -1,4 +1,4 @@
-import type { ClientCommand, HubState, Task } from '@agent-hq/shared';
+import { isInternalTask, type ClientCommand, type HubState, type Task } from '@agent-hq/shared';
 import { formatResetDay, formatResetTime, formatTokens, usageColor } from '../status';
 
 function teamName(state: HubState, teamId: string | null): string {
@@ -34,8 +34,9 @@ export function TodayPanel(props: {
   const pending = Object.values(state.permissions).filter((request) => request.status === 'pending');
   const inFlight = tasks.filter((task) => ['in_flight', 'awaiting_permission', 'review'].includes(task.status));
   const queued = tasks.filter((task) => ['queued', 'routing', 'intake'].includes(task.status));
-  const done = tasks.filter((task) => task.status === 'done').slice(0, 3);
-  const failed = tasks.filter((task) => task.status === 'failed').slice(0, 2);
+  // Internal split pieces show while running; finished, the parent's report covers them.
+  const done = tasks.filter((task) => task.status === 'done' && !isInternalTask(task)).slice(0, 3);
+  const failed = tasks.filter((task) => task.status === 'failed' && !isInternalTask(task)).slice(0, 2);
 
   const usage = state.usage;
   const limitsKnown = usage.windowResetsAt > 0 || usage.weeklyResetsAt > 0;

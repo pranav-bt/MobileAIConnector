@@ -30,6 +30,9 @@ export interface OrchestratorEngine {
     cwd: string;
     // Extra directory roots the worker's tools may roam (all subdirectories).
     extraDirs?: string[];
+    // How many sub-agents the worker may run at once; 0 = none (a split part
+    // is already one of several parallel workers). Defaults to the engine's.
+    maxSubagents?: number;
     callbacks: WorkerRunCallbacks;
     signal?: AbortSignal;
   }): Promise<WorkerRunResult>;

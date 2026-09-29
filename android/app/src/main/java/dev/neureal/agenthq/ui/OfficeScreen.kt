@@ -960,7 +960,7 @@ private fun TasksTab(snapshot: Snapshot, connected: Boolean, onSubmitTask: (Stri
     val active = snapshot.tasks
         .filter { it.status in listOf("routing", "queued", "in_flight", "awaiting_permission", "review") }
         .sortedByDescending { it.updatedAt }
-    val parked = snapshot.tasks.filter { it.status == "paused" || it.status == "failed" }.sortedByDescending { it.updatedAt }.take(5)
+    val parked = snapshot.tasks.filter { (it.status == "paused" || it.status == "failed") && it.parentTaskId == null }.sortedByDescending { it.updatedAt }.take(5)
     var composer by remember { mutableStateOf("") }
 
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -1033,7 +1033,7 @@ private fun TasksTab(snapshot: Snapshot, connected: Boolean, onSubmitTask: (Stri
 
 @Composable
 private fun HistoryTab(snapshot: Snapshot) {
-    val done = snapshot.tasks.filter { it.status == "done" }.sortedByDescending { it.updatedAt }
+    val done = snapshot.tasks.filter { it.status == "done" && it.parentTaskId == null }.sortedByDescending { it.updatedAt }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().background(HQ.bg).padding(horizontal = 16.dp),

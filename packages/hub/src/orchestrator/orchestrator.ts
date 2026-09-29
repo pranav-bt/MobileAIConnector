@@ -1,10 +1,18 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { MODEL_DEFAULTS, resolveModel, type Agent, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Task, type Team, type Usage } from '@agent-hq/shared';
+import { MODEL_DEFAULTS, isInternalTask, resolveModel, type Agent, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Task, type Team, type Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine } from '../engine/types.js';
-import { coordinateFollowUp, evaluateQaReport, reviewWorkerReport, routeTask, type PlanStep } from './master.js';
+import {
+  coordinateFollowUp,
+  evaluateQaReport,
+  planParallelSplit,
+  reviewWorkerReport,
+  routeTask,
+  type ParallelPlan,
+  type PlanStep,
+} from './master.js';
 import { capturePcScreen, saveIncomingFile, shareFile } from '../files.js';
 import { evaluatePermission } from './policy.js';
 import { delay } from './util.js';
@@ -18,6 +26,36 @@ import type { ProjectRegistry } from './projects.js';
 
 const now = () => Date.now();
 const MAX_LOUNGE_IDLE = 3;
+// Upper bound on parallel parts per split, whatever the team's worker cap.
+const MAX_PARALLEL_PARTS = 4;
+// A split piece's unreviewed report, as kept on the piece and handed to the
+// integration worker (capped so N reports keep its prompt bounded).
+const MAX_PIECE_REPORT = 4000;
+// Titles the split pass never splits: QA passes, QA remediation ([fix],
+// [fix2]…) and split pieces.
+const UNSPLITTABLE_TITLE = /^\[(QA|fix\d*|part|scaffold)\b/i;
+// Cheap gate before the split pass: short asks without build language never
+// fan out, so the split check only runs on plausible big builds.
+const BUILD_WORDS = /\b(build|implement|create|develop|scaffold|port|rewrite|set up)\b/i;
+// The task-text half of the split gate (the team half lives on the class).
+export function splitWorthChecking(title: string, detail: string): boolean {
+  if (UNSPLITTABLE_TITLE.test(title)) return false;
+  const words = detail.split(/\s+/).filter(Boolean).length;
+  return words >= 8 && (words >= 60 || BUILD_WORDS.test(detail));
+}
+
+interface RunOptions {
+  slotHeld?: boolean;
+  keepSlot?: boolean;
+  noSplit?: boolean;
+  startPct?: number;
+}
+
+interface SlotWaiter {
+  taskId: string;
+  parentId: string;
+  resolve: (claimed: boolean) => void;
+}
 
 // The PA desk, as the orchestrator sees it.
 interface PaDeskLike {
@@ -74,6 +112,13 @@ export class Orchestrator implements CommandHandlers {
   #stopping = new Set<string>();
   #qaSource = new Map<string, string>(); // [QA] taskId -> source taskId
   #scaleAsked = new Set<string>(); // teams with an open scale-up card
+  // Lead split pass, all cleared when the split ends: split parent -> its
+  // part/scaffold tasks (stops cascade), the integration brief the parent's
+  // final worker gets, and per team the split pieces waiting for a slot
+  // (served before the ordinary queue).
+  #splitChildren = new Map<string, string[]>();
+  #integrationBriefs = new Map<string, string>();
+  #slotWaiters = new Map<string, SlotWaiter[]>();
   // Global pause: nothing new starts (everything queues); running work
   // finishes. killall stops running work too.
   #pausedAll = false;
@@ -267,7 +312,11 @@ export class Orchestrator implements CommandHandlers {
 
     const controller = this.#controllers.get(taskId);
     if (controller) controller.abort();
-    else this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' }); // queued/routing — no worker yet
+    else this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' }); // queued/routing/split — no worker yet
+    // A split task's parallel parts stop with it; pieces waiting for a slot
+    // give up their place in line.
+    this.#cancelSlotWaiters(taskId);
+    for (const childId of this.#splitChildren.get(taskId) ?? []) this.stopTask(childId);
     // If the task was queued, drop it from its team's queue.
     if (task.teamId) {
       const queue = this.#queues.get(task.teamId);
@@ -404,8 +453,10 @@ export class Orchestrator implements CommandHandlers {
   // see each other's history; everything is capped so tokens stay flat.
   #buildWorkerPrompt(task: Task): string {
     const sections = [task.detail];
+    const integrationBrief = this.#integrationBriefs.get(task.id);
+    if (integrationBrief) sections.push('', integrationBrief);
     const history = Object.values(this.#bus.state.tasks)
-      .filter((t) => t.projectId === task.projectId && t.status === 'done' && t.id !== task.id && t.synopsis)
+      .filter((t) => t.projectId === task.projectId && t.status === 'done' && t.id !== task.id && t.synopsis && !isInternalTask(t))
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, 3);
     const teamMemory = task.teamId ? this.#registry.readMemory(task.teamId) : '';
@@ -472,15 +523,30 @@ export class Orchestrator implements CommandHandlers {
 
   // Returns the final synopsis on success, or null if the task failed or was
   // stopped (chains use this to decide whether to continue).
-  async #runTask(taskId: string, team: Team, autoQa = true): Promise<string | null> {
+  // Split plumbing (opts): `slotHeld` — the caller already counted this run's
+  // worker slot; `keepSlot` — leave the slot counted afterwards (the caller
+  // hands it on or frees it); `noSplit` — skip the split pass; `startPct` —
+  // progress to resume from (an integration run continues its parts' 70%).
+  async #runTask(taskId: string, team: Team, autoQa = true, opts: RunOptions = {}): Promise<string | null> {
     const workerSpec = this.#workerSpec(team);
     const leadSpec = this.#leadSpec(team);
     const task = this.#bus.state.tasks[taskId];
-    if (!task) return null;
+    if (!task) {
+      if (opts.slotHeld && !opts.keepSlot) this.#freeSlot(team.id);
+      return null;
+    }
+    // Must stay synchronous up to the slot increment below (callers check the
+    // cap, then call) — the split pass takes over the slot the same way.
+    if (!opts.noSplit && this.#shouldPlanSplit(task, team)) return this.#planAndRun(taskId, team, autoQa);
     let outcome: string | null = null;
     const project = (task.projectId ? this.#projects.get(task.projectId) : undefined) ?? this.#projects.defaultProject();
+    // An internal split piece: no lead review, no sub-agents, and its tokens
+    // roll up into the parent. The task's tokensUsed accumulates across runs
+    // (an integration run starts from its parts' total).
+    const piece = isInternalTask(task);
+    const baseTokens = task.tokensUsed;
 
-    this.#activeWorkers.set(team.id, (this.#activeWorkers.get(team.id) ?? 0) + 1);
+    if (!opts.slotHeld) this.#takeSlot(team.id);
     const workerNumber = (this.#workerCounters.get(team.id) ?? 0) + 1;
     this.#workerCounters.set(team.id, workerNumber);
     const workerId = `${team.id}-w${workerNumber}`;
@@ -498,7 +564,7 @@ export class Orchestrator implements CommandHandlers {
       tokensUsed: 0,
       updatedAt: now(),
     });
-    this.#patchTask(taskId, { status: 'in_flight', agentIds: [`${team.id}-lead`, workerId], progressPct: 5 });
+    this.#patchTask(taskId, { status: 'in_flight', agentIds: [`${team.id}-lead`, workerId], progressPct: opts.startPct ?? 5 });
     this.#patchAgent(`${team.id}-lead`, { status: 'working', activity: `briefing ${workerName}`, taskId });
 
     const controller = new AbortController();
@@ -512,6 +578,7 @@ export class Orchestrator implements CommandHandlers {
         model: workerSpec,
         cwd: project.workspaceDir || this.#workspaceDir,
         extraDirs: this.#extraDirs(project.workspaceDir || this.#workspaceDir),
+        ...(piece ? { maxSubagents: 0 } : {}),
         signal: controller.signal,
         callbacks: {
           onActivity: (message) => {
@@ -525,7 +592,9 @@ export class Orchestrator implements CommandHandlers {
           onTokens: (totalTokens) => {
             const previous = this.#bus.state.agents[workerId]?.tokensUsed ?? 0;
             this.#patchAgent(workerId, { tokensUsed: totalTokens });
-            this.#patchTask(taskId, { tokensUsed: totalTokens });
+            this.#patchTask(taskId, { tokensUsed: baseTokens + totalTokens });
+            const parent = task.parentTaskId ? this.#bus.state.tasks[task.parentTaskId] : undefined;
+            if (parent) this.#patchTask(parent.id, { tokensUsed: parent.tokensUsed + totalTokens - previous });
             this.#recordTokens(workerSpec.tier, totalTokens - previous);
             const ledger = this.#projects.addTokens(project.id, totalTokens - previous);
             if (ledger) {
@@ -547,6 +616,15 @@ export class Orchestrator implements CommandHandlers {
         this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' });
         this.#patchAgent(workerId, { status: 'idle', activity: 'task stopped', taskId: null });
         return null;
+      }
+
+      // A split piece's raw report goes straight to the integration worker;
+      // only the integrated whole gets the lead's review.
+      if (piece) {
+        const report = result.synopsis.trim().slice(0, MAX_PIECE_REPORT) || 'Finished without a written report.';
+        this.#patchTask(taskId, { status: 'done', progressPct: 100, synopsis: report });
+        this.#activity(`${team.id}-lead`, taskId, `part report in: ${task.title.slice(0, 50)}`);
+        return report;
       }
 
       // Lead review: the worker's report becomes the synopsis the owner reads.
@@ -591,11 +669,268 @@ export class Orchestrator implements CommandHandlers {
       this.#stopping.delete(taskId);
       this.#patchAgent(`${team.id}-lead`, { status: 'idle', activity: 'standing by', taskId: null });
       this.#retireWorker(workerId);
-      this.#activeWorkers.set(team.id, Math.max(0, (this.#activeWorkers.get(team.id) ?? 1) - 1));
+      if (!opts.keepSlot) this.#freeSlot(team.id, false);
       this.#masterStatus();
-      this.#drainQueue(team.id);
+      if (!opts.keepSlot) this.#drainQueue(team.id);
     }
     return outcome;
+  }
+
+  // --- lead split pass ---------------------------------------------------
+  // Big build tasks fan out: the lead plans a shared contract + disjoint
+  // parts, an optional scaffold runs first, the parts run on parallel workers
+  // (each a visible task), and one integration worker then merges, tests and
+  // commits as the original task — so review/QA/coordination see one report.
+
+  #shouldPlanSplit(task: Task, team: Team): boolean {
+    return (
+      team.allowedTools.includes('bash') &&
+      team.maxConcurrentWorkers >= 2 &&
+      team.id !== this.#qaTeam()?.id &&
+      splitWorthChecking(task.title, task.detail)
+    );
+  }
+
+  #halted(taskId: string): boolean {
+    return this.#stopping.has(taskId) || ['paused', 'failed'].includes(this.#bus.state.tasks[taskId]?.status ?? '');
+  }
+
+  #takeSlot(teamId: string): void {
+    this.#activeWorkers.set(teamId, (this.#activeWorkers.get(teamId) ?? 0) + 1);
+  }
+
+  #freeSlot(teamId: string, drain = true): void {
+    this.#activeWorkers.set(teamId, Math.max(0, (this.#activeWorkers.get(teamId) ?? 1) - 1));
+    if (drain) this.#drainQueue(teamId);
+  }
+
+  // Claims a worker slot for a split piece (counted in #activeWorkers until
+  // freed). No free slot: it waits in the team's priority line, which
+  // #drainQueue serves before the ordinary queue. Resolves false, holding
+  // nothing, if the piece or its parent is stopped first.
+  #claimSlot(taskId: string, team: Team, parentId: string): Promise<boolean> {
+    if (this.#halted(taskId) || this.#halted(parentId)) return Promise.resolve(false);
+    const waiters = this.#slotWaiters.get(team.id) ?? [];
+    if (!this.#pausedAll && waiters.length === 0 && (this.#activeWorkers.get(team.id) ?? 0) < team.maxConcurrentWorkers) {
+      this.#takeSlot(team.id);
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      this.#slotWaiters.set(team.id, [...waiters, { taskId, parentId, resolve }]);
+      this.#drainQueue(team.id); // no-op unless a slot is already free
+    });
+  }
+
+  #cancelSlotWaiters(taskId: string): void {
+    for (const [teamId, waiters] of this.#slotWaiters) {
+      const kept = waiters.filter((waiter) => {
+        if (waiter.taskId !== taskId && waiter.parentId !== taskId) return true;
+        waiter.resolve(false);
+        return false;
+      });
+      if (kept.length > 0) this.#slotWaiters.set(teamId, kept);
+      else this.#slotWaiters.delete(teamId);
+    }
+  }
+
+  async #planAndRun(taskId: string, team: Team, autoQa: boolean): Promise<string | null> {
+    const task = this.#bus.state.tasks[taskId]!;
+    const leadId = `${team.id}-lead`;
+    // The split decision is a quick check (haiku by default), not a lead-model
+    // call — it runs on every plausible build task.
+    const checkSpec = this.#checksModel();
+    // Hold the caller's slot while the lead plans so the queue can't overbook;
+    // it then passes to the single worker, or through the split's pieces.
+    this.#takeSlot(team.id);
+    this.#patchTask(taskId, { status: 'in_flight', agentIds: [leadId], progressPct: 2 });
+    this.#patchAgent(leadId, { status: 'working', activity: `planning: ${task.title.slice(0, 40)}`, taskId });
+    const maxParts = Math.min(MAX_PARALLEL_PARTS, team.maxConcurrentWorkers);
+    const project = (task.projectId ? this.#projects.get(task.projectId) : undefined) ?? this.#projects.defaultProject();
+    const result = await planParallelSplit(
+      this.#engine,
+      team,
+      task.title,
+      task.detail,
+      maxParts,
+      checkSpec,
+      project.workspaceDir || this.#workspaceDir,
+    );
+    this.#recordTokens(checkSpec.tier, result.tokens);
+    if (this.#halted(taskId)) {
+      this.#stopping.delete(taskId);
+      this.#patchAgent(leadId, { status: 'idle', activity: 'standing by', taskId: null });
+      this.#freeSlot(team.id);
+      return null;
+    }
+    if (result.rejected) this.#activity(leadId, taskId, `split plan rejected (${result.rejected}) — running as one worker`);
+    if (!result.plan) return this.#runTask(taskId, team, autoQa, { noSplit: true, slotHeld: true });
+    return this.#runSplit(taskId, team, result.plan, autoQa);
+  }
+
+  // Entered holding the planning slot. The slot travels scaffold -> part 1,
+  // and the last part to finish hands its slot to the integration run, so a
+  // split never gives up capacity mid-flight; other parts claim slots through
+  // the priority line.
+  async #runSplit(taskId: string, team: Team, plan: ParallelPlan, autoQa: boolean): Promise<string | null> {
+    const parent = this.#bus.state.tasks[taskId]!;
+    const leadId = `${team.id}-lead`;
+    const count = plan.parts.length;
+    this.#activity(
+      leadId,
+      taskId,
+      `split into ${count} parallel parts${plan.scaffold ? ' after a scaffold' : ''}: ${plan.parts.map((part) => part.title).join(' · ')}`,
+    );
+    this.#patchAgent(leadId, { status: 'working', activity: `coordinating ${count} parallel workers`, taskId });
+    this.#patchTask(taskId, { progressPct: 5 });
+
+    const header =
+      `This is one piece of "${parent.title}", which the ${team.name} lead split across parallel workers.\n\n` +
+      `Overall task: ${parent.detail.slice(0, 3000)}\n\n` +
+      'Shared contract (code against it exactly; if it is wrong, work around it and say so in your report):\n' +
+      (plan.contract || '(none given — follow the existing code layout)');
+    const partList = plan.parts.map((part) => `${part.title} (owns ${part.owns.join(', ')})`).join('; ');
+    const reports: string[] = [];
+    let slotHeld = true;
+    let integrating = false;
+
+    try {
+      if (plan.scaffold) {
+        const scaffold = await this.#runSplitPiece(
+          taskId,
+          team,
+          `[scaffold] ${parent.title}`,
+          `${header}\n\nYour piece: build ONLY the shared skeleton the parallel parts need before they start:\n${plan.scaffold}\n\n` +
+            `The parts that follow (do not build their contents): ${partList}. Commit the skeleton when it is in place.`,
+          true,
+        );
+        if (this.#halted(taskId)) return null;
+        if (scaffold.report === null) {
+          this.#patchTask(taskId, { status: 'failed', synopsis: 'Failed: the scaffold step did not complete, so the parallel parts were not started.' });
+          return null;
+        }
+        reports.push(`Scaffold: ${scaffold.report}`);
+        this.#patchTask(taskId, { progressPct: 15 });
+      }
+
+      let finished = 0;
+      const results = await Promise.all(
+        plan.parts.map((part, index) => {
+          const inherits = index === 0; // part 1 takes over the held slot
+          if (inherits) slotHeld = false;
+          return this.#runSplitPiece(
+            taskId,
+            team,
+            `[part ${index + 1}/${count}] ${part.title}`,
+            `${header}\n\nYour part: ${part.title}\n${part.instruction}\n\n` +
+              `You exclusively own: ${part.owns.join(', ')}. Other parts, built right now by other workers ` +
+              `in this same workspace: ${partList}.\n` +
+              'Rules: create/edit only paths you own (read anything). Do NOT commit, reset, stash, checkout or otherwise change git state, ' +
+              'and do not add dependencies or run repo-wide formatters — the integration step does that. ' +
+              'Do NOT run the repo-wide test suite, full build, typecheck or linters: the other parts are still writing files, so ' +
+              'those results are meaningless. At most run tests scoped to files you own; the integration step builds and runs everything.',
+            inherits,
+          ).then(({ report, ran }) => {
+            finished += 1;
+            if (ran) {
+              if (finished === count && !this.#halted(taskId)) slotHeld = true; // kept for integration
+              else this.#freeSlot(team.id); // siblings in the priority line get it first
+            }
+            if (!this.#halted(taskId)) {
+              this.#patchTask(taskId, { progressPct: 15 + Math.round((55 * finished) / count) });
+              // The part's own run parked the lead as idle; it's still coordinating.
+              if (finished < count) this.#patchAgent(leadId, { status: 'working', activity: `coordinating ${count} parallel workers`, taskId });
+            }
+            return report;
+          });
+        }),
+      );
+      if (this.#halted(taskId)) return null;
+      if (results.every((report) => report === null)) {
+        this.#patchTask(taskId, { status: 'failed', synopsis: 'Failed: none of the parallel parts completed.' });
+        return null;
+      }
+      results.forEach((report, index) =>
+        reports.push(
+          `Part ${index + 1} (${plan.parts[index]!.title}): ${report ?? 'FAILED or stopped — no report; finish or flag this part yourself.'}`,
+        ),
+      );
+
+      // Integration: the original task, one worker, with every part's report.
+      this.#integrationBriefs.set(
+        taskId,
+        `The ${team.name} lead split this task across parallel workers; their parts are now in this workspace, uncommitted. ` +
+          'You are the integration step: check the parts fit together against the shared contract, fix seams and conflicts, ' +
+          'finish anything a part left incomplete, build and run the tests, then commit in small logical steps. ' +
+          'Report on the whole task as delivered.\n\n' +
+          `Shared contract:\n${plan.contract || '(none)'}\n\nPart reports:\n${reports.join('\n\n')}`,
+      );
+      this.#patchAgent(leadId, { status: 'working', activity: `integrating ${count} parts`, taskId });
+      // Paused mid-split: the integration is new work, so it waits in the
+      // priority line for resume like any other piece.
+      if (slotHeld && this.#pausedAll) {
+        slotHeld = false;
+        this.#freeSlot(team.id);
+      }
+      if (!slotHeld) {
+        if (!(await this.#claimSlot(taskId, team, taskId))) return null;
+        slotHeld = true;
+      }
+      slotHeld = false; // the integration run owns (and frees) it now
+      integrating = true;
+      return await this.#runTask(taskId, team, autoQa, { noSplit: true, slotHeld: true, startPct: 70 });
+    } finally {
+      if (slotHeld) this.#freeSlot(team.id);
+      if (!integrating) this.#patchAgent(leadId, { status: 'idle', activity: 'standing by', taskId: null });
+      this.#integrationBriefs.delete(taskId);
+      for (const childId of this.#splitChildren.get(taskId) ?? []) {
+        this.#taskDepth.delete(childId);
+        this.#stopping.delete(childId);
+      }
+      this.#splitChildren.delete(taskId);
+      this.#stopping.delete(taskId);
+    }
+  }
+
+  // One scaffold/part task of a split: its own visible task and worker, no
+  // QA or coordination of its own (the integrated parent gets those). With
+  // `slotHeld` it runs on the caller's slot; otherwise it claims one. `ran`
+  // means it finished still holding a slot, which the caller must hand on or
+  // free.
+  async #runSplitPiece(
+    parentId: string,
+    team: Team,
+    title: string,
+    detail: string,
+    slotHeld: boolean,
+  ): Promise<{ report: string | null; ran: boolean }> {
+    const parent = this.#bus.state.tasks[parentId]!;
+    this.#taskCounter += 1;
+    const pieceId = `t-${now().toString(36)}-${this.#taskCounter}`;
+    this.#splitChildren.set(parentId, [...(this.#splitChildren.get(parentId) ?? []), pieceId]);
+    this.#taskDepth.set(pieceId, this.#taskDepth.get(parentId) ?? 0);
+    this.#publishTask({
+      id: pieceId,
+      title: title.slice(0, 60),
+      detail,
+      projectId: parent.projectId,
+      teamId: team.id,
+      status: 'queued',
+      progressPct: 0,
+      agentIds: [],
+      synopsis: null,
+      tokensUsed: 0,
+      createdAt: now(),
+      updatedAt: now(),
+      parentTaskId: parentId,
+    });
+    if (!slotHeld && !(await this.#claimSlot(pieceId, team, parentId))) {
+      if (this.#bus.state.tasks[pieceId]?.status === 'queued') {
+        this.#patchTask(pieceId, { status: 'paused', synopsis: 'Stopped with its parent task.' });
+      }
+      return { report: null, ran: false };
+    }
+    const report = await this.#runTask(pieceId, team, false, { noSplit: true, slotHeld: true, keepSlot: true });
+    return { report, ran: true };
   }
 
   #qaTeam(): Team | null {
@@ -869,6 +1204,15 @@ export class Orchestrator implements CommandHandlers {
   #drainQueue(teamId: string): void {
     if (this.#pausedAll) return;
     const team = this.#registry.get(teamId);
+    // Split pieces first: they belong to work that has already started.
+    const waiters = this.#slotWaiters.get(teamId) ?? [];
+    while (waiters.length > 0 && (!team || (this.#activeWorkers.get(teamId) ?? 0) < team.maxConcurrentWorkers)) {
+      const waiter = waiters.shift()!;
+      const claimed = !!team && !this.#halted(waiter.taskId) && !this.#halted(waiter.parentId);
+      if (claimed) this.#takeSlot(teamId);
+      waiter.resolve(claimed);
+    }
+    if (waiters.length === 0) this.#slotWaiters.delete(teamId);
     const queue = this.#queues.get(teamId) ?? [];
     if (queue.length === 0) this.#scaleAsked.delete(teamId); // eligible to ask again next backlog
     if (!team || queue.length === 0) return;
@@ -1080,7 +1424,7 @@ export class Orchestrator implements CommandHandlers {
       if (!this.#pausedAll) return;
       this.#pausedAll = false;
       this.#activity('master', null, 'tasks resumed — draining queues');
-      for (const teamId of [...this.#queues.keys()]) this.#drainQueue(teamId);
+      for (const teamId of new Set([...this.#slotWaiters.keys(), ...this.#queues.keys()])) this.#drainQueue(teamId);
       return;
     }
     // killall: stop every non-terminal task (aborts workers, expires cards,

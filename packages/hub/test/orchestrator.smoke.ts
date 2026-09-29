@@ -4,12 +4,15 @@ import { join } from 'node:path';
 import WebSocket from 'ws';
 import { decodeEvent, encodeCommand, type HubEvent } from '@agent-hq/shared';
 import { startHub } from '../src/index.js';
+import { ownershipIsDisjoint } from '../src/orchestrator/master.js';
+import { splitWorthChecking } from '../src/orchestrator/orchestrator.js';
 
 // Orchestrator flow against the mock engine: routing by charter keyword,
 // full lifecycle to done-with-synopsis, permission gating mid-task, and
 // single-command team creation with a live lead.
 
-const PORT = 4601;
+// Overridable so two smoke runs (e.g. parallel workers) can coexist.
+const PORT = Number(process.env['ORCH_SMOKE_PORT'] ?? 4601);
 
 function fail(message: string): never {
   console.error(`ORCH SMOKE FAIL: ${message}`);
@@ -69,6 +72,24 @@ function waitFor(label: string, test: (e: HubEvent) => boolean, timeoutMs = 8000
       },
     });
   });
+}
+
+// Waits until no task (on `teamId`, or anywhere) is queued or running.
+// Parked-on-a-card tasks from earlier scenarios count as idle.
+async function waitIdle(label: string, teamId?: string, timeoutMs = 30000): Promise<void> {
+  const settled = ['done', 'failed', 'paused', 'awaiting_permission'];
+  for (const started = Date.now(); ; ) {
+    const latest = new Map<string, { title: string; status: string }>();
+    for (const e of events) {
+      if (e.type === 'task.updated' && (!teamId || e.task.teamId === teamId)) latest.set(e.task.id, e.task);
+    }
+    const busy = [...latest.values()].filter((task) => !settled.includes(task.status));
+    if (busy.length === 0) return;
+    if (Date.now() - started > timeoutMs) {
+      fail(`timed out waiting for: ${label} (busy: ${busy.map((task) => `${task.title} [${task.status}]`).join('; ')})`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
 try {
@@ -267,6 +288,181 @@ try {
   if (step2.type !== 'task.updated' || step2.task.teamId !== 'coding') fail('step 2 should run on coding');
   if (!step2.task.detail.includes('Handover from the previous step')) fail('step 2 missing the handover context');
   console.log('multi-team plan ok: design -> coding with handover');
+
+  // 10b. Lead split pass: a big build task fans out — scaffold first, then
+  // parallel parts on separate workers, then one integration worker on the
+  // original task.
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding: parallel-test build the two-module widget with a shared index' }));
+  const scaffoldDone = await waitFor(
+    'split scaffold done',
+    (e) => e.type === 'task.updated' && e.task.title.startsWith('[scaffold]') && e.task.status === 'done',
+    15000,
+  );
+  const partsDone = await Promise.all(
+    ['[part 1/2]', '[part 2/2]'].map((prefix) =>
+      waitFor(
+        `split ${prefix} done`,
+        (e) => e.type === 'task.updated' && e.task.title.startsWith(prefix) && e.task.status === 'done',
+        15000,
+      ),
+    ),
+  );
+  if (scaffoldDone.type !== 'task.updated') fail('scaffold event shape');
+  for (const part of partsDone) {
+    if (part.type !== 'task.updated' || part.task.teamId !== 'coding') fail('split parts should run on coding');
+    if (!part.task.detail.includes('You exclusively own: src/')) fail('part missing its file ownership');
+    if (part.task.createdAt < scaffoldDone.task.updatedAt) fail('parts started before the scaffold finished');
+  }
+  await waitFor(
+    'split parent integrated and done',
+    (e) =>
+      e.type === 'task.updated' &&
+      e.task.detail.startsWith('coding: parallel-test') &&
+      !e.task.title.startsWith('[') &&
+      e.task.status === 'done',
+    15000,
+  );
+  await waitFor(
+    'integration step ran after the parts',
+    (e) => e.type === 'agent.updated' && e.agent.role === 'lead' && e.agent.activity.startsWith('integrating 2 parts'),
+  );
+  console.log('lead split ok: scaffold -> 2 parallel parts -> integration');
+
+  // The parent's progress only climbs across plan -> parts -> integration.
+  const splitParentId = events.find(
+    (e) => e.type === 'task.updated' && e.task.detail.startsWith('coding: parallel-test') && !e.task.title.startsWith('['),
+  );
+  if (splitParentId?.type !== 'task.updated') fail('unreachable');
+  let lastPct = -1;
+  for (const e of events) {
+    if (e.type !== 'task.updated' || e.task.id !== splitParentId.task.id) continue;
+    if (e.task.progressPct < lastPct) fail(`split parent progress regressed ${lastPct}% -> ${e.task.progressPct}%`);
+    lastPct = e.task.progressPct;
+  }
+
+  // Pieces are internal: tagged with the parent, unreviewed (raw worker
+  // report, no lead review), no sub-agents; their tokens roll up into the
+  // parent (scaffold + 2 parts + integration, 42 each in the mock).
+  const parentId = splitParentId.task.id;
+  for (const piece of [scaffoldDone, ...partsDone]) {
+    if (piece.type !== 'task.updated') fail('unreachable');
+    if (piece.task.parentTaskId !== parentId) fail(`${piece.task.title} should carry parentTaskId ${parentId}`);
+    if (piece.task.synopsis !== 'Mock worker: completed the task as described.') {
+      fail(`${piece.task.title} should keep the raw worker report (no lead review), got: ${piece.task.synopsis}`);
+    }
+    if (!events.some((e) => e.type === 'activity' && e.entry.taskId === piece.task.id && e.entry.message === 'mock: subagents capped at 0')) {
+      fail(`${piece.task.title} should run with sub-agents disabled`);
+    }
+  }
+  if (events.some((e) => e.type === 'activity' && e.entry.message.startsWith('report filed: [part'))) {
+    fail('a split part went through the lead review');
+  }
+  const parentFinal = events.findLast((e) => e.type === 'task.updated' && e.task.id === parentId);
+  if (parentFinal?.type !== 'task.updated') fail('unreachable');
+  if (parentFinal.task.tokensUsed !== 42 * 4) fail(`split parent should total every worker's tokens (168), got ${parentFinal.task.tokensUsed}`);
+  if (parentFinal.task.parentTaskId) fail('the split parent itself is user-facing, not internal');
+  if (events.some((e) => e.type === 'activity' && e.entry.taskId === parentId && e.entry.message === 'mock: subagents capped at 0')) {
+    fail('the integration worker should keep its sub-agents');
+  }
+  console.log('split pieces ok: internal, unreviewed, no sub-agents, tokens rolled up into the parent');
+
+  // 10c. Split gate + ownership rules (pure): [fix]/QA/pieces never split,
+  // short asks skip the split check, parts must own disjoint non-empty paths.
+  if (splitWorthChecking('[fix] Tower HUD', 'coding: build the whole tower system across every module in the game now')) {
+    fail('[fix] tasks must never split');
+  }
+  if (splitWorthChecking('[fix2] Tower HUD', 'implement '.repeat(80))) fail('[fix2] tasks must never split');
+  if (splitWorthChecking('Rename var', 'rename the foo variable to bar')) fail('a short ask should skip the split check');
+  if (!splitWorthChecking('Build game', 'build the full game: tower system, economy, UI and the save layer')) {
+    fail('a build task should get the split check');
+  }
+  const ownership: [string[][], boolean][] = [
+    [[['src/a'], ['src/b']], true],
+    [[['src/a/'], ['SRC\\A\\x.ts']], false], // nested, case/slash-insensitive
+    [[['src/a'], ['src/a']], false],
+    [[['src/a'], []], false], // empty ownership
+    [[['src/a'], ['.']], false], // the whole tree
+    [[['src/a'], ['src/**/*.ts']], false], // unverifiable glob
+    [[['src/a/**'], ['src/ab']], true], // prefix of a name is not nesting
+    [[['/src/a'], ['src/a']], false], // a leading slash is still workspace-relative
+    [[['D:/Repo/src/a'], ['src/a/x.ts']], false], // absolute inside the workspace
+    [[['D:\\repo\\src\\a'], ['/src/b']], true],
+    [[['C:/elsewhere/a'], ['src/b']], false], // absolute outside the workspace
+    [[['//server/share/a'], ['src/b']], false], // UNC
+    [[['~/a'], ['src/b']], false],
+  ];
+  for (const [lists, expected] of ownership) {
+    if (ownershipIsDisjoint(lists, 'D:\\repo\\') !== expected) {
+      fail(`ownership ${JSON.stringify(lists)} should be ${expected ? 'ok' : 'rejected'}`);
+    }
+  }
+  if (ownershipIsDisjoint([['D:/repo/src/a'], ['src/b']])) fail('absolute paths need a workspace to be judged');
+
+  // 10d. A plan with overlapping ownership is refused: the task runs as ONE
+  // worker, no parts are created.
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding: parallel-overlap build the two-module widget with a shared index' }));
+  await waitFor(
+    'overlapping split plan rejected',
+    (e) => e.type === 'activity' && e.entry.message.startsWith('split plan rejected (parts did not own non-empty, disjoint'),
+  );
+  const overlapDone = await waitFor(
+    'overlap task done as a single worker',
+    (e) => e.type === 'task.updated' && e.task.detail.startsWith('coding: parallel-overlap') && e.task.status === 'done',
+    15000,
+  );
+  if (overlapDone.type !== 'task.updated') fail('unreachable');
+  if (events.some((e) => e.type === 'task.updated' && e.task.title.startsWith('[part') && e.task.detail.includes('parallel-overlap'))) {
+    fail('a rejected plan still created parts');
+  }
+  console.log('split validation ok: gate, ownership rules, overlapping plan ran unsplit');
+
+  // 10e. Priority + 3-way split: with every slot busy, freed slots go to the
+  // split's waiting parts before a task queued after them.
+  const coding = events.findLast((e) => e.type === 'team.updated' && e.team.id === 'coding');
+  const codingCap = coding?.type === 'team.updated' ? coding.team.maxConcurrentWorkers : 0;
+  if (codingCap !== 3) fail(`priority scenario expects a coding cap of 3, got ${codingCap}`);
+  // Start from an idle coding team: one slow holder + the 3-way split fill
+  // all 3 slots, so part 3 waits in the priority line behind the holder.
+  await waitIdle('coding team idle before the priority scenario', 'coding');
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding slow-test holder' }));
+  await waitFor(
+    'holder running',
+    (e) => e.type === 'task.updated' && e.task.detail === 'coding slow-test holder' && e.task.status === 'in_flight',
+  );
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding: parallel-wide slow-test build the three-module widget and its shared wiring' }));
+  await waitFor(
+    'wide split planned',
+    (e) => e.type === 'activity' && e.entry.message.startsWith('split into 3 parallel parts'),
+  );
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding late-queued item' }));
+  await waitFor(
+    'late task queued behind the split',
+    (e) => e.type === 'task.updated' && e.task.detail === 'coding late-queued item' && e.task.status === 'queued',
+  );
+  await waitFor(
+    'late task done',
+    (e) => e.type === 'task.updated' && e.task.detail === 'coding late-queued item' && e.task.status === 'done',
+    20000,
+  );
+  const firstRun = (test: (title: string, detail: string) => boolean) =>
+    events.findIndex((e) => e.type === 'task.updated' && e.task.status === 'in_flight' && test(e.task.title, e.task.detail));
+  const lateStart = firstRun((_title, detail) => detail === 'coding late-queued item');
+  for (const k of [2, 3]) {
+    const partStart = firstRun((title) => title.startsWith(`[part ${k}/3]`));
+    if (partStart === -1 || partStart > lateStart) fail(`[part ${k}/3] should start before the later-queued task`);
+  }
+  await waitFor(
+    'wide split integrated and done',
+    (e) =>
+      e.type === 'task.updated' &&
+      e.task.detail.startsWith('coding: parallel-wide') &&
+      !e.task.title.startsWith('[') &&
+      e.task.status === 'done',
+    20000,
+  );
+  console.log('split priority ok: 3-way split parts got freed slots before a later-queued task');
+  // Let the QA follow-ups these scenarios queued drain, so later timings hold.
+  await waitIdle('all teams idle after the split scenarios');
 
   // 11. File channel: a sent file comes back as a file.shared event.
   ws.send(
@@ -708,6 +904,100 @@ try {
     );
   }
   console.log('task controls ok: pause held, resume drained, killall stopped everything');
+
+  // 22b. The same controls mid-split (3 slow parallel parts). Stop and
+  // killall halt the parent and every piece with no integration run and no
+  // leaked worker slot; pause lets running parts finish but holds the
+  // integration until resume.
+  const latestTasks = () => {
+    const latest = new Map<string, Extract<HubEvent, { type: 'task.updated' }>['task']>();
+    for (const e of events) if (e.type === 'task.updated') latest.set(e.task.id, e.task);
+    return latest;
+  };
+  const integrationRan = (parentId: string) =>
+    events.some((e) => e.type === 'activity' && e.entry.taskId === parentId && e.entry.message.startsWith('mock: model'));
+  const startSlowSplit = async (marker: string, fromIdle = true): Promise<string> => {
+    if (fromIdle) await waitIdle(`coding idle before the ${marker} split`, 'coding');
+    ws.send(encodeCommand({ type: 'task.submit', text: `coding: parallel-wide slow-test ${marker} build the three-module widget and its shared wiring` }));
+    const parent = await waitFor(
+      `${marker} split planned`,
+      (e) => e.type === 'task.updated' && e.task.detail.includes(`slow-test ${marker}`) && !e.task.parentTaskId && e.task.status === 'in_flight',
+      15000,
+    );
+    if (parent.type !== 'task.updated') fail('unreachable');
+    const id = parent.task.id;
+    for (const k of [1, 2, 3]) {
+      await waitFor(
+        `${marker} part ${k} running`,
+        (e) => e.type === 'task.updated' && e.task.parentTaskId === id && e.task.title.startsWith(`[part ${k}/3]`) && e.task.status === 'in_flight',
+        15000,
+      );
+    }
+    return id;
+  };
+  const expectHaltedSplit = async (marker: string, parentId: string): Promise<void> => {
+    await waitFor(`${marker} parent stopped`, (e) => e.type === 'task.updated' && e.task.id === parentId && e.task.status === 'paused');
+    await waitIdle(`coding idle after the ${marker} split`, 'coding');
+    const pieces = [...latestTasks().values()].filter((task) => task.parentTaskId === parentId);
+    if (pieces.length !== 3 || pieces.some((task) => task.status !== 'paused')) {
+      fail(`${marker}: every piece should stop with the parent, got ${pieces.map((task) => `${task.title} [${task.status}]`).join('; ')}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    if (integrationRan(parentId)) fail(`${marker}: the integration ran after the split was halted`);
+  };
+
+  const stopId = await startSlowSplit('stop-split');
+  ws.send(encodeCommand({ type: 'task.stop', taskId: stopId }));
+  await expectHaltedSplit('stop-split', stopId);
+
+  const pauseId = await startSlowSplit('pause-split');
+  ws.send(encodeCommand({ type: 'tasks.control', action: 'pause' }));
+  for (const k of [1, 2, 3]) {
+    await waitFor(
+      `pause-split part ${k} finished while paused`,
+      (e) => e.type === 'task.updated' && e.task.parentTaskId === pauseId && e.task.title.startsWith(`[part ${k}/3]`) && e.task.status === 'done',
+      15000,
+    );
+  }
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  if (integrationRan(pauseId)) fail('pause-split: the integration started while paused');
+  ws.send(encodeCommand({ type: 'tasks.control', action: 'resume' }));
+  const pausedDone = await waitFor(
+    'pause-split integrated after resume',
+    (e) => e.type === 'task.updated' && e.task.id === pauseId && e.task.status === 'done',
+    15000,
+  );
+  if (pausedDone.type !== 'task.updated' || pausedDone.task.tokensUsed !== 42 * 4) fail('pause-split parent should total 3 parts + integration');
+
+  const killId = await startSlowSplit('kill-split');
+  ws.send(encodeCommand({ type: 'tasks.control', action: 'killall' }));
+  await expectHaltedSplit('kill-split', killId);
+
+  // No slot leaked by any of that: with coding's cap at 4 (raised in 13), a
+  // slow holder + a fresh 3-way split fill every slot at once — each part
+  // starts before anything finishes.
+  const coding4 = events.findLast((e) => e.type === 'team.updated' && e.team.id === 'coding');
+  if (coding4?.type !== 'team.updated' || coding4.team.maxConcurrentWorkers !== 4) fail('leak check expects a coding cap of 4');
+  await waitIdle('coding idle before the leak check', 'coding');
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding slow-test leak-holder' }));
+  const leakHolder = await waitFor(
+    'leak holder running',
+    (e) => e.type === 'task.updated' && e.task.detail === 'coding slow-test leak-holder' && e.task.status === 'in_flight',
+  );
+  if (leakHolder.type !== 'task.updated') fail('unreachable');
+  const leakId = await startSlowSplit('leak-check', false);
+  const leakPart3 = events.findIndex(
+    (e) => e.type === 'task.updated' && e.task.parentTaskId === leakId && e.task.title.startsWith('[part 3/3]') && e.task.status === 'in_flight',
+  );
+  const firstLeakDone = events.findIndex(
+    (e) =>
+      e.type === 'task.updated' &&
+      (e.task.id === leakHolder.task.id || e.task.parentTaskId === leakId) &&
+      e.task.status === 'done',
+  );
+  if (firstLeakDone !== -1 && firstLeakDone < leakPart3) fail('a worker slot leaked: part 3 waited for another worker to finish');
+  await waitFor('leak-check split done', (e) => e.type === 'task.updated' && e.task.id === leakId && e.task.status === 'done', 15000);
+  console.log('split controls ok: stop / pause-resume / killall mid-split, no leaked slots');
 
   // 23. Model + effort choices: an override layer over the team defaults.
   // Fields resolve independently (per-team > all-role > default), the engine

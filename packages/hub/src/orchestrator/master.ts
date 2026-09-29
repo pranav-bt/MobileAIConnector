@@ -203,6 +203,150 @@ export async function coordinateFollowUp(
   }
 }
 
+// Lead's split pass for build teams: a big task fans out into parts that
+// workers build IN PARALLEL on disjoint files, under one shared contract,
+// then a single integration worker merges, builds, tests and commits. The
+// lead is the sync point — parts never coordinate with each other directly.
+// Parts share one working tree, so a plan is accepted only when every part
+// owns a non-empty list of paths and no two parts' paths overlap.
+export interface ParallelPart {
+  title: string;
+  instruction: string;
+  owns: string[];
+}
+
+export interface ParallelPlan {
+  contract: string;
+  scaffold: string | null;
+  parts: ParallelPart[];
+}
+
+function slashPath(raw: string): string {
+  return raw.trim().replace(/^[`'"]+|[`'"]+$/g, '').replace(/\\/g, '/').toLowerCase();
+}
+
+// Workspace-relative, forward slashes, lowercase (Windows paths are
+// case-insensitive), no leading "/" or "./", no trailing "/", "/*" or "/**".
+// Absolute paths (drive or UNC) are made relative when they sit inside
+// `workspaceDir`, so "/src/a", "src/a" and "D:/repo/src/a" all compare equal.
+// Null for anything ownership can't be reasoned about: empty, the root, "..",
+// "~", an absolute path outside the workspace, or a glob anywhere but that
+// trailing position.
+export function normalizeOwnedPath(raw: string, workspaceDir?: string): string | null {
+  let path = slashPath(raw);
+  if (/^([a-z]:|\/\/)/.test(path)) {
+    const root = workspaceDir ? slashPath(workspaceDir).replace(/\/+$/, '') : '';
+    if (!root || !(path === root || path.startsWith(`${root}/`))) return null;
+    path = path.slice(root.length);
+  }
+  path = path.replace(/\/{2,}/g, '/').replace(/^(\.?\/)+/, '').replace(/(\/\*\*?)+$/, '').replace(/\/+$/, '');
+  if (!path || path === '.' || path.startsWith('~') || path.includes(':')) return null;
+  if (/[*?[\]{}]/.test(path) || path.split('/').includes('..')) return null;
+  return path;
+}
+
+function pathsOverlap(a: string, b: string): boolean {
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
+// True when every part owns >=1 valid path and no path of one part equals or
+// nests inside a path of another part.
+export function ownershipIsDisjoint(ownsLists: string[][], workspaceDir?: string): boolean {
+  const normalized: string[][] = [];
+  for (const owns of ownsLists) {
+    const paths = owns.map((raw) => normalizeOwnedPath(raw, workspaceDir));
+    if (paths.length === 0 || paths.some((path) => path === null)) return false;
+    normalized.push(paths as string[]);
+  }
+  for (let i = 0; i < normalized.length; i++) {
+    for (let j = i + 1; j < normalized.length; j++) {
+      if (normalized[i]!.some((a) => normalized[j]!.some((b) => pathsOverlap(a, b)))) return false;
+    }
+  }
+  return true;
+}
+
+function parseOwns(raw: unknown): string[] {
+  const entries = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(/[,;\n]+/) : [];
+  return entries.filter((entry): entry is string => typeof entry === 'string').map((entry) => entry.trim()).filter(Boolean);
+}
+
+// `rejected` is set when the lead asked for a split but the plan failed
+// validation (the task then runs as one worker).
+export async function planParallelSplit(
+  engine: OrchestratorEngine,
+  team: Team,
+  taskTitle: string,
+  taskDetail: string,
+  maxParts: number,
+  model: ModelSpec,
+  workspaceDir?: string,
+): Promise<{ plan: ParallelPlan | null; tokens: number; rejected: string | null }> {
+  const prompt = [
+    `You are the lead of the ${team.name} (charter: ${team.charter}).`,
+    `You can run up to ${maxParts} workers at the same time. Decide whether this task should be split`,
+    'across parallel workers.',
+    '',
+    `Task: ${taskTitle}`,
+    `Details: ${taskDetail.slice(0, 4000)}`,
+    '',
+    'Split ONLY when the task is big and has 2 or more substantial parts that can be built at the SAME',
+    'time in DISJOINT files or directories (e.g. separate subsystems or modules). Do NOT split small',
+    'tasks, bug fixes, investigations, single-file changes, or work whose parts must happen in order.',
+    'All parts edit the SAME working tree at once, so each part must own an explicit list of',
+    'workspace-relative files/directories (no globs), and no path may equal or sit inside another',
+    "part's path. Shared files (package manifests, shared types, entry points) belong to the scaffold",
+    'or the integration step, never to a part.',
+    'When you split, you are the sync point: write the shared contract every part codes against',
+    '(folder layout, module names, public interfaces, data shapes, event names). If the parts need a',
+    'common skeleton first (repo init, folder structure, shared types), describe it as the scaffold —',
+    'one worker builds it before the parts start. An integration worker merges, tests and commits after.',
+    '',
+    'Reply with ONLY JSON. Not worth splitting: {"split": false}',
+    `Otherwise: {"split": true, "contract": "<shared contract>", "scaffold": "<skeleton to build first, or empty>", "parts": [{"title": "<short title>", "instruction": "<what to build>", "owns": ["<file or dir>", "..."]}]} with 2-${maxParts} parts.`,
+  ].join('\n');
+  let tokens = 0;
+  try {
+    const result = await engine.complete({ prompt, model });
+    tokens = result.tokens;
+    const jsonMatch = result.text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return { plan: null, tokens, rejected: null };
+    const parsed = JSON.parse(jsonMatch[0]) as { split?: unknown; contract?: unknown; scaffold?: unknown; parts?: unknown };
+    if (parsed.split !== true) return { plan: null, tokens, rejected: null };
+    // The lead asked for a split: any malformed part rejects the whole plan
+    // (dropping one would silently lose its work).
+    if (!Array.isArray(parsed.parts) || parsed.parts.length < 2 || parsed.parts.length > maxParts) {
+      return { plan: null, tokens, rejected: `a split needs 2-${maxParts} parts` };
+    }
+    const parts: ParallelPart[] = [];
+    for (const raw of parsed.parts) {
+      const part = (typeof raw === 'object' && raw !== null ? raw : {}) as { title?: unknown; instruction?: unknown; owns?: unknown };
+      if (typeof part.instruction !== 'string' || !part.instruction.trim()) {
+        return { plan: null, tokens, rejected: 'a part had no instruction' };
+      }
+      parts.push({
+        title: typeof part.title === 'string' && part.title.trim() ? part.title.trim().slice(0, 40) : `Part ${parts.length + 1}`,
+        instruction: part.instruction.trim(),
+        owns: parseOwns(part.owns),
+      });
+    }
+    if (!ownershipIsDisjoint(parts.map((part) => part.owns), workspaceDir)) {
+      return { plan: null, tokens, rejected: 'parts did not own non-empty, disjoint file sets' };
+    }
+    return {
+      plan: {
+        contract: typeof parsed.contract === 'string' ? parsed.contract.trim() : '',
+        scaffold: typeof parsed.scaffold === 'string' && parsed.scaffold.trim() ? parsed.scaffold.trim() : null,
+        parts,
+      },
+      tokens,
+      rejected: null,
+    };
+  } catch {
+    return { plan: null, tokens, rejected: null }; // splitting is an optimization — on any doubt, run as one worker
+  }
+}
+
 // Master's read of a QA report: does it need a remediation round?
 export async function evaluateQaReport(
   engine: OrchestratorEngine,

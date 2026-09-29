@@ -6,6 +6,9 @@ import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './
 // routine and raises a card for the consequential). Read is included ONLY so
 // the policy can catch credential-like paths — normal reads pass silently.
 const GATED_TOOLS = new Set(['Bash', 'Write', 'Edit', 'NotebookEdit', 'WebFetch', 'Read']);
+// Sub-agent fan-out per worker, unless the orchestrator says otherwise.
+const DEFAULT_MAX_SUBAGENTS = 3;
+const SUBAGENT_TOOLS = ['Agent', 'Task']; // current name + legacy alias
 
 function summarizeToolCall(toolName: string, input: Record<string, unknown>): string {
   if (toolName === 'Bash' && typeof input['command'] === 'string') return String(input['command']);
@@ -70,10 +73,12 @@ export class ClaudeEngine implements OrchestratorEngine {
     model: ModelSpec;
     cwd: string;
     extraDirs?: string[];
+    maxSubagents?: number;
     callbacks: WorkerRunCallbacks;
     signal?: AbortSignal;
   }): Promise<WorkerRunResult> {
     const { callbacks } = args;
+    const maxSubagents = args.maxSubagents ?? DEFAULT_MAX_SUBAGENTS;
     let tokens = 0;
     let synopsis = '';
 
@@ -101,13 +106,20 @@ export class ClaudeEngine implements OrchestratorEngine {
         cwd: args.cwd,
         additionalDirectories: args.extraDirs ?? [],
         ...(mcpServers ? { mcpServers } : {}),
+        // No sub-agents at all: the tool is removed, not just discouraged.
+        ...(maxSubagents === 0 ? { disallowedTools: SUBAGENT_TOOLS } : {}),
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',
           append:
             `You are a worker agent on a team with this charter: ${args.team.charter}. Stay within that charter for HOW you work. ` +
             'A task the master routed to your team is always in scope, whatever its topic — including personal or everyday requests from the owner. ' +
-            'Never refuse a task over its topic; if it seems like a mismatch for your team, do it anyway and note the mismatch in your report.',
+            'Never refuse a task over its topic; if it seems like a mismatch for your team, do it anyway and note the mismatch in your report.' +
+            (maxSubagents > 0
+              ? ' Only when your task has substantial independent pieces (separate modules, separate searches or investigations), ' +
+                `run them concurrently in parallel subagents — at most ${maxSubagents} at a time, and none for small or sequential work — ` +
+                'then integrate and verify their results yourself. Subagents never spawn subagents of their own.'
+              : ''),
         },
         canUseTool: async (toolName, input) => {
           if (!GATED_TOOLS.has(toolName)) {

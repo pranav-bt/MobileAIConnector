@@ -1,4 +1,4 @@
-import type { HubState, Task } from '@agent-hq/shared';
+import { isInternalTask, type HubState, type Task } from '@agent-hq/shared';
 import { TASK_STATUS_LABELS, formatTokens } from '../status';
 
 function duration(task: Task): string {
@@ -10,7 +10,7 @@ function duration(task: Task): string {
 
 export function HistoryPage(props: { state: HubState }): JSX.Element {
   const finished = Object.values(props.state.tasks)
-    .filter((task) => ['done', 'failed', 'paused'].includes(task.status))
+    .filter((task) => ['done', 'failed', 'paused'].includes(task.status) && !isInternalTask(task))
     .sort((a, b) => b.updatedAt - a.updatedAt);
 
   return (

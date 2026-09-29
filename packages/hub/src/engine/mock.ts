@@ -5,6 +5,38 @@ import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './
 // keyword, "installs" trigger a permission request, everything resolves fast.
 export class MockEngine implements OrchestratorEngine {
   async complete(args: { prompt: string; model: ModelSpec }): Promise<{ text: string; tokens: number }> {
+    // Lead split-pass prompts expect {"split": ...}; "parallel-test" in the
+    // task exercises the scaffold -> parallel parts -> integration path,
+    // "parallel-overlap" a plan whose parts share files (must be rejected),
+    // "parallel-wide" a 3-way split with no scaffold.
+    if (args.prompt.includes('"split"')) {
+      const taskLine = args.prompt.match(/^Task: (.*)$/m)?.[1] ?? '';
+      const overlap = taskLine.includes('parallel-overlap');
+      if (taskLine.includes('parallel-wide')) {
+        return {
+          text: JSON.stringify({
+            split: true,
+            contract: 'src/a, src/b, src/c each export start().',
+            scaffold: '',
+            parts: ['a', 'b', 'c'].map((name) => ({ title: `Module ${name}`, instruction: `build module ${name}`, owns: [`src/${name}`] })),
+          }),
+          tokens: 11,
+        };
+      }
+      if (!taskLine.includes('parallel-test') && !overlap) return { text: JSON.stringify({ split: false }), tokens: 5 };
+      return {
+        text: JSON.stringify({
+          split: true,
+          contract: 'src/a and src/b export start(); src/index calls both.',
+          scaffold: overlap ? '' : 'create src/index with the folder layout',
+          parts: [
+            { title: 'Module A', instruction: 'build module A', owns: ['src/a/'] },
+            { title: 'Module B', instruction: 'build module B', owns: overlap ? ['src/a/b.ts'] : ['src/b'] },
+          ],
+        }),
+        tokens: 11,
+      };
+    }
     // Coordination prompts expect {"dispatch": [...]} — checked before the
     // routing branch because their format line also mentions "teamId".
     if (args.prompt.includes('"dispatch"')) {
@@ -96,6 +128,7 @@ export class MockEngine implements OrchestratorEngine {
     model: ModelSpec;
     cwd: string;
     extraDirs?: string[];
+    maxSubagents?: number;
     callbacks: WorkerRunCallbacks;
     signal?: AbortSignal;
   }): Promise<WorkerRunResult> {
@@ -104,6 +137,7 @@ export class MockEngine implements OrchestratorEngine {
     // background-context section (project history can mention "install").
     const taskText = (args.prompt.split('\n---\n')[0] ?? args.prompt).toLowerCase();
     callbacks.onActivity(`mock: model ${args.model.id} · effort ${args.model.effort ?? 'default'}`);
+    if (args.maxSubagents !== undefined) callbacks.onActivity(`mock: subagents capped at ${args.maxSubagents}`);
     callbacks.onActivity('mock: examining the task');
     // "edit-test" exercises the Edit permission path (auto-allowed by policy).
     if (taskText.includes('edit-test')) {

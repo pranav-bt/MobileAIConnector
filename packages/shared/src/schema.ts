@@ -95,8 +95,16 @@ export const TaskSchema = z.object({
   tokensUsed: z.number(),
   createdAt: z.number(),
   updatedAt: z.number(),
+  // Set on internal split pieces ([scaffold]/[part k/n]): the id of the
+  // user-facing task they build. They show while running, but never in
+  // finished lists or project history — the parent's report covers them.
+  parentTaskId: z.string().nullable().optional(),
 });
 export type Task = z.infer<typeof TaskSchema>;
+
+export function isInternalTask(task: Pick<Task, 'parentTaskId'>): boolean {
+  return !!task.parentTaskId;
+}
 
 export const PermissionRequestSchema = z.object({
   id: z.string(),

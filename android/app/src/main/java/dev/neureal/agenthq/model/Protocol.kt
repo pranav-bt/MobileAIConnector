@@ -52,6 +52,8 @@ data class Task(
     val tokensUsed: Double = 0.0,
     val createdAt: Double = 0.0,
     val updatedAt: Double = 0.0,
+    // Set on internal split pieces; finished lists hide them (the parent reports).
+    val parentTaskId: String? = null,
 )
 
 @Serializable

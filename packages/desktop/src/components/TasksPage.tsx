@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { ClientCommand, HubState, Task } from '@agent-hq/shared';
+import { isInternalTask, type ClientCommand, type HubState, type Task } from '@agent-hq/shared';
 import { TASK_STATUS_LABELS, formatTokens } from '../status';
 
 const CURRENT_STATUSES = ['routing', 'intake', 'queued', 'in_flight', 'awaiting_permission', 'review'];
@@ -80,7 +80,7 @@ export function TasksPage(props: {
   const [expanded, setExpanded] = useState<string | null>(null);
   const tasks = Object.values(props.state.tasks).sort((a, b) => b.updatedAt - a.updatedAt);
   const current = tasks.filter((task) => CURRENT_STATUSES.includes(task.status));
-  const recent = tasks.filter((task) => !CURRENT_STATUSES.includes(task.status)).slice(0, 5);
+  const recent = tasks.filter((task) => !CURRENT_STATUSES.includes(task.status) && !isInternalTask(task)).slice(0, 5);
 
   const controlBtn: React.CSSProperties = {
     background: 'transparent',

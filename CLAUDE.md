@@ -72,6 +72,28 @@ npm run typecheck      # tsc across workspaces
   instead — real issues spawn a `[fix]` task back to the source team, capped
   at two rounds before escalating to the owner. Both are depth-capped so
   follow-ups can't cascade.
+- Big build tasks fan out (lead split pass, `planParallelSplit` in
+  master.ts): before a bash-capable team runs a task, its lead may split it
+  into a shared contract + optional `[scaffold]` + 2..min(4, worker cap)
+  `[part k/n]` tasks with disjoint file ownership. Parts run on parallel
+  workers (no git, no repo-wide tests/builds, no sub-agents, no lead review,
+  no QA of their own); then ONE integration worker runs the original task
+  with every part's raw report, builds, tests, commits, and gets the normal
+  review/QA/coordination. Pieces carry `parentTaskId`: they show while
+  running but are hidden from finished lists and project history, and their
+  tokens roll up into the parent. Stopping the parent stops its parts; a
+  global pause holds the integration until resume. Workers outside a split
+  may use at most 3 sub-agents (`maxSubagents` on `runWorker`). A team with a
+  worker cap of 1 never splits. The split check is a quick check (haiku
+  default) and is skipped for short asks and `[QA]`/`[fix…]`/piece titles
+  (`splitWorthChecking`). A plan is refused (task runs unsplit) unless every
+  part owns a non-empty path list and no path equals/nests in another part's
+  (`ownershipIsDisjoint`; paths are normalized against the project
+  workspace, so "/src/a", "src/a" and "D:/repo/src/a" collide, and absolute
+  paths outside it are refused). Split pieces never queue behind later tasks: the
+  planning slot travels scaffold -> part 1 -> integration, and waiting parts
+  sit in a priority line `#drainQueue` serves first. Live check:
+  `npx tsx test/split.live.ts` (packages/hub; separate hub on 4609).
 - Projects are config records too (`data/projects.json`): a workspace dir +
   token ledger. Workers run inside their task's project workspace and see
   only that project's files, that project's recent synopses, and their
