@@ -15,7 +15,7 @@ import {
 } from './master.js';
 import { capturePcScreen, saveIncomingFile, shareFile } from '../files.js';
 import { evaluatePermission } from './policy.js';
-import { delay } from './util.js';
+import { delay, isInside } from './util.js';
 import type { PermissionMode } from '../config.js';
 import type { TeamRegistry } from './teams.js';
 import type { ProjectRegistry } from './projects.js';
@@ -240,7 +240,15 @@ export class Orchestrator implements CommandHandlers {
 
   #patchTask(id: string, patch: Partial<Task>): void {
     const current = this.#bus.state.tasks[id];
-    if (current) this.#publishTask({ ...current, ...patch, updatedAt: now() });
+    if (!current) return;
+    const next: Task = { ...current, ...patch, updatedAt: now() };
+    // A stopped or failed task has nobody working on it: drop its agents so
+    // the office and the Today panel read "paused", not "2 agents". (Done
+    // tasks keep theirs — freelancer remediation resumes that same session.)
+    if (patch.status && ['paused', 'failed'].includes(patch.status) && next.agentIds.length > 0) {
+      next.agentIds = [];
+    }
+    this.#publishTask(next);
   }
 
   #activity(agentId: string, taskId: string | null, message: string): void {
@@ -262,12 +270,15 @@ export class Orchestrator implements CommandHandlers {
     });
   }
 
-  // Workspace roots (minus the one the worker is already inside) become
-  // additional tool directories, so cross-project searches see full trees.
+  // Project isolation: a worker's tools reach its OWN project workspace (its
+  // cwd) and nothing else — never a sibling project's tree. Handing out the
+  // workspace roots here used to give every worker write access to every
+  // other project, which is how a task pinned to one project wrote into
+  // another. The only extras are the hub's phone inbox/outbox, which workers
+  // in every project are told to use by name.
   #extraDirs(cwd: string): string[] {
-    return this.#projects.roots
-      .map((root) => root.path)
-      .filter((path) => existsSync(path) && !cwd.toLowerCase().startsWith(path.toLowerCase()));
+    const extras = [this.#outboxDir, this.#inboxDir].filter(Boolean);
+    return [...new Set(extras)].filter((dir) => existsSync(dir) && !isInside(dir, cwd));
   }
 
   #masterStatus(): void {
@@ -471,10 +482,14 @@ export class Orchestrator implements CommandHandlers {
       if (teamMemory) sections.push('Team notes:', teamMemory);
     }
     if (this.#projects.roots.length > 0) {
+      const workspaceDir =
+        ((task.projectId ? this.#projects.get(task.projectId) : undefined) ?? this.#projects.defaultProject())
+          .workspaceDir || this.#workspaceDir;
       const rootList = this.#projects.roots.map((root) => `${root.path} (${root.label})`).join(' · ');
       sections.push(
-        `File locations policy: you have full READ/SEARCH access to everything under these roots, including ALL subdirectories at any depth — recurse into them when searching: ${rootList}. ` +
-          "Keep all new files inside this project's workspace; brand-new projects or standalone tools belong only under those roots. " +
+        `File locations policy: your file tools are scoped to THIS project's workspace — ${workspaceDir} — including ALL subdirectories at any depth; recurse into them when searching. ` +
+          'Other projects are off limits: never read, write or create files outside this workspace, even when a report or note mentions their paths. ' +
+          `If a task needs a folder that isn't this project, stop and say so in your report — ask the owner to register it (/project add <name> <path>, inside ${rootList}) rather than reaching into it. ` +
           'NEVER kill or restart the Agent HQ hub (port 4517) — you are running INSIDE it and would kill your own task; when hub code changes need a restart, say so in your report and the owner restarts it.',
       );
     }

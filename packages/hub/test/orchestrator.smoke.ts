@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import WebSocket from 'ws';
 import { decodeEvent, encodeCommand, type HubEvent } from '@agent-hq/shared';
 import { startHub } from '../src/index.js';
+import { HubBus } from '../src/bus.js';
+import { startEventLog } from '../src/persist.js';
 import { ownershipIsDisjoint } from '../src/orchestrator/master.js';
 import { splitWorthChecking } from '../src/orchestrator/orchestrator.js';
 
@@ -153,9 +155,20 @@ try {
 
   // 4. Stopping a task whose worker is parked on a permission request.
   ws.send(encodeCommand({ type: 'task.submit', text: 'coding: install another tool (stop-test)' }));
+  const stopTestTask = await waitFor(
+    'stop-test task created',
+    (e) => e.type === 'task.updated' && e.task.detail.includes('(stop-test)'),
+  );
+  if (stopTestTask.type !== 'task.updated') fail('unreachable');
+  // Match on the task: another pending card (e.g. a QA follow-up's install)
+  // would otherwise stop the wrong task and leave this one parked forever.
   const pendingStop = await waitFor(
     'stop-test permission request',
-    (e) => e.type === 'permission.updated' && e.request.status === 'pending' && e.request.id !== pending.request.id,
+    (e) =>
+      e.type === 'permission.updated' &&
+      e.request.status === 'pending' &&
+      e.request.id !== pending.request.id &&
+      e.request.taskId === stopTestTask.task.id,
   );
   if (pendingStop.type !== 'permission.updated') fail('unreachable');
   ws.send(encodeCommand({ type: 'task.stop', taskId: pendingStop.request.taskId }));
@@ -163,11 +176,30 @@ try {
     'stop-test permission expired',
     (e) => e.type === 'permission.updated' && e.request.id === pendingStop.request.id && e.request.status === 'expired',
   );
-  await waitFor(
+  const stopped = await waitFor(
     'stop-test task paused',
     (e) => e.type === 'task.updated' && e.task.id === pendingStop.request.taskId && e.task.status === 'paused',
   );
-  console.log('task.stop ok: permission expired, task paused');
+  if (stopped.type !== 'task.updated') fail('unreachable');
+  // A paused task must let go of its agents, or the Today panel keeps
+  // reporting "2 agents" for work that stopped.
+  if (stopped.task.agentIds.length > 0) {
+    fail(`stopped task still lists agents: ${stopped.task.agentIds.join(', ')}`);
+  }
+  console.log('task.stop ok: permission expired, task paused, agents released');
+  // Task 1's QA follow-up also asks to install; approve it so the QA team
+  // isn't left parked on the card for the rest of the run.
+  const qaInstallTask = await waitFor(
+    'QA follow-up of the install task',
+    (e) => e.type === 'task.updated' && e.task.title.startsWith('[QA] Please install'),
+  );
+  if (qaInstallTask.type !== 'task.updated') fail('unreachable');
+  const qaInstallCard = await waitFor(
+    'QA install permission card',
+    (e) => e.type === 'permission.updated' && e.request.status === 'pending' && e.request.taskId === qaInstallTask.task.id,
+  );
+  if (qaInstallCard.type !== 'permission.updated') fail('unreachable');
+  ws.send(encodeCommand({ type: 'permission.respond', requestId: qaInstallCard.request.id, decision: 'approve', scope: 'once' }));
 
   // 5. Projects: default auto-registered; register, pin with @, remove.
   if (snapshot.snapshot.projects.length < 1) fail('expected the default project in the snapshot');
@@ -191,6 +223,24 @@ try {
   );
   if (pinned.type !== 'task.updated') fail('unreachable');
   console.log('project pinning ok: @sandbox task ran in the sandbox workspace');
+
+  // 5b. Project isolation: a worker's tool scope is its OWN workspace plus
+  // the phone inbox/outbox — never a workspace root, which would hand it
+  // write access to every other project under it.
+  const scopes = events.flatMap((e) =>
+    e.type === 'activity' && e.entry.message.startsWith('mock: workspace ') ? [e.entry.message] : [],
+  );
+  if (scopes.length === 0) fail('no worker workspace scope was reported by the mock engine');
+  const allowedExtras = [join(dataDir, 'outbox'), join(dataDir, 'inbox')];
+  for (const scope of scopes) {
+    const extras = (scope.match(/· extra \[(.*)\]$/)?.[1] ?? '').split('|').filter(Boolean);
+    for (const dir of extras) {
+      if (!allowedExtras.includes(dir)) {
+        fail(`worker was handed a directory outside its project: ${dir} (${scope})`);
+      }
+    }
+  }
+  console.log(`project isolation ok: ${scopes.length} workers scoped to their own workspace + the phone dirs`);
 
   // 6. Scaling subagents and removing teams/projects — each one command.
   ws.send(encodeCommand({ type: 'team.update', teamId: 'coding', maxConcurrentWorkers: 3 }));
@@ -1057,6 +1107,26 @@ try {
   const resetConfig = JSON.parse(readFileSync(join(dataDir, 'config.json'), 'utf8'));
   if (resetConfig.modelOverrides?.worker !== undefined) fail('reset did not clear the persisted overrides');
   console.log('model choices ok: per-field precedence, exact id + effort reach the engine, Haiku effort dropped, persisted, reset restores defaults');
+
+  // 29. Event log: rolls over instead of growing without bound, and appends
+  // off the publish path so a busy run isn't paying for a sync write each
+  // time. Driven directly — 8 MB of real events would be a slow smoke.
+  const logDir = mkdtempSync(join(tmpdir(), 'agent-hq-log-'));
+  writeFileSync(join(logDir, 'events.jsonl'), 'x'.repeat(9 * 1024 * 1024));
+  const logBus = new HubBus();
+  const stopLog = startEventLog(logBus, logDir);
+  logBus.publish({ type: 'activity', entry: { agentId: 'master', taskId: null, message: 'after rotation', at: Date.now() } });
+  // Nothing is written synchronously: the oversized log is still in place.
+  if (readdirSync(logDir).some((name) => /^events-.+\.jsonl$/.test(name))) {
+    fail('event log rotated on the publish path — the write should be deferred');
+  }
+  stopLog();
+  const rolled = readdirSync(logDir).filter((name) => /^events-.+\.jsonl$/.test(name));
+  if (rolled.length !== 1) fail(`expected exactly 1 rolled event log, got ${rolled.length}`);
+  const liveLog = readFileSync(join(logDir, 'events.jsonl'), 'utf8');
+  if (!liveLog.includes('after rotation')) fail('the event after rotation did not reach the fresh log');
+  if (liveLog.length > 4096) fail('the fresh event log kept the rotated content');
+  console.log('event log ok: rotates past 8 MB, keeps the tail, writes off the publish path');
 
   console.log('ORCH SMOKE PASS');
   ws.close();

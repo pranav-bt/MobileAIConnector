@@ -137,6 +137,9 @@ export class MockEngine implements OrchestratorEngine {
     // background-context section (project history can mention "install").
     const taskText = (args.prompt.split('\n---\n')[0] ?? args.prompt).toLowerCase();
     callbacks.onActivity(`mock: model ${args.model.id} · effort ${args.model.effort ?? 'default'}`);
+    // Makes the worker's file scope observable, so the smoke can prove a
+    // worker is handed its own project workspace and nothing else.
+    callbacks.onActivity(`mock: workspace ${args.cwd} · extra [${(args.extraDirs ?? []).join('|')}]`);
     if (args.maxSubagents !== undefined) callbacks.onActivity(`mock: subagents capped at ${args.maxSubagents}`);
     callbacks.onActivity('mock: examining the task');
     // "edit-test" exercises the Edit permission path (auto-allowed by policy).

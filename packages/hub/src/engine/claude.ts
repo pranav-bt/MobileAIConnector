@@ -1,11 +1,19 @@
+import { resolve as resolvePath } from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { ModelSpec } from '@agent-hq/shared';
+import { isInside } from '../orchestrator/util.js';
 import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './types.js';
 
 // Tools whose use flows through the policy (which instantly allows the
 // routine and raises a card for the consequential). Read is included ONLY so
 // the policy can catch credential-like paths — normal reads pass silently.
 const GATED_TOOLS = new Set(['Bash', 'Write', 'Edit', 'NotebookEdit', 'WebFetch', 'Read']);
+
+// File-writing tools: their target must sit inside the worker's own project
+// workspace. The SDK's allowed directories already say so; this is the
+// second lock, so a mis-scoped grant can't silently cross into a sibling
+// project the way one once wrote into a project it was never routed to.
+const WRITING_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit']);
 // Sub-agent fan-out per worker, unless the orchestrator says otherwise.
 const DEFAULT_MAX_SUBAGENTS = 3;
 const SUBAGENT_TOOLS = ['Agent', 'Task']; // current name + legacy alias
@@ -19,6 +27,16 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>): st
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+// The write target, if it falls outside every directory this worker may
+// touch (its project workspace plus the hub's phone inbox/outbox). Returns
+// null when the write is in bounds or carries no path we can read.
+function outsideWorkspace(input: Record<string, unknown>, cwd: string, extraDirs: string[]): string | null {
+  const target = input['file_path'] ?? input['notebook_path'];
+  if (typeof target !== 'string' || !target.trim()) return null;
+  const full = resolvePath(cwd, target);
+  return [cwd, ...extraDirs].some((dir) => isInside(full, dir)) ? null : full;
 }
 
 // Reads SDK stream messages structurally so minor shape evolution between
@@ -122,6 +140,16 @@ export class ClaudeEngine implements OrchestratorEngine {
               : ''),
         },
         canUseTool: async (toolName, input) => {
+          const stray = WRITING_TOOLS.has(toolName) ? outsideWorkspace(input, args.cwd, args.extraDirs ?? []) : null;
+          if (stray) {
+            callbacks.onActivity(`blocked: write outside this project — ${stray}`);
+            return {
+              behavior: 'deny',
+              message:
+                `Refused: ${stray} is outside this task's project workspace (${args.cwd}). ` +
+                'Work only inside your own workspace; if the task needs another folder, say so in your report and ask the owner to register it as a project.',
+            };
+          }
           if (!GATED_TOOLS.has(toolName)) {
             return { behavior: 'allow', updatedInput: input };
           }
