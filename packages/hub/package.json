@@ -10,7 +10,7 @@
     "dev:mock": "tsx src/index.ts --engine mock",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "smoke": "tsx test/routing.smoke.ts && tsx test/smoke.ts &&tsx test/orchestrator.smoke.ts && tsx test/pairing.smoke.ts"
+    "smoke": "tsx test/routing.smoke.ts && tsx test/thread.smoke.ts && tsx test/smoke.ts &&tsx test/orchestrator.smoke.ts && tsx test/pairing.smoke.ts"
   },
   "dependencies": {
     "@agent-hq/shared": "*",

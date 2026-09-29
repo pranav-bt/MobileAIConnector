@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { MODEL_DEFAULTS, isInternalTask, resolveModel, type Agent, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Task, type Team, type Usage } from '@agent-hq/shared';
+import { MODEL_DEFAULTS, isInternalTask, resolveModel, type Agent, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine } from '../engine/types.js';
@@ -303,10 +303,11 @@ export class Orchestrator implements CommandHandlers {
     return [...this.#runningCwds.values()];
   }
 
-  stopTask(taskId: string): void {
+  stopTask(taskId: string, by: 'owner' | 'killall' = 'owner'): void {
     const task = this.#bus.state.tasks[taskId];
     if (!task || ['done', 'failed', 'paused'].includes(task.status)) return;
     this.#stopping.add(taskId);
+    this.#patchTask(taskId, { stoppedBy: by }); // decides whether the ask stays in the thread
 
     // Unblock a worker parked on a permission (as a denial), expire the card.
     for (const request of Object.values(this.#bus.state.permissions)) {
@@ -328,7 +329,7 @@ export class Orchestrator implements CommandHandlers {
     // A split task's parallel parts stop with it; pieces waiting for a slot
     // give up their place in line.
     this.#cancelSlotWaiters(taskId);
-    for (const childId of this.#splitChildren.get(taskId) ?? []) this.stopTask(childId);
+    for (const childId of this.#splitChildren.get(taskId) ?? []) this.stopTask(childId, by);
     // If the task was queued, drop it from its team's queue.
     if (task.teamId) {
       const queue = this.#queues.get(task.teamId);
@@ -339,11 +340,14 @@ export class Orchestrator implements CommandHandlers {
 
   // The owner's conversation so far: the project of their latest ask (what an
   // unnamed follow-up inherits) and their last few asks as routing context.
-  // Stopped tasks don't count — a misrouted task the owner killed must not
-  // drag the next ask into the same wrong project.
+  // A task the owner stopped doesn't count — a misrouted task they killed must
+  // not drag the next ask into the same wrong project. KILL ALL and a hub
+  // restart are not verdicts on the project, so those asks keep the thread.
   #routingThread(excludeTaskId: string): RoutingThread {
+    const counts = (task: Task) =>
+      task.status !== 'paused' || task.stoppedBy === 'killall' || task.stoppedBy === 'restart';
     const asks = Object.values(this.#bus.state.tasks)
-      .filter((task) => task.ownerAsk && task.projectId && task.id !== excludeTaskId && task.status !== 'paused')
+      .filter((task) => task.ownerAsk && task.projectId && task.id !== excludeTaskId && counts(task))
       .sort((a, b) => a.createdAt - b.createdAt);
     return {
       projectId: asks[asks.length - 1]?.projectId ?? null,
@@ -356,16 +360,48 @@ export class Orchestrator implements CommandHandlers {
     let text = rawText.trim();
     let forcedProjectId: string | null = null;
     const atMatch = text.match(/^@(\S+)\s+([\s\S]+)$/);
+    let unknownPin: string | null = null;
     if (atMatch && atMatch[1] && atMatch[2]) {
       const forced = this.#projects.find(atMatch[1]);
       if (forced) {
         forcedProjectId = forced.id;
         text = atMatch[2].trim();
+      } else {
+        unknownPin = atMatch[1];
       }
     }
 
     this.#taskCounter += 1;
     const taskId = `t-${now().toString(36)}-${this.#taskCounter}`;
+
+    // A pin to a project that isn't registered must not quietly run somewhere
+    // else: nothing runs, and the owner is told what to do instead.
+    if (unknownPin) {
+      const known = this.#projects
+        .all()
+        .map((project) => `@${project.id}`)
+        .join(', ');
+      this.#publishTask({
+        id: taskId,
+        title: text.slice(0, 60),
+        detail: text,
+        projectId: null,
+        teamId: null,
+        ownerAsk: null, // never joins the thread
+        status: 'failed',
+        progressPct: 0,
+        agentIds: [],
+        synopsis:
+          `Not run: no project "@${unknownPin}" is registered, so there is nowhere safe to run this. ` +
+          `Register it with /project add ${unknownPin} <path>, or resend with one of: ${known}.`,
+        tokensUsed: 0,
+        createdAt: now(),
+        updatedAt: now(),
+      });
+      this.#activity('master', taskId, `refused "@${unknownPin}" — no such project is registered (known: ${known})`);
+      return;
+    }
+
     this.#publishTask({
       id: taskId,
       title: text.slice(0, 60),
@@ -386,6 +422,7 @@ export class Orchestrator implements CommandHandlers {
     this.#patchAgent('master', { status: 'working', activity: `routing: ${text.slice(0, 50)}` });
 
     const masterModel = this.#masterModel();
+    const thread = this.#routingThread(taskId);
     const decision = await routeTask(
       this.#engine,
       this.#registry.all(),
@@ -394,7 +431,7 @@ export class Orchestrator implements CommandHandlers {
       text,
       forcedProjectId,
       masterModel,
-      this.#routingThread(taskId),
+      thread,
     );
     this.#recordTokens(masterModel.tier, decision.tokens);
     this.#routingCount -= 1;
@@ -406,19 +443,48 @@ export class Orchestrator implements CommandHandlers {
       return;
     }
 
-    const project = this.#projects.get(decision.projectId) ?? this.#projects.defaultProject();
+    let project = this.#projects.get(decision.projectId) ?? this.#projects.defaultProject();
+    let basis: string = {
+      pinned: '@pin',
+      named: 'named in your ask',
+      thread: 'continues your thread',
+      default: 'no thread yet — default project',
+    }[decision.projectBasis];
+
+    // Naming a project in passing ("make PancakeStack look like CastleWars")
+    // must not silently hand another repo to a worker with write access:
+    // leaving the thread's project takes the owner's OK. Denied keeps it home.
+    const threadProject = thread.projectId ? this.#projects.get(thread.projectId) : undefined;
+    if (decision.projectBasis === 'named' && threadProject && project.id !== threadProject.id) {
+      this.#patchTask(taskId, { teamId: team.id, title: decision.title });
+      const switchOk = (await this.#confirmProjectSwitch(taskId, team, project, threadProject)) === 'approve';
+      if (this.#halted(taskId)) {
+        this.#stopping.delete(taskId);
+        this.#masterStatus();
+        return;
+      }
+      if (!switchOk) project = threadProject;
+      basis = switchOk ? `you approved leaving ${threadProject.name}` : 'kept in your thread — switch declined';
+    }
+    if (this.#halted(taskId)) {
+      // Stopped while routing: don't let the chain/queue below revive it.
+      this.#stopping.delete(taskId);
+      this.#masterStatus();
+      return;
+    }
 
     if (decision.steps) {
+      this.#activity('master', taskId, `project: ${project.name} (${basis})`);
       void this.#runChain(taskId, decision.steps, project.id, decision.title);
       this.#masterStatus();
       return;
     }
 
-    this.#patchTask(taskId, { teamId: team.id, projectId: project.id, title: decision.title });
+    this.#patchTask(taskId, { teamId: team.id, projectId: project.id, title: decision.title, status: 'queued' });
     this.#activity(
       'master',
       taskId,
-      `routed "${decision.title}" → ${team.name} · ${project.name}${decision.fallback ? ' (keyword fallback)' : ''}`,
+      `routed "${decision.title}" → ${team.name} · ${project.name} (${basis})${decision.fallback ? ' (keyword fallback)' : ''}`,
     );
 
     this.#startOrQueue(taskId, team, true);
@@ -1290,6 +1356,35 @@ export class Orchestrator implements CommandHandlers {
     return new Promise((resolve) => this.#pendingResolvers.set(requestId, resolve));
   }
 
+  // The master's card for an ask that names a project other than the one the
+  // conversation is in. No worker exists yet; intake waits on the answer.
+  #confirmProjectSwitch(taskId: string, team: Team, target: Project, current: Project): Promise<'approve' | 'deny'> {
+    const requestId = `route-${taskId}`;
+    this.#bus.publish({
+      type: 'permission.updated',
+      request: {
+        id: requestId,
+        taskId,
+        agentId: 'master',
+        teamId: team.id,
+        command: `Run this in ${target.name} instead of ${current.name}?`,
+        flags: ['leaves your current project'],
+        reason:
+          `Your ask names ${target.name}, but your conversation is in ${current.name}. ` +
+          `Approve to run it in ${target.name} (its workers can write there); deny keeps it in ${current.name}. ` +
+          `Prefix @${target.id} to skip this check.`,
+        status: 'pending',
+        scope: 'once',
+        requestedAt: now(),
+        resolvedAt: null,
+      },
+    });
+    this.#patchAgent('master', { status: 'waiting_permission', activity: `asking before moving to ${target.name}` });
+    this.#patchTask(taskId, { status: 'awaiting_permission' });
+    this.#activity('master', taskId, `your ask names ${target.name} but the thread is ${current.name} — asking first`);
+    return new Promise((resolve) => this.#pendingResolvers.set(requestId, resolve));
+  }
+
   respondPermission(requestId: string, decision: 'approve' | 'deny'): void {
     const request = this.#bus.state.permissions[requestId];
     if (!request || request.status !== 'pending') return;
@@ -1297,6 +1392,14 @@ export class Orchestrator implements CommandHandlers {
       type: 'permission.updated',
       request: { ...request, status: decision === 'approve' ? 'approved' : 'denied', resolvedAt: now() },
     });
+    // Master's project-switch card: intake is waiting and sets the task's
+    // status and project itself.
+    if (requestId.startsWith('route-')) {
+      const resolve = this.#pendingResolvers.get(requestId);
+      this.#pendingResolvers.delete(requestId);
+      resolve?.(decision);
+      return;
+    }
     // Master's scale-up ask: no worker is waiting on this — approving raises
     // the team's worker cap by one and drains its queue.
     if (requestId.startsWith('scale-') && request.teamId) {
@@ -1473,10 +1576,21 @@ export class Orchestrator implements CommandHandlers {
     const active = Object.values(this.#bus.state.tasks).filter(
       (task) => !['done', 'failed', 'paused'].includes(task.status),
     );
-    for (const task of active) this.stopTask(task.id);
+    for (const task of active) this.stopTask(task.id, 'killall');
     this.#queues.clear();
     this.#freelancers?.killAll?.();
-    this.#activity('master', null, `KILL ALL — stopped ${active.length} task(s); queues cleared`);
+    // The thread survives a kill (it isn't a verdict on the project) — say
+    // where the next unnamed ask will go so nothing lands somewhere surprising.
+    const threadId = this.#routingThread('').projectId;
+    const threadName = threadId ? (this.#projects.get(threadId)?.name ?? threadId) : null;
+    this.#activity(
+      'master',
+      null,
+      `KILL ALL — stopped ${active.length} task(s); queues cleared. ` +
+        (threadName
+          ? `Your next unnamed ask still continues in ${threadName} (prefix @project to change).`
+          : 'No conversation thread yet — the next unnamed ask goes to the default project.'),
+    );
   }
 
   // The freelancer manager is created alongside the hub and attached here so

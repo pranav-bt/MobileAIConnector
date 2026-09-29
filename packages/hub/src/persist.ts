@@ -162,7 +162,13 @@ export function loadPriorState(dataDir: string): { tasks: Task[]; usage: Usage }
     const snapshot: Snapshot = parsed.data;
     const tasks = snapshot.tasks.map((task): Task => {
       if (['done', 'failed', 'paused'].includes(task.status)) return task;
-      return { ...task, status: 'paused', synopsis: task.synopsis ?? '(interrupted by a hub restart)', agentIds: [] };
+      return {
+        ...task,
+        status: 'paused',
+        stoppedBy: 'restart',
+        synopsis: task.synopsis ?? '(interrupted by a hub restart)',
+        agentIds: [],
+      };
     });
     return { tasks, usage: snapshot.usage };
   } catch {

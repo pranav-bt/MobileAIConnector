@@ -112,8 +112,14 @@ npm run typecheck      # tsc across workspaces
   whole words; the model may pick only among those + the thread's) > the
   thread's project (latest non-stopped task carrying `ownerAsk`) > default.
   When nothing is named the prompt shows only that one project, and a model
-  title naming any other project is replaced by the owner's words.
-  Regression: `npx tsx test/routing.smoke.ts` (part of `npm run smoke`).
+  title naming any other project is replaced by the owner's words. Leaving
+  the thread's project because a name was mentioned takes a master card
+  (`route-<taskId>`; deny keeps it in the thread, an @pin skips it). An
+  @pin to an unregistered project fails the task loudly and runs nothing.
+  Only an ask the owner stopped leaves the thread; KILL ALL and a restart
+  keep it (`stoppedBy` on the task), and every routed line says why it went
+  where it did. Regression: `test/routing.smoke.ts` + `test/thread.smoke.ts`
+  (both part of `npm run smoke`).
 - Composer slash-commands (parsed client-side, deterministic): /team add
   <name>: <charter> · /team workers <team> <n> · /team remove <team> ·
   /project add <name> <path> [description] · /project remove <project>.

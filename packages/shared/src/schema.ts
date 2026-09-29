@@ -103,6 +103,9 @@ export const TaskSchema = z.object({
   // QA/fix/follow-up/split tasks). Routing reads these to follow the
   // conversation thread instead of guessing a project from topic words.
   ownerAsk: z.string().nullable().optional(),
+  // Why a paused task stopped. Only 'owner' (stopping that one task) drops an
+  // ask from the thread; KILL ALL and a hub restart keep the conversation.
+  stoppedBy: z.enum(['owner', 'killall', 'restart']).nullable().optional(),
 });
 export type Task = z.infer<typeof TaskSchema>;
 

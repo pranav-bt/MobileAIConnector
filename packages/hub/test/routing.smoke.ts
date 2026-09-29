@@ -53,10 +53,12 @@ if (inherited.projectId !== 'pancakestack') fail(`unnamed ask went to ${inherite
 if (/castle/i.test(inherited.title)) fail(`title still names CastleWars: ${inherited.title}`);
 if (/castlewars/i.test(prompts.at(-1)!)) fail('the routing prompt offered CastleWars for an ask that never named it');
 if (!prompts.at(-1)!.includes('build the map and assets')) fail('the routing prompt is missing the recent conversation');
+if (inherited.projectBasis !== 'thread') fail(`unnamed ask basis is ${inherited.projectBasis}, not thread`);
 
 // 2. No thread yet → the default project, never the model's guess.
 const fresh = await routeTask(greedy(castleReply), teams, projects, 'mobileaiconnector', ask, null);
 if (fresh.projectId !== 'mobileaiconnector') fail(`threadless unnamed ask went to ${fresh.projectId}`);
+if (fresh.projectBasis !== 'default') fail(`threadless basis is ${fresh.projectBasis}, not default`);
 
 // 3. Naming the project (any spacing) lets the model pick it.
 const named = await routeTask(
@@ -71,10 +73,24 @@ const named = await routeTask(
 );
 if (named.projectId !== 'castlewars') fail(`named project not honored: ${named.projectId}`);
 if (!/castlewars/i.test(named.title)) fail('a title for a named project should survive');
+// 'named' is the basis the orchestrator gates behind a project-switch card.
+if (named.projectBasis !== 'named') fail(`named project basis is ${named.projectBasis}, not named`);
+const namedHome = await routeTask(
+  greedy({ ...castleReply, projectId: 'pancakestack', title: 'Tune PancakeStack drops' }),
+  teams,
+  projects,
+  'mobileaiconnector',
+  'tune the pancakestack drop rate',
+  null,
+  undefined,
+  thread,
+);
+if (namedHome.projectBasis !== 'thread') fail("naming the thread's own project must not count as leaving it");
 
 // 4. @project always wins, even over a named one.
 const pinned = await routeTask(greedy(castleReply), teams, projects, 'mobileaiconnector', 'fix castle wars', 'pancakestack');
 if (pinned.projectId !== 'pancakestack') fail(`@project pin lost to the model: ${pinned.projectId}`);
+if (pinned.projectBasis !== 'pinned') fail(`pin basis is ${pinned.projectBasis}, not pinned`);
 
 // 5. The routing call failing still inherits, never falls to a guess.
 const broken = {
@@ -84,6 +100,7 @@ const broken = {
 } as unknown as OrchestratorEngine;
 const fallback = await routeTask(broken, teams, projects, 'mobileaiconnector', ask, null, undefined, thread);
 if (fallback.projectId !== 'pancakestack' || !fallback.fallback) fail('keyword fallback did not inherit the thread project');
+if (fallback.projectBasis !== 'thread') fail(`fallback basis is ${fallback.projectBasis}, not thread`);
 
 // 6. Name matching: spacing-insensitive, but whole words only.
 const hits = (text: string) => namedProjects(projects, text).map((p) => p.id);

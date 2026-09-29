@@ -12,6 +12,8 @@ export interface PlanStep {
   instruction: string;
 }
 
+export type ProjectBasis = 'pinned' | 'named' | 'thread' | 'default';
+
 export interface RoutingDecision {
   teamId: string;
   projectId: string;
@@ -19,6 +21,10 @@ export interface RoutingDecision {
   reason: string;
   tokens: number;
   fallback: boolean;
+  // Why projectId was chosen: an @project pin, a project named in the text,
+  // the owner's current thread, or the default (no thread yet). 'named' is
+  // the only basis that can leave the thread, so it is what gets confirmed.
+  projectBasis: ProjectBasis;
   // Present when the master decomposed the task into a sequenced multi-team
   // plan (each step gets the previous step's synopsis as a handover).
   steps: PlanStep[] | null;
@@ -132,10 +138,10 @@ export async function routeTask(
   // The model never guesses a project from topic words: an explicit @project
   // wins, then projects named in the text (the model picks among those and
   // the thread's), and otherwise the task stays in the thread's project.
-  const threadProject =
-    projects.find((project) => project.id === thread.projectId) ??
-    projects.find((project) => project.id === defaultProjectId);
+  const liveThreadProject = projects.find((project) => project.id === thread.projectId);
+  const threadProject = liveThreadProject ?? projects.find((project) => project.id === defaultProjectId);
   const inheritedProjectId = forcedProjectId ?? threadProject?.id ?? defaultProjectId;
+  const inheritedBasis: ProjectBasis = forcedProjectId ? 'pinned' : liveThreadProject ? 'thread' : 'default';
   const named = forcedProjectId ? [] : namedProjects(projects, text);
   const projectFixed = named.length === 0;
   const candidates = projectFixed
@@ -157,6 +163,8 @@ export async function routeTask(
     };
     const routedProject = projectFixed ? undefined : candidates.find((candidate) => candidate.id === parsed.projectId);
     const projectId = routedProject?.id ?? inheritedProjectId;
+    const projectBasis: ProjectBasis =
+      routedProject && named.includes(routedProject) && routedProject.id !== inheritedProjectId ? 'named' : inheritedBasis;
     // A model title that drags in a project the owner didn't name would put
     // the wrong game on the task card; the owner's own words replace it.
     const strays = projects.filter((project) => project.id !== projectId && !named.includes(project));
@@ -181,18 +189,19 @@ export async function routeTask(
         });
       }
       if (steps.length >= 2) {
-        return { teamId: steps[0]!.teamId, projectId, title, reason, tokens, fallback: false, steps };
+        return { teamId: steps[0]!.teamId, projectId, projectBasis, title, reason, tokens, fallback: false, steps };
       }
     }
 
     const team = teams.find((candidate) => candidate.id === parsed.teamId);
     if (!team) throw new Error(`routing picked unknown team: ${String(parsed.teamId)}`);
-    return { teamId: team.id, projectId, title, reason, tokens, fallback: false, steps: null };
+    return { teamId: team.id, projectId, projectBasis, title, reason, tokens, fallback: false, steps: null };
   } catch (error) {
     console.warn('[orchestrator] routing call failed, using keyword fallback:', error);
     return {
       teamId: fallbackTeam.id,
       projectId: inheritedProjectId,
+      projectBasis: inheritedBasis,
       title: fallbackTitle,
       reason: 'keyword fallback',
       tokens: 0,
