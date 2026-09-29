@@ -584,15 +584,21 @@ export class Orchestrator implements CommandHandlers {
 
     const controller = new AbortController();
     this.#controllers.set(taskId, controller);
-    this.#runningCwds.set(taskId, project.workspaceDir || this.#workspaceDir);
+    // Everything this worker may touch, decided once: the file tools are
+    // scoped to it by the SDK, and the policy gates shell writes that leave it.
+    const scope = {
+      cwd: project.workspaceDir || this.#workspaceDir,
+      extraDirs: this.#extraDirs(project.workspaceDir || this.#workspaceDir),
+    };
+    this.#runningCwds.set(taskId, scope.cwd);
 
     try {
       const result = await this.#engine.runWorker({
         prompt: this.#buildWorkerPrompt(task),
         team,
         model: workerSpec,
-        cwd: project.workspaceDir || this.#workspaceDir,
-        extraDirs: this.#extraDirs(project.workspaceDir || this.#workspaceDir),
+        cwd: scope.cwd,
+        extraDirs: scope.extraDirs,
         ...(piece ? { maxSubagents: 0 } : {}),
         signal: controller.signal,
         callbacks: {
@@ -620,7 +626,9 @@ export class Orchestrator implements CommandHandlers {
             }
           },
           onPermission: ({ toolName, command, reason }) => {
-            const verdict = evaluatePermission(toolName, command, this.#policy.mode);
+            // The shell is not confined by the SDK's directory grants, so the
+            // policy gets the worker's scope and gates writes that leave it.
+            const verdict = evaluatePermission(toolName, command, this.#policy.mode, scope);
             if (verdict.decision === 'allow') return Promise.resolve('approve' as const);
             return this.#raisePermission(taskId, workerId, team, command, reason, verdict.flags);
           },

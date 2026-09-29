@@ -1,7 +1,7 @@
 import { resolve as resolvePath } from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { ModelSpec } from '@agent-hq/shared';
-import { isInside } from '../orchestrator/util.js';
+import { containsPath, realPath } from '../orchestrator/util.js';
 import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './types.js';
 
 // Tools whose use flows through the policy (which instantly allows the
@@ -35,8 +35,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function outsideWorkspace(input: Record<string, unknown>, cwd: string, extraDirs: string[]): string | null {
   const target = input['file_path'] ?? input['notebook_path'];
   if (typeof target !== 'string' || !target.trim()) return null;
-  const full = resolvePath(cwd, target);
-  return [cwd, ...extraDirs].some((dir) => isInside(full, dir)) ? null : full;
+  // realPath on both sides: a junction planted in the workspace must not read
+  // as "inside" while pointing at a sibling project.
+  const full = realPath(resolvePath(cwd, target));
+  return [cwd, ...extraDirs].map(realPath).some((dir) => containsPath(dir, full)) ? null : full;
 }
 
 // Reads SDK stream messages structurally so minor shape evolution between

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
@@ -8,6 +8,8 @@ import { HubBus } from '../src/bus.js';
 import { startEventLog } from '../src/persist.js';
 import { ownershipIsDisjoint } from '../src/orchestrator/master.js';
 import { splitWorthChecking } from '../src/orchestrator/orchestrator.js';
+import { evaluatePermission, type WorkspaceScope } from '../src/orchestrator/policy.js';
+import { isInside } from '../src/orchestrator/util.js';
 
 // Orchestrator flow against the mock engine: routing by charter keyword,
 // full lifecycle to done-with-synopsis, permission gating mid-task, and
@@ -20,6 +22,10 @@ function fail(message: string): never {
   console.error(`ORCH SMOKE FAIL: ${message}`);
   process.exit(1);
 }
+
+// Long enough for the event log's 250 ms flush timer and the append that
+// follows it — the async path the running hub actually takes.
+const settle = (): Promise<void> => new Promise((done) => setTimeout(done, 600));
 
 const dataDir = mkdtempSync(join(tmpdir(), 'agent-hq-orch-'));
 const claudeProjectsDir = mkdtempSync(join(tmpdir(), 'agent-hq-claude-'));
@@ -302,6 +308,136 @@ try {
   ws.send(encodeCommand({ type: 'permissions.set', mode: 'auto' }));
   await waitFor('auto mode restored', (e) => e.type === 'hub.updated' && e.info.permissionMode === 'auto');
   console.log('strict policy ok: edit asked, approval completed, auto restored');
+
+  // 8b. Shell writes are scoped too. Write/Edit are refused outright outside
+  // the project, but the shell is NOT confined by the SDK's directory grants —
+  // cp/mv/redirects/sed -i once reached straight into sibling projects with no
+  // card at all, which is how a worker copied a file into the project next
+  // door. Table first (every construct), then end-to-end through a worker.
+  const castleScope: WorkspaceScope = { cwd: 'D:\\PersonalWork\\CastleWars', extraDirs: ['D:\\hub\\data\\outbox'] };
+  const shellCases: [string, boolean][] = [
+    // in-project work stays silent
+    ['cp src/Art.luau build/Art.luau', false],
+    ['echo hello > notes.txt', false],
+    ['npm run build > build.log 2>&1', false],
+    ['mkdir -p src/server/modules', false],
+    ["sed -i 's/a/b/' src/Art.luau", false],
+    ['Set-Content -Path .\\data\\x.json -Value "{}"', false],
+    ['cp src/a.luau D:\\PersonalWork\\CastleWars\\build\\a.luau', false],
+    ['cp report.md D:\\hub\\data\\outbox\\report.md', false], // the phone outbox is granted
+    ['grep -r steal D:\\PersonalWork\\PancakeStack', false], // reading elsewhere stays routine
+    ['ls D:\\Work\\Roblox', false],
+    // …and every way out of the project asks
+    ['cp Art.luau D:\\PersonalWork\\PancakeStack\\src\\Art.luau', true],
+    ['cp Art.luau /d/PersonalWork/PancakeStack/src/Art.luau', true], // Git Bash drive form
+    ['mv build/out.rbxl ../PancakeStack/out.rbxl', true],
+    ['echo "patched" > ../PancakeStack/src/Art.luau', true],
+    ['echo "patched" >> D:/PersonalWork/PancakeStack/notes.md', true],
+    ["sed -i 's/a/b/' ../PancakeStack/src/Art.luau", true],
+    ['Set-Content -Path D:\\PersonalWork\\PancakeStack\\x.json -Value "{}"', true],
+    ['Copy-Item src\\Art.luau -Destination ..\\PancakeStack\\Art.luau', true],
+    ['Out-File -FilePath ~\\Desktop\\dump.txt', true],
+    ['curl https://example.com/x.zip -o ../PancakeStack/x.zip', true],
+    ['tar -xzf bundle.tgz -C ../PancakeStack', true],
+    ['New-Item -ItemType Directory -Path D:\\Work\\Sneaky', true],
+    ['cp "Art.luau" "../Pancake Stack/Art.luau"', true], // quoted path with a space
+  ];
+  for (const [command, shouldAsk] of shellCases) {
+    const verdict = evaluatePermission('Bash', command, 'auto', castleScope);
+    const asked = verdict.decision === 'ask' && verdict.flags.some((f) => f.startsWith('writes outside this project'));
+    if (asked !== shouldAsk) {
+      fail(`shell scope: \`${command}\` should ${shouldAsk ? 'ask' : 'run silently'} (got ${JSON.stringify(verdict)})`);
+    }
+  }
+  // git carries its repo in a global option, so the gate has to read the
+  // resolved repo path, not the command string.
+  const gitCases: [string, string][] = [
+    ['git push origin main', 'publishes / pushes'],
+    ['git -C ../PancakeStack push', 'publishes / pushes'],
+    ['git --git-dir=../PancakeStack/.git --work-tree=../PancakeStack push', 'publishes / pushes'],
+    ['git -c user.name=x push --force', 'destructive'],
+    ['git -C ../PancakeStack reset --hard HEAD~1', 'destructive'],
+    ['git --git-dir ../PancakeStack/.git clean -fd', 'destructive'],
+  ];
+  for (const [command, flag] of gitCases) {
+    const verdict = evaluatePermission('Bash', command, 'auto', castleScope);
+    if (verdict.decision !== 'ask' || !verdict.flags.includes(flag)) {
+      fail(`git gate: \`${command}\` should be flagged "${flag}" (got ${JSON.stringify(verdict)})`);
+    }
+  }
+  // …and a git command aimed at another project's repo is caught whatever it does.
+  const strayCommit = evaluatePermission('Bash', 'git -C ../PancakeStack commit -am wip', 'auto', castleScope);
+  if (strayCommit.decision !== 'ask') fail('git -C into a sibling project ran ungated');
+  if (evaluatePermission('Bash', 'git commit -am wip', 'auto', castleScope).decision !== 'allow') {
+    fail('an ordinary in-project commit should stay silent');
+  }
+  // A junction can't tunnel out either: realPath resolves both sides.
+  const junctionRoot = mkdtempSync(join(tmpdir(), 'agent-hq-junction-'));
+  const realTarget = join(junctionRoot, 'OtherProject');
+  const workspace = join(junctionRoot, 'MyProject');
+  mkdirSync(realTarget, { recursive: true });
+  mkdirSync(workspace, { recursive: true });
+  let junctionMade = true;
+  try {
+    symlinkSync(realTarget, join(workspace, 'escape'), 'junction');
+  } catch {
+    junctionMade = false; // no rights to make one — the check below is moot
+  }
+  if (junctionMade) {
+    const viaJunction = evaluatePermission(
+      'Bash',
+      `cp Art.luau ${join(workspace, 'escape', 'Art.luau')}`,
+      'auto',
+      { cwd: workspace, extraDirs: [] },
+    );
+    if (viaJunction.decision !== 'ask') fail('a junction let a shell write escape the workspace');
+    if (isInside(join(workspace, 'escape', 'x.txt'), workspace)) fail('isInside followed a junction out of the workspace');
+  }
+  console.log(
+    `shell scope ok: ${shellCases.length} constructs classified, git global options gated${junctionMade ? ', junction escape blocked' : ' (junction check skipped)'}`,
+  );
+
+  // 8c. End-to-end: a worker's cross-project shell write raises a card…
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding: shellwrite-test copy the art file next door' }));
+  const shellCard = await waitFor(
+    'cross-project shell write asks',
+    (e) => e.type === 'permission.updated' && e.request.status === 'pending' && e.request.command.startsWith('cp Art.luau'),
+  );
+  if (shellCard.type !== 'permission.updated') fail('unreachable');
+  if (!shellCard.request.flags.some((f) => f.startsWith('writes outside this project'))) {
+    fail(`the cross-project shell card is missing its flag: ${JSON.stringify(shellCard.request.flags)}`);
+  }
+  ws.send(encodeCommand({ type: 'permission.respond', requestId: shellCard.request.id, decision: 'deny', scope: 'once' }));
+  await waitFor(
+    'cross-project copy denied',
+    (e) => e.type === 'activity' && e.entry.message === 'mock: cross-project copy denied',
+  );
+  // …while the same command inside the project does not.
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding: shellinside-test copy the art file in place' }));
+  await waitFor('in-project copy ran silently', (e) => e.type === 'activity' && e.entry.message === 'mock: copied in place');
+  const inPlaceTask = await waitFor(
+    'in-project copy task done',
+    (e) => e.type === 'task.updated' && e.task.detail.includes('shellinside-test') && e.task.status === 'done',
+  );
+  if (inPlaceTask.type !== 'task.updated') fail('unreachable');
+  if (events.some((e) => e.type === 'permission.updated' && e.request.taskId === inPlaceTask.task.id)) {
+    fail('an in-project shell copy raised a permission card');
+  }
+  // The QA follow-up inherits the title, so the mock reaches for the same
+  // sibling project and hits the same gate — answer it, or a QA worker sits
+  // on the card and the whole QA queue parks behind it.
+  const qaShellCard = await waitFor(
+    'the QA follow-up hits the same gate',
+    (e) =>
+      e.type === 'permission.updated' &&
+      e.request.status === 'pending' &&
+      e.request.id !== shellCard.request.id &&
+      e.request.command.includes('SomeOtherProject'),
+    15000,
+  );
+  if (qaShellCard.type !== 'permission.updated') fail('unreachable');
+  ws.send(encodeCommand({ type: 'permission.respond', requestId: qaShellCard.request.id, decision: 'deny', scope: 'once' }));
+  console.log('shell scope e2e ok: cross-project copy carded and denied, in-project copy silent');
 
   // 9. Interdisciplinary: QA team auto-exists; a coding task gets a QA
   // follow-up that runs in the same project.
@@ -1127,6 +1263,64 @@ try {
   if (!liveLog.includes('after rotation')) fail('the event after rotation did not reach the fresh log');
   if (liveLog.length > 4096) fail('the fresh event log kept the rotated content');
   console.log('event log ok: rotates past 8 MB, keeps the tail, writes off the publish path');
+
+  // 29b. The same rotation on the ASYNC path — the one a running hub actually
+  // takes. Above only proves the shutdown flush rotates.
+  const asyncDir = mkdtempSync(join(tmpdir(), 'agent-hq-log-async-'));
+  writeFileSync(join(asyncDir, 'events.jsonl'), 'x'.repeat(9 * 1024 * 1024));
+  const asyncBus = new HubBus();
+  const stopAsync = startEventLog(asyncBus, asyncDir);
+  asyncBus.publish({ type: 'activity', entry: { agentId: 'master', taskId: null, message: 'async roll', at: Date.now() } });
+  await settle();
+  if (readdirSync(asyncDir).filter((name) => /^events-.+\.jsonl$/.test(name)).length !== 1) {
+    fail('the timed flush did not roll the oversized log');
+  }
+  if (!readFileSync(join(asyncDir, 'events.jsonl'), 'utf8').includes('async roll')) {
+    fail('the event that triggered the async rotation never reached the fresh log');
+  }
+  stopAsync();
+
+  // 29c. Pruning: only the newest KEEP_ROLLED_LOGS rolled files survive.
+  const pruneDir = mkdtempSync(join(tmpdir(), 'agent-hq-log-prune-'));
+  const stale = [1, 2, 3, 4, 5].map((n) => `events-2020-01-0${n}T00-00-00-000Z.jsonl`);
+  for (const name of stale) writeFileSync(join(pruneDir, name), 'old\n');
+  writeFileSync(join(pruneDir, 'events.jsonl'), 'x'.repeat(9 * 1024 * 1024));
+  const pruneBus = new HubBus();
+  const stopPrune = startEventLog(pruneBus, pruneDir);
+  pruneBus.publish({ type: 'activity', entry: { agentId: 'master', taskId: null, message: 'prune me', at: Date.now() } });
+  await settle();
+  stopPrune();
+  const kept = readdirSync(pruneDir).filter((name) => /^events-.+\.jsonl$/.test(name)).sort();
+  if (kept.length !== 3) fail(`expected 3 rolled logs after pruning, got ${kept.length}: ${kept.join(', ')}`);
+  if (kept.some((name) => stale.slice(0, 3).includes(name))) fail(`pruning kept the oldest logs: ${kept.join(', ')}`);
+  if (!kept.includes(stale[3]!) || !kept.includes(stale[4]!)) fail(`pruning dropped the newest rolled logs: ${kept.join(', ')}`);
+
+  // 29d. A rotation that FAILS — Windows hands out EPERM whenever anything
+  // still holds the file — must not take the log with it. It used to drop the
+  // buffered batch AND every batch after it, so the log died silently for the
+  // rest of the run. Injected, because a real EPERM can't be staged here.
+  const stuckDir = mkdtempSync(join(tmpdir(), 'agent-hq-log-stuck-'));
+  const stuckPath = join(stuckDir, 'events.jsonl');
+  writeFileSync(stuckPath, 'x'.repeat(9 * 1024 * 1024));
+  let rotateAttempts = 0;
+  const stuckBus = new HubBus();
+  const stopStuck = startEventLog(stuckBus, stuckDir, () => {
+    rotateAttempts += 1;
+    throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
+  });
+  for (const message of ['stuck one', 'stuck two', 'stuck three']) {
+    stuckBus.publish({ type: 'activity', entry: { agentId: 'master', taskId: null, message, at: Date.now() } });
+    await settle();
+  }
+  stopStuck();
+  const stuckLog = readFileSync(stuckPath, 'utf8');
+  for (const message of ['stuck one', 'stuck two', 'stuck three']) {
+    if (!stuckLog.includes(message)) fail(`"${message}" was lost — a failed rotation must not drop a batch`);
+  }
+  if (readdirSync(stuckDir).some((name) => /^events-.+\.jsonl$/.test(name))) fail('the failed rotation rolled a file anyway');
+  // …and it backs off instead of retrying (and re-warning) on every flush.
+  if (rotateAttempts !== 1) fail(`a failed rotation should back off, not retry each flush (tried ${rotateAttempts}x)`);
+  console.log('event log ok: async rotation, pruning to 3, and a failed rotation loses no events');
 
   console.log('ORCH SMOKE PASS');
   ws.close();

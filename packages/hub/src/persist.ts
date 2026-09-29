@@ -35,13 +35,21 @@ function rotate(dataDir: string, logPath: string): void {
   }
 }
 
-export function startEventLog(bus: HubBus, dataDir: string): () => void {
+// `rotateLog` is a test seam: a failing rotation is what this file has to
+// survive, and Windows only produces it under conditions a test can't stage.
+export function startEventLog(bus: HubBus, dataDir: string, rotateLog: typeof rotate = rotate): () => void {
   mkdirSync(dataDir, { recursive: true });
   const logPath = join(dataDir, 'events.jsonl');
   let bytes = existsSync(logPath) ? statSync(logPath).size : 0;
 
   let buffer: string[] = [];
   let timer: ReturnType<typeof setTimeout> | null = null;
+  // Size at which the next rotation is attempted. A rotation that fails
+  // (Windows hands out EPERM whenever anything still has the file open) must
+  // not take the append with it, and must not be retried on every flush
+  // afterwards — the log keeps growing past the cap instead, which is far
+  // better than losing it. The next attempt comes one full cap later.
+  let rotateAt = MAX_LOG_BYTES;
   // One append at a time: the chain keeps batches in bus order and stops
   // concurrent writes from interleaving inside a line.
   let writing: Promise<void> = Promise.resolve();
@@ -53,6 +61,20 @@ export function startEventLog(bus: HubBus, dataDir: string): () => void {
     return chunk;
   };
 
+  // Rolls the log aside if it has outgrown the cap. Never throws: the caller
+  // appends either way.
+  const tryRotate = (chunk: string): void => {
+    if (bytes <= rotateAt || !existsSync(logPath)) return;
+    try {
+      rotateLog(dataDir, logPath);
+      bytes = Buffer.byteLength(chunk);
+      rotateAt = MAX_LOG_BYTES;
+    } catch (error) {
+      rotateAt = bytes + MAX_LOG_BYTES;
+      console.warn('[hub] event log rotation failed; still appending:', error);
+    }
+  };
+
   const flush = (): void => {
     if (timer) {
       clearTimeout(timer);
@@ -61,11 +83,10 @@ export function startEventLog(bus: HubBus, dataDir: string): () => void {
     if (buffer.length === 0) return;
     const chunk = take();
     writing = writing.then(async () => {
+      tryRotate(chunk);
+      // Outside the rotate guard on purpose: a failed rotation used to drop
+      // this batch AND every batch after it, silently killing the log.
       try {
-        if (bytes > MAX_LOG_BYTES && existsSync(logPath)) {
-          rotate(dataDir, logPath);
-          bytes = Buffer.byteLength(chunk);
-        }
         await appendFile(logPath, chunk);
       } catch (error) {
         console.warn('[hub] event log write failed:', error);
@@ -92,8 +113,8 @@ export function startEventLog(bus: HubBus, dataDir: string): () => void {
     // Shutdown is synchronous: write whatever is still buffered right here.
     if (buffer.length === 0) return;
     const chunk = take();
+    tryRotate(chunk);
     try {
-      if (bytes > MAX_LOG_BYTES && existsSync(logPath)) rotate(dataDir, logPath);
       appendFileSync(logPath, chunk);
     } catch (error) {
       console.warn('[hub] event log flush on shutdown failed:', error);

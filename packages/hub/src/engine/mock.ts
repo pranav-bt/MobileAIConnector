@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import type { ModelSpec, Team } from '@agent-hq/shared';
 import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './types.js';
 
@@ -168,6 +169,25 @@ export class MockEngine implements OrchestratorEngine {
         reason: 'mock sensitive read',
       });
       callbacks.onActivity(decision === 'approve' ? 'mock: secret read' : 'mock: sensitive read denied');
+    }
+    // "shellwrite-test" exercises the shell path gate: a copy into a SIBLING
+    // project, which the file tools refuse outright but the shell can reach.
+    if (taskText.includes('shellwrite-test')) {
+      const decision = await callbacks.onPermission({
+        toolName: 'Bash',
+        command: `cp Art.luau ${join(args.cwd, '..', 'SomeOtherProject')}/Art.luau`,
+        reason: 'mock worker wants to copy a file next door',
+      });
+      callbacks.onActivity(decision === 'approve' ? 'mock: copied next door' : 'mock: cross-project copy denied');
+    }
+    // …while the same shape of command inside the project stays silent.
+    if (taskText.includes('shellinside-test')) {
+      const decision = await callbacks.onPermission({
+        toolName: 'Bash',
+        command: `cp Art.luau ${join(args.cwd, 'build')}/Art.luau`,
+        reason: 'mock worker wants to copy a file in its own project',
+      });
+      callbacks.onActivity(decision === 'approve' ? 'mock: copied in place' : 'mock: in-project copy denied');
     }
     if (taskText.includes('install')) {
       const decision = await callbacks.onPermission({

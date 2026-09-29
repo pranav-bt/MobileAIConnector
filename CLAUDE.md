@@ -98,7 +98,14 @@ npm run typecheck      # tsc across workspaces
   token ledger. Workers run inside their task's project workspace and see
   only that project's files, that project's recent synopses, and their
   team's MEMORY.md — never another project's context. The hub workspace is
-  always registered as the default project.
+  always registered as the default project. Isolation is enforced twice:
+  Write/Edit outside the workspace are REFUSED by the engine, and because the
+  shell is not confined by the SDK's directory grants, `evaluatePermission`
+  path-checks Bash too — a shell WRITE (cp/mv/redirect/`sed -i`/`Set-Content`,
+  or a `git -C`/`--git-dir` aimed at another repo) whose target resolves
+  outside the workspace raises a card even in auto mode, while shell READS
+  across the drives stay silent. Containment goes through `realPath`, so a
+  junction can't tunnel out.
 - Composer slash-commands (parsed client-side, deterministic): /team add
   <name>: <charter> · /team workers <team> <n> · /team remove <team> ·
   /project add <name> <path> [description] · /project remove <project>.
