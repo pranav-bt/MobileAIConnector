@@ -105,7 +105,9 @@ npm run typecheck      # tsc across workspaces
   or a `git -C`/`--git-dir` aimed at another repo) whose target resolves
   outside the workspace raises a card even in auto mode, while shell READS
   across the drives stay silent. Containment goes through `realPath`, so a
-  junction can't tunnel out.
+  junction can't tunnel out. Workers are told the same: READ/SEARCH anywhere
+  under the workspace roots, WRITE only in their project (+ the phone
+  inbox/outbox; the PA team also gets its desk, `data/pa`, from any project).
 - The master never guesses a project from topic words ("the map", "the
   bases"). `routeTask` resolves it deterministically: `@project` pin >
   projects the owner named in the text (`namedProjects`, spacing-insensitive

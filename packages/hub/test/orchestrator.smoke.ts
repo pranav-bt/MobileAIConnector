@@ -1242,6 +1242,35 @@ try {
   await ranOn(mark, 'after reset the coding worker is back on its team default', 'claude-sonnet-5 · effort default');
   const resetConfig = JSON.parse(readFileSync(join(dataDir, 'config.json'), 'utf8'));
   if (resetConfig.modelOverrides?.worker !== undefined) fail('reset did not clear the persisted overrides');
+  // 24. The PA team can always write its own desk (data/pa), even when the
+  // conversation thread is on another project; other teams never get it.
+  ws.send(
+    encodeCommand({
+      type: 'team.create',
+      name: 'Personal Assistant team',
+      charter: 'Todos, reminders, calendar, notes.',
+      allowedTools: ['read', 'edit', 'web'],
+      blockedTools: ['git', 'installs'],
+    }),
+  );
+  await waitFor('PA team created', (e) => e.type === 'team.updated' && e.team.id === 'personal-assistant-team');
+  const paDir = join(dataDir, 'pa');
+  const scopeOf = (mark: number, label: string) =>
+    waitFor(label, since(mark, (e) => e.type === 'activity' && e.entry.message.startsWith(`mock: workspace ${castleCwd} `)), 15000);
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: '@castlewars personal-assistant-team add eggs to my todos' }));
+  const paScope = await scopeOf(mark, 'PA worker scope reported');
+  if (paScope.type !== 'activity' || !paScope.entry.message.includes(paDir)) {
+    fail(`PA worker in another project cannot write its desk: ${paScope.type === 'activity' ? paScope.entry.message : ''}`);
+  }
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: '@castlewars coding: tweak the tower HUD again' }));
+  const codingScope = await scopeOf(mark, 'coding worker scope reported');
+  if (codingScope.type !== 'activity' || codingScope.entry.message.includes(paDir)) {
+    fail('a non-PA worker was handed the PA desk');
+  }
+  console.log('PA desk scope ok: PA writes its desk from any project; other teams never get it');
+
   console.log('model choices ok: per-field precedence, exact id + effort reach the engine, Haiku effort dropped, persisted, reset restores defaults');
 
   // 29. Event log: rolls over instead of growing without bound, and appends

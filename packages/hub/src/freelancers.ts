@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { closeSync, existsSync, openSync, readSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { open, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { HubBus } from './bus.js';
@@ -59,6 +60,48 @@ function readChunks(path: string, size: number): string {
   } finally {
     closeSync(fd);
   }
+}
+
+async function readChunksAsync(path: string, size: number): Promise<string> {
+  const handle = await open(path, 'r');
+  try {
+    const headLength = Math.min(HEAD_BYTES, size);
+    const head = Buffer.alloc(headLength);
+    await handle.read(head, 0, headLength, 0);
+    let tail = '';
+    if (size > headLength) {
+      const tailLength = Math.min(TAIL_BYTES, size - headLength);
+      const buffer = Buffer.alloc(tailLength);
+      await handle.read(buffer, 0, tailLength, size - tailLength);
+      tail = buffer.toString('utf8');
+    }
+    return head.toString('utf8') + '\n' + tail;
+  } finally {
+    await handle.close();
+  }
+}
+
+interface TranscriptFacts {
+  cwd: string | null;
+  activity: string;
+  tiny: boolean; // a one-shot run's transcript, not a terminal session
+}
+
+// null = one of the hub's own engine sessions. Own-session check: our engine
+// prompts are the FIRST record of their transcript. Only look there — a
+// terminal session's tail can legitimately quote these strings (editing this
+// very codebase), and a file that STARTS with a compaction summary is always
+// a real interactive session (SDK one-shots never compact).
+function transcriptFacts(chunk: string, size: number): TranscriptFacts | null {
+  const firstLines = chunk.split('\n').slice(0, 3).join('\n');
+  const isOwnEngineSession =
+    !firstLines.includes('"type":"summary"') && OWN_SESSION_MARKERS.some((marker) => firstLines.includes(marker));
+  if (isOwnEngineSession) return null;
+  return {
+    cwd: extractCwd(chunk),
+    activity: lastAssistantActivity(chunk),
+    tiny: size < 32 * 1024 && chunk.split('\n').filter((line) => line.trim()).length < 8,
+  };
 }
 
 function lastAssistantActivity(chunk: string): string {
@@ -212,7 +255,22 @@ export class FreelancerManager {
     );
   }
 
+  #ticking = false;
+  // Transcript facts by path, re-read only when a file's size or mtime moves:
+  // a steady-state tick is a directory walk plus stats, never a re-read of
+  // every transcript (the hub writes one per task, so they pile up fast).
+  #transcripts = new Map<string, { mtimeMs: number; size: number; facts: TranscriptFacts | null }>();
+
+  // Never overlaps and never blocks the event loop — the scan is async.
   #tick(): void {
+    if (this.#ticking) return;
+    this.#ticking = true;
+    void this.#scan().finally(() => {
+      this.#ticking = false;
+    });
+  }
+
+  async #scan(): Promise<void> {
     try {
       this.#scanSessions();
       if (!existsSync(this.#projectsDir)) return;
@@ -221,43 +279,48 @@ export class FreelancerManager {
 
       // Gather candidate sessions, newest first.
       const candidates: { agentId: string; mtime: number; info: SessionInfo; activity: string }[] = [];
-      for (const dirName of readdirSync(this.#projectsDir)) {
+      const seenPaths = new Set<string>();
+      let dirNames: string[];
+      try {
+        dirNames = await readdir(this.#projectsDir);
+      } catch {
+        return;
+      }
+      for (const dirName of dirNames) {
         const dir = join(this.#projectsDir, dirName);
         let files: string[];
         try {
-          files = readdirSync(dir).filter((file) => file.endsWith('.jsonl'));
+          files = (await readdir(dir)).filter((file) => file.endsWith('.jsonl'));
         } catch {
-          continue;
+          continue; // not a directory
         }
         for (const file of files) {
           const path = join(dir, file);
           let stats;
           try {
-            stats = statSync(path);
+            stats = await stat(path);
           } catch {
             continue;
           }
           if (now - stats.mtimeMs > LOOKBACK_MS || stats.size === 0) continue;
+          seenPaths.add(path);
 
-          const chunk = readChunks(path, stats.size);
-          // Own-session check: our engine prompts are the FIRST record of
-          // their transcript. Only look there — a terminal session's tail can
-          // legitimately quote these strings (editing this very codebase), and
-          // a file that STARTS with a compaction summary is always a real
-          // interactive session (SDK one-shots never compact).
-          const firstLines = chunk.split('\n').slice(0, 3).join('\n');
-          const isOwnEngineSession =
-            !firstLines.includes('"type":"summary"') &&
-            OWN_SESSION_MARKERS.some((marker) => firstLines.includes(marker));
-          if (isOwnEngineSession) continue;
-          // One-shot runs (claude -p, old engine sessions) leave tiny
-          // transcripts; a real terminal session accumulates records fast.
-          // Old AND tiny -> not an open terminal.
-          const age = now - stats.mtimeMs;
-          if (age > 60 * 60_000 && stats.size < 32 * 1024 && chunk.split('\n').filter((l) => l.trim()).length < 8) {
-            continue;
+          let cached = this.#transcripts.get(path);
+          if (!cached || cached.mtimeMs !== stats.mtimeMs || cached.size !== stats.size) {
+            let facts: TranscriptFacts | null;
+            try {
+              facts = transcriptFacts(await readChunksAsync(path, stats.size), stats.size);
+            } catch {
+              continue; // mid-write or vanished; next tick retries
+            }
+            cached = { mtimeMs: stats.mtimeMs, size: stats.size, facts };
+            this.#transcripts.set(path, cached);
           }
-          const cwd = extractCwd(chunk);
+          const facts = cached.facts;
+          if (!facts) continue; // our own engine session
+          // Old AND tiny -> a finished one-shot run, not an open terminal.
+          if (now - stats.mtimeMs > 60 * 60_000 && facts.tiny) continue;
+          const cwd = facts.cwd;
           if (cwd && /\\Temp\\claude\\|\/tmp\/claude\//i.test(cwd)) continue; // scratchpad sessions, not real projects
           if (cwd && busyCwds.has(cwd.toLowerCase())) continue; // a hub worker owns this dir right now
 
@@ -266,9 +329,12 @@ export class FreelancerManager {
             agentId: `fl-${sessionId.slice(0, 24)}`,
             mtime: stats.mtimeMs,
             info: { sessionId, cwd: cwd ?? '', name: cwd ? basename(cwd) : dirName.replace(/^.*-/, '') || 'terminal' },
-            activity: lastAssistantActivity(chunk),
+            activity: facts.activity,
           });
         }
+      }
+      for (const path of [...this.#transcripts.keys()]) {
+        if (!seenPaths.has(path)) this.#transcripts.delete(path);
       }
       candidates.sort((a, b) => b.mtime - a.mtime);
 

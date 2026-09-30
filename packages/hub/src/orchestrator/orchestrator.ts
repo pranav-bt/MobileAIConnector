@@ -277,9 +277,14 @@ export class Orchestrator implements CommandHandlers {
   // other project, which is how a task pinned to one project wrote into
   // another. The only extras are the hub's phone inbox/outbox, which workers
   // in every project are told to use by name.
-  #extraDirs(cwd: string): string[] {
-    const extras = [this.#outboxDir, this.#inboxDir].filter(Boolean);
+  #extraDirs(cwd: string, team?: Team): string[] {
+    const paDir = team && this.#isPaTeam(team) && this.#pa ? this.#pa.paths.dir : '';
+    const extras = [this.#outboxDir, this.#inboxDir, paDir].filter(Boolean);
     return [...new Set(extras)].filter((dir) => existsSync(dir) && !isInside(dir, cwd));
+  }
+
+  #isPaTeam(team: Pick<Team, 'id'>): boolean {
+    return /assistant/i.test(team.id);
   }
 
   #masterStatus(): void {
@@ -571,9 +576,11 @@ export class Orchestrator implements CommandHandlers {
           .workspaceDir || this.#workspaceDir;
       const rootList = this.#projects.roots.map((root) => `${root.path} (${root.label})`).join(' · ');
       sections.push(
-        `File locations policy: your file tools are scoped to THIS project's workspace — ${workspaceDir} — including ALL subdirectories at any depth; recurse into them when searching. ` +
-          'Other projects are off limits: never read, write or create files outside this workspace, even when a report or note mentions their paths. ' +
-          `If a task needs a folder that isn't this project, stop and say so in your report — ask the owner to register it (/project add <name> <path>, inside ${rootList}) rather than reaching into it. ` +
+        `File locations policy: you may READ and SEARCH anywhere under these roots, including ALL subdirectories at any depth — recurse into them when searching: ${rootList}. ` +
+          `You may WRITE (create, edit, move or delete files) only inside THIS project's workspace — ${workspaceDir}${
+            task.teamId && this.#isPaTeam({ id: task.teamId }) && this.#pa ? ` — and the PA desk at ${this.#pa.paths.dir}` : ''
+          } — plus the phone inbox/outbox named below; writes anywhere else are refused. ` +
+          'Reading another project for reference is fine; changing it is not. If a task needs changes in a folder that is not this project, stop and say so in your report — ask the owner to register it (/project add <name> <path>) rather than writing into it. ' +
           'NEVER kill or restart the Agent HQ hub (port 4517) — you are running INSIDE it and would kill your own task; when hub code changes need a restart, say so in your report and the owner restarts it.',
       );
     }
@@ -672,7 +679,7 @@ export class Orchestrator implements CommandHandlers {
     // scoped to it by the SDK, and the policy gates shell writes that leave it.
     const scope = {
       cwd: project.workspaceDir || this.#workspaceDir,
-      extraDirs: this.#extraDirs(project.workspaceDir || this.#workspaceDir),
+      extraDirs: this.#extraDirs(project.workspaceDir || this.#workspaceDir, team),
     };
     this.#runningCwds.set(taskId, scope.cwd);
 
