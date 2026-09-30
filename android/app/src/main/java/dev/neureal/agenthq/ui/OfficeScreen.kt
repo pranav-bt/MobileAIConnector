@@ -137,13 +137,30 @@ private fun ApprovalCard(request: PermissionRequest, snapshot: Snapshot, onRespo
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text(request.command, color = Color(0xFFF0D9A5), fontSize = 12.5.sp, fontFamily = FontFamily.Monospace)
-        Text("$teamName · $agentName", color = HQ.muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+        // Plain words first; the rule-based risk tags stay visible, and the
+        // exact command is one tap away.
+        var showCommand by remember(request.id) { mutableStateOf(false) }
+        Text(request.summary ?: request.command, color = HQ.text, fontSize = 13.sp, lineHeight = 18.sp)
         if (request.flags.isNotEmpty()) {
             Text(request.flags.joinToString(" · "), color = HQ.amber, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
         }
-        if (request.reason.isNotEmpty()) {
-            Text("“${request.reason}”", color = HQ.text2, fontSize = 11.5.sp, lineHeight = 16.sp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("$teamName · $agentName", color = HQ.muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f))
+            Text(
+                if (showCommand) "hide command" else "show command",
+                color = HQ.accent, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                modifier = Modifier.clickable { showCommand = !showCommand }.padding(4.dp),
+            )
+        }
+        if (showCommand) {
+            Text(
+                request.command,
+                color = Color(0xFFF0D9A5), fontSize = 11.5.sp, fontFamily = FontFamily.Monospace,
+                modifier = Modifier.fillMaxWidth().background(HQ.panel2, RoundedCornerShape(6.dp)).padding(8.dp),
+            )
+            if (request.reason.isNotEmpty()) {
+                Text(request.reason, color = HQ.text2, fontSize = 11.sp, lineHeight = 15.sp)
+            }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(

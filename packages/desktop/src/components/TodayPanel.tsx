@@ -1,4 +1,5 @@
-import { isInternalTask, type ClientCommand, type HubState, type Task } from '@agent-hq/shared';
+import { useState } from 'react';
+import { isInternalTask, type ClientCommand, type HubState, type PermissionRequest, type Task } from '@agent-hq/shared';
 import { formatResetDay, formatResetTime, formatTokens, usageColor } from '../status';
 
 function teamName(state: HubState, teamId: string | null): string {
@@ -21,6 +22,62 @@ function TaskCard(props: { state: HubState; task: Task; showProgress?: boolean }
       {task.status === 'done' && task.synopsis && (
         <div className="act" style={{ marginTop: 6, color: 'var(--text-2)', whiteSpace: 'pre-line', lineHeight: 1.55 }}>{task.synopsis}</div>
       )}
+    </div>
+  );
+}
+
+// Plain words first: what the agent wants to do and why it needs a yes.
+// The risk tags come from rules (never the model); the raw command is one
+// click away for when you want to check the exact action.
+function ApprovalCard(props: { state: HubState; request: PermissionRequest; send: (command: ClientCommand) => void }): JSX.Element {
+  const { state, request, send } = props;
+  const [showCommand, setShowCommand] = useState(false);
+  const respond = (decision: 'approve' | 'deny') =>
+    send({ type: 'permission.respond', requestId: request.id, decision, scope: 'once' });
+  return (
+    <div className="tcard awaiting">
+      <div style={{ fontSize: 12.5, color: 'var(--text)', lineHeight: 1.5 }}>{request.summary ?? request.command}</div>
+      {request.flags.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 7 }}>
+          {request.flags.map((flag) => (
+            <span
+              key={flag}
+              className="act"
+              style={{ color: 'var(--amber)', border: '1px solid rgba(232,180,74,0.45)', borderRadius: 5, padding: '1px 6px' }}
+            >
+              {flag}
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="act" style={{ marginTop: 6 }}>
+        {teamName(state, request.teamId)} · {state.agents[request.agentId]?.name ?? request.agentId}
+        {' · '}
+        <span style={{ color: 'var(--accent)', cursor: 'pointer' }} onClick={() => setShowCommand(!showCommand)}>
+          {showCommand ? 'hide command' : 'show command'}
+        </span>
+      </div>
+      {showCommand && (
+        <div style={{ marginTop: 6 }}>
+          <div
+            className="mono"
+            style={{ fontSize: 11.5, color: '#F0D9A5', background: 'var(--panel-2)', borderRadius: 6, padding: '6px 8px', overflowWrap: 'anywhere' }}
+          >
+            {request.command}
+          </div>
+          {request.reason && (
+            <div style={{ fontSize: 11, color: 'var(--text-2)', lineHeight: 1.45, marginTop: 5 }}>{request.reason}</div>
+          )}
+        </div>
+      )}
+      <div className="btn-row">
+        <button className="btn approve" onClick={() => respond('approve')}>
+          Approve
+        </button>
+        <button className="btn deny" onClick={() => respond('deny')}>
+          Deny
+        </button>
+      </div>
     </div>
   );
 }
@@ -51,31 +108,7 @@ export function TodayPanel(props: {
         </div>
         {pending.length === 0 && <span className="empty-note">nothing needs you right now</span>}
         {pending.map((request) => (
-          <div key={request.id} className="tcard awaiting">
-            <div className="mono" style={{ fontSize: 12, color: '#F0D9A5' }}>{request.command}</div>
-            <div className="act" style={{ marginTop: 4 }}>
-              {teamName(state, request.teamId)} · {state.agents[request.agentId]?.name ?? request.agentId}
-            </div>
-            {request.reason && (
-              <div style={{ fontSize: 11, color: 'var(--text-2)', lineHeight: 1.45, marginTop: 6 }}>
-                “{request.reason}”
-              </div>
-            )}
-            <div className="btn-row">
-              <button
-                className="btn approve"
-                onClick={() => send({ type: 'permission.respond', requestId: request.id, decision: 'approve', scope: 'once' })}
-              >
-                Approve
-              </button>
-              <button
-                className="btn deny"
-                onClick={() => send({ type: 'permission.respond', requestId: request.id, decision: 'deny', scope: 'once' })}
-              >
-                Deny
-              </button>
-            </div>
-          </div>
+          <ApprovalCard key={request.id} state={state} request={request} send={send} />
         ))}
       </div>
 

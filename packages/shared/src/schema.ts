@@ -119,6 +119,10 @@ export const PermissionRequestSchema = z.object({
   agentId: z.string(),
   teamId: z.string().nullable(),
   command: z.string(),
+  // What the agent is trying to do, in plain English (1-2 sentences) — what
+  // the owner reads first; the raw command stays one tap away. Rule-based at
+  // first, then replaced by the master's explanation while still pending.
+  summary: z.string().optional(),
   flags: z.array(z.string()),
   reason: z.string(),
   status: PermissionStatusSchema,

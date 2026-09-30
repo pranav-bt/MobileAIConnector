@@ -5,7 +5,7 @@ function AgentChip(props: { agent: Agent; dim?: boolean; pending?: PermissionReq
   const { agent, pending } = props;
   return (
     <>
-      {pending && <div className="bubble">requesting: {pending.command}</div>}
+      {pending && <div className="bubble">needs your OK: {(pending.summary ?? pending.command).slice(0, 90)}</div>}
       <div
         className={`chip${props.dim ? ' dim' : ''}`}
         style={pending ? { borderColor: 'rgba(232,180,74,0.55)' } : undefined}

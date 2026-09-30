@@ -242,7 +242,7 @@ export function ModelsCard(props: { state: HubState; send: (command: ClientComma
 
       <div style={{ marginTop: 4 }}>
         {roleRow('Master', 'routes every task to a team and project', fixedRoleControls('master'))}
-        {roleRow('Master: quick checks', 'handovers between teams, QA pass/fail verdicts, whether a big build splits across parallel workers', fixedRoleControls('checks'))}
+        {roleRow('Master: quick checks', 'handovers between teams, QA pass/fail verdicts, whether a big build splits, and the plain-English explanation on every approval card', fixedRoleControls('checks'))}
         {roleRow('All team leads', 'review every finished report into the synopsis (not the parallel parts of a split)', allRoleControls('lead'))}
         {roleRow('All workers', 'do the actual work', allRoleControls('worker'))}
       </div>

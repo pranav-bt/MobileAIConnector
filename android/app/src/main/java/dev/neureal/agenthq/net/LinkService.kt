@@ -28,7 +28,8 @@ import kotlinx.coroutines.launch
 class LinkService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val seen = HashSet<String>()
+    // Pending request id -> the text its notification shows.
+    private val seen = HashMap<String, String>()
     private var voice: VoiceCommander? = null
     private var collecting = false
 
@@ -127,15 +128,22 @@ class LinkService : Service() {
                 val pending = snapshot.permissions.filter { it.status == "pending" }
                 val manager = getSystemService(NotificationManager::class.java)
                 for (request in pending) {
-                    if (!seen.add(request.id)) continue
+                    val text = request.summary ?: request.command
+                    // New card, or its plain-English summary just improved:
+                    // (re)post — an update replaces the text without buzzing again.
+                    if (seen[request.id] == text) continue
+                    seen[request.id] = text
                     val agent = snapshot.agents.firstOrNull { it.id == request.agentId }?.name ?: request.agentId
+                    val tags = request.flags.joinToString(", ").ifEmpty { "needs your OK" }
                     manager.notify(
                         request.id.hashCode(),
                         NotificationCompat.Builder(this@LinkService, CHANNEL_APPROVALS)
                             .setSmallIcon(R.drawable.ic_launcher_foreground)
-                            .setContentTitle("Approval needed: ${request.command.take(40)}")
-                            .setContentText("$agent · ${request.flags.joinToString(", ").ifEmpty { "gated action" }}")
+                            .setContentTitle("Approval needed · $agent")
+                            .setContentText(text)
+                            .setStyle(NotificationCompat.BigTextStyle().bigText("$text\n$tags"))
                             .setPriority(NotificationCompat.PRIORITY_HIGH)
+                            .setOnlyAlertOnce(true)
                             .setAutoCancel(true)
                             .setContentIntent(openAppIntent())
                             .build(),
@@ -143,7 +151,7 @@ class LinkService : Service() {
                 }
                 // Clear notifications for requests that were resolved elsewhere.
                 val pendingIds = pending.map { it.id }.toSet()
-                for (id in seen.filter { it !in pendingIds }) {
+                for (id in seen.keys.filter { it !in pendingIds }) {
                     manager.cancel(id.hashCode())
                     seen.remove(id)
                 }

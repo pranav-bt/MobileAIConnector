@@ -13,6 +13,9 @@ import {
   type ParallelPlan,
   type PlanStep,
   type RoutingThread,
+  explainPermission,
+  plainPermissionSummary,
+  type PermissionContext,
 } from './master.js';
 import { capturePcScreen, saveIncomingFile, shareFile } from '../files.js';
 import { evaluatePermission } from './policy.js';
@@ -721,7 +724,7 @@ export class Orchestrator implements CommandHandlers {
             // policy gets the worker's scope and gates writes that leave it.
             const verdict = evaluatePermission(toolName, command, this.#policy.mode, scope);
             if (verdict.decision === 'allow') return Promise.resolve('approve' as const);
-            return this.#raisePermission(taskId, workerId, team, command, reason, verdict.flags);
+            return this.#raisePermission(taskId, workerId, team, toolName, command, reason, verdict.flags);
           },
         },
       });
@@ -1291,6 +1294,7 @@ export class Orchestrator implements CommandHandlers {
       agentId: 'master',
       teamId: team.id,
       command: `add a temporary worker to ${team.name} (${queue.length} tasks queued)`,
+      summary: `${team.name} has ${queue.length} tasks waiting in line. Approving lets it run one more worker at the same time, so the backlog clears faster but uses your limits faster.`,
       flags: ['team scaling'],
       reason: `${team.name} is at its cap of ${team.maxConcurrentWorkers} concurrent worker(s) with a growing queue. Approving raises the cap by one.`,
       status: 'pending',
@@ -1339,17 +1343,26 @@ export class Orchestrator implements CommandHandlers {
     taskId: string,
     workerId: string,
     team: Team,
+    toolName: string,
     command: string,
     reason: string,
     flags: string[] = [],
   ): Promise<'approve' | 'deny'> {
     const requestId = `perm-${now().toString(36)}-${workerId}`;
+    const context: PermissionContext = {
+      teamName: team.name,
+      taskTitle: this.#bus.state.tasks[taskId]?.title ?? 'its task',
+      toolName,
+      command,
+      flags,
+    };
     const request: PermissionRequest = {
       id: requestId,
       taskId,
       agentId: workerId,
       teamId: team.id,
       command,
+      summary: plainPermissionSummary(context),
       flags,
       reason,
       status: 'pending',
@@ -1360,7 +1373,20 @@ export class Orchestrator implements CommandHandlers {
     this.#bus.publish({ type: 'permission.updated', request });
     this.#patchAgent(workerId, { status: 'waiting_permission', activity: 'waiting on your approval' });
     this.#patchTask(taskId, { status: 'awaiting_permission' });
+    void this.#explainCard(requestId, context);
     return new Promise((resolve) => this.#pendingResolvers.set(requestId, resolve));
+  }
+
+  // Swap the rule-based summary for the master's explanation — only while
+  // the card is still pending, so a late answer never reopens a decided card.
+  async #explainCard(requestId: string, context: PermissionContext): Promise<void> {
+    const model = this.#checksModel();
+    const { summary, tokens } = await explainPermission(this.#engine, context, model);
+    this.#recordTokens(model.tier, tokens);
+    const current = this.#bus.state.permissions[requestId];
+    if (summary && current && current.status === 'pending') {
+      this.#bus.publish({ type: 'permission.updated', request: { ...current, summary } });
+    }
   }
 
   // The master's card for an ask that names a project other than the one the
@@ -1375,6 +1401,7 @@ export class Orchestrator implements CommandHandlers {
         agentId: 'master',
         teamId: team.id,
         command: `Run this in ${target.name} instead of ${current.name}?`,
+        summary: `Your message mentions ${target.name}, but you've been working in ${current.name}. Approve to run this task in ${target.name}; deny keeps it in ${current.name}.`,
         flags: ['leaves your current project'],
         reason:
           `Your ask names ${target.name}, but your conversation is in ${current.name}. ` +

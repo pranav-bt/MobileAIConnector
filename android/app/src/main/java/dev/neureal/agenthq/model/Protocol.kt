@@ -63,6 +63,8 @@ data class PermissionRequest(
     val agentId: String,
     val teamId: String? = null,
     val command: String,
+    // Plain-English "what it wants to do"; the raw command stays one tap away.
+    val summary: String? = null,
     val flags: List<String> = emptyList(),
     val reason: String = "",
     val status: String,

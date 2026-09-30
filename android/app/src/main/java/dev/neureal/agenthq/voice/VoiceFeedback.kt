@@ -143,7 +143,7 @@ object VoiceFeedback {
                             val pending = snapshot.permissions.firstOrNull { it.taskId == taskId && it.status == "pending" }
                             if (pending != null && !announcedPermissions.contains(pending.id)) {
                                 announcedPermissions.add(pending.id)
-                                speak("I need your approval to run: ${pending.command.take(80)}")
+                                speak("I need your approval. ${pending.summary ?: "It wants to run: " + pending.command.take(80)}")
                             }
                         }
                     }

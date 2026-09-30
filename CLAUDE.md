@@ -55,6 +55,16 @@ npm run typecheck      # tsc across workspaces
   the paired device over the encrypted session (X25519 static+ephemeral →
   HKDF → ChaCha20-Poly1305 frames, `security/session.ts`). Clients speak
   first — the hub classifies a connection by its first frame.
+- Approval cards speak plain English: every `PermissionRequest` carries a
+  `summary` (1-2 sentences: what the agent wants to do and why it needs a
+  yes) that every surface shows FIRST — desktop card, phone card, the
+  notification, the biometric prompt and Jarvis — with the raw command behind
+  "show command". It opens with the rule-based `plainPermissionSummary`
+  (instant, no model wait) and is replaced by `explainPermission` (quick-checks
+  model) only while still pending. The explainer treats the command as
+  untrusted, never calls anything safe or recommends a decision (persuasive
+  output is dropped), and the policy's rule-based risk flags always stay on
+  the card. Live check: `npx tsx test/permission-explain.live.ts`.
 - Exactly one paired device slot; approvals arriving over a device session
   must be Ed25519-signed over `${decision}:${requestId}` — unsigned or
   forged approvals are dropped. Security commands (pairing, revoke, kill)

@@ -136,6 +136,19 @@ try {
     (e) => e.type === 'permission.updated' && e.request.status === 'pending',
   );
   if (pending.type !== 'permission.updated') fail('unreachable');
+  // Plain English from the first frame (rule-based, no model wait)…
+  if (!pending.request.summary?.includes('install software packages')) {
+    fail(`card opened without a plain-English summary: ${pending.request.summary ?? '(none)'}`);
+  }
+  // …then the master's explanation replaces it while the card is pending.
+  await waitFor(
+    'card summary upgraded to the master explanation',
+    (e) =>
+      e.type === 'permission.updated' &&
+      e.request.id === pending.request.id &&
+      e.request.status === 'pending' &&
+      !!e.request.summary?.startsWith('Mock explanation'),
+  );
   ws.send(
     encodeCommand({ type: 'permission.respond', requestId: pending.request.id, decision: 'approve', scope: 'once' }),
   );
@@ -143,7 +156,13 @@ try {
     'gated task done after approval',
     (e) => e.type === 'task.updated' && e.task.id === pending.request.taskId && e.task.status === 'done',
   );
-  console.log('permission gate ok: approved and completed');
+  const cardHistory = events.flatMap((e) =>
+    e.type === 'permission.updated' && e.request.id === pending.request.id ? [e.request.status] : [],
+  );
+  if (cardHistory.lastIndexOf('pending') > cardHistory.indexOf('approved')) {
+    fail(`a decided card was reopened: ${cardHistory.join(' → ')}`);
+  }
+  console.log('permission gate ok: plain-English card, master explanation, approved and completed');
 
   // 3. Single-command team creation seeds a lead too.
   ws.send(

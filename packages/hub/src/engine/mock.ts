@@ -6,6 +6,12 @@ import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './
 // keyword, "installs" trigger a permission request, everything resolves fast.
 export class MockEngine implements OrchestratorEngine {
   async complete(args: { prompt: string; model: ModelSpec }): Promise<{ text: string; tokens: number }> {
+    if (args.prompt.includes('{"explanation"')) {
+      return {
+        text: JSON.stringify({ explanation: 'Mock explanation: the worker wants to install a software package for its task.' }),
+        tokens: 5,
+      };
+    }
     // Lead split-pass prompts expect {"split": ...}; "parallel-test" in the
     // task exercises the scaffold -> parallel parts -> integration path,
     // "parallel-overlap" a plan whose parts share files (must be rejected),
