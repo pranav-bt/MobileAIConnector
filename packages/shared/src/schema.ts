@@ -78,6 +78,9 @@ export const TeamSchema = z.object({
   // Per-team MCP server grants (name -> SDK server config): the team's
   // workers get exactly these connections (e.g. Roblox Studio for QA).
   mcpServers: z.record(z.string(), z.unknown()).default({}),
+  // The owner's standing rules for this team (RULES.md in memoryDir), mirrored
+  // so clients can show and edit them. A project's CLAUDE.md adds on top.
+  rules: z.string().optional(),
   createdAt: z.number(),
 });
 export type Team = z.infer<typeof TeamSchema>;
@@ -123,6 +126,10 @@ export const PermissionRequestSchema = z.object({
   // the owner reads first; the raw command stays one tap away. Rule-based at
   // first, then replaced by the master's explanation while still pending.
   summary: z.string().optional(),
+  // Custom labels for the [approve, deny] buttons when the card is a question
+  // rather than a permission (e.g. which rule wins). The signed decision is
+  // still approve/deny, so phone signatures are unchanged.
+  choices: z.tuple([z.string(), z.string()]).optional(),
   flags: z.array(z.string()),
   reason: z.string(),
   status: PermissionStatusSchema,

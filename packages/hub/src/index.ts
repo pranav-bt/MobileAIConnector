@@ -90,6 +90,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   let handlers: CommandHandlers;
   let stopDemo: (() => void) | null = null;
   let stopSnapshots: (() => void) | null = null;
+  let stopRules: (() => void) | null = null;
   let workerCwds: () => string[] = () => [];
   let attachFreelancers: (manager: FreelancerManager) => void = () => {};
   const mode: 'demo' | 'claude' | 'mock' =
@@ -134,6 +135,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
       bus.publish({ type: 'usage.updated', usage: prior.usage });
     }
     stopSnapshots = startSnapshotWriter(bus, dataDir);
+    stopRules = () => orchestrator.stopRulesWatch();
 
     handlers = orchestrator;
     console.log(
@@ -190,6 +192,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
       stopDemo?.();
       stopLimits?.();
       stopSnapshots?.();
+      stopRules?.();
       freelancers.stop();
       paDesk.stop();
       outbox.stop();

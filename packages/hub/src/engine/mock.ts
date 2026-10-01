@@ -6,6 +6,16 @@ import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './
 // keyword, "installs" trigger a permission request, everything resolves fast.
 export class MockEngine implements OrchestratorEngine {
   async complete(args: { prompt: string; model: ModelSpec }): Promise<{ text: string; tokens: number }> {
+    // Rule-conflict check: a team rule tagged MOCK-CONFLICT contradicts the
+    // project's CLAUDE.md on indentation, until the owner has resolved it.
+    if (args.prompt.includes('{"conflicts"')) {
+      const [, resolved = ''] = args.prompt.split('ALREADY RESOLVED');
+      const conflicts =
+        args.prompt.includes('MOCK-CONFLICT') && !resolved.toLowerCase().includes('indentation')
+          ? [{ topic: 'indentation', teamRule: 'Always indent with tabs', projectRule: 'Indent with 2 spaces' }]
+          : [];
+      return { text: JSON.stringify({ conflicts }), tokens: 5 };
+    }
     if (args.prompt.includes('{"explanation"')) {
       return {
         text: JSON.stringify({ explanation: 'Mock explanation: the worker wants to install a software package for its task.' }),
@@ -147,6 +157,14 @@ export class MockEngine implements OrchestratorEngine {
     // Makes the worker's file scope observable, so the smoke can prove a
     // worker is handed its own project workspace and nothing else.
     callbacks.onActivity(`mock: workspace ${args.cwd} · extra [${(args.extraDirs ?? []).join('|')}]`);
+    // Makes the team-rules layer observable: rule count and decided conflicts.
+    const bullets = (block: string | undefined): number =>
+      (block?.split('\n\n')[0] ?? '').split('\n').filter((line) => line.startsWith('- ')).length;
+    const rulesBlock = args.prompt.split('Team rules from the owner')[1];
+    if (rulesBlock !== undefined) {
+      const decided = bullets(args.prompt.split('Conflicts the owner already decided')[1]);
+      callbacks.onActivity(`mock: team rules ${bullets(rulesBlock)} · decided ${decided}`);
+    }
     if (args.maxSubagents !== undefined) callbacks.onActivity(`mock: subagents capped at ${args.maxSubagents}`);
     callbacks.onActivity('mock: examining the task');
     // "edit-test" exercises the Edit permission path (auto-allowed by policy).

@@ -72,10 +72,10 @@ function ApprovalCard(props: { state: HubState; request: PermissionRequest; send
       )}
       <div className="btn-row">
         <button className="btn approve" onClick={() => respond('approve')}>
-          Approve
+          {request.choices?.[0] ?? 'Approve'}
         </button>
         <button className="btn deny" onClick={() => respond('deny')}>
-          Deny
+          {request.choices?.[1] ?? 'Deny'}
         </button>
       </div>
     </div>

@@ -65,6 +65,8 @@ data class PermissionRequest(
     val command: String,
     // Plain-English "what it wants to do"; the raw command stays one tap away.
     val summary: String? = null,
+    // Custom [approve, deny] labels when the card is a question (e.g. which rule wins).
+    val choices: List<String>? = null,
     val flags: List<String> = emptyList(),
     val reason: String = "",
     val status: String,

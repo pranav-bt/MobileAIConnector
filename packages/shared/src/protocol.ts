@@ -65,6 +65,10 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     mcpServers: z.record(z.string(), z.unknown()).optional(),
   }),
   z.object({ type: z.literal('team.remove'), teamId: z.string() }),
+  // The owner's per-team rules (RULES.md): replace the whole file from an
+  // editor, or append one rule. teamId may be an id or a team name.
+  z.object({ type: z.literal('team.rules.set'), teamId: z.string().min(1), markdown: z.string().max(20000) }),
+  z.object({ type: z.literal('team.rules.add'), teamId: z.string().min(1), rule: z.string().min(1).max(500) }),
   z.object({
     type: z.literal('project.register'),
     name: z.string().min(1),

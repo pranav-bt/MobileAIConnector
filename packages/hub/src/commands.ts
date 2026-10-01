@@ -26,6 +26,9 @@ export interface CommandHandlers {
     mcpServers?: Record<string, unknown>;
   }): void;
   removeTeam(teamId: string): void;
+  // Per-team RULES.md (the demo hub has none, so these are optional).
+  setTeamRules?(teamRef: string, markdown: string): void;
+  addTeamRule?(teamRef: string, rule: string): void;
   registerProject(input: { name: string; workspaceDir: string; description?: string; quotaTokens?: number }): void;
   removeProject(projectId: string): void;
   setPermissionMode(mode: 'auto' | 'strict'): void;
@@ -58,6 +61,10 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
       return handlers.updateTeam(command);
     case 'team.remove':
       return handlers.removeTeam(command.teamId);
+    case 'team.rules.set':
+      return handlers.setTeamRules?.(command.teamId, command.markdown);
+    case 'team.rules.add':
+      return handlers.addTeamRule?.(command.teamId, command.rule);
     case 'project.register':
       return handlers.registerProject(command);
     case 'project.remove':

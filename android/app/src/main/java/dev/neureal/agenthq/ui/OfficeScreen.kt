@@ -168,12 +168,12 @@ private fun ApprovalCard(request: PermissionRequest, snapshot: Snapshot, onRespo
                 modifier = Modifier.weight(1f).height(44.dp),
                 shape = RoundedCornerShape(8.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = HQ.accentSolid, contentColor = HQ.accentInk),
-            ) { Text("Approve", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
+            ) { Text(request.choices?.getOrNull(0) ?: "Approve", fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1) }
             OutlinedButton(
                 onClick = { onRespond(request, "deny") },
                 modifier = Modifier.weight(1f).height(44.dp),
                 shape = RoundedCornerShape(8.dp),
-            ) { Text("Deny", color = HQ.red, fontSize = 13.sp) }
+            ) { Text(request.choices?.getOrNull(1) ?: "Deny", color = HQ.red, fontSize = 13.sp, maxLines = 1) }
         }
     }
 }

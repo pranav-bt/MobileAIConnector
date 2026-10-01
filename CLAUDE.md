@@ -132,8 +132,24 @@ npm run typecheck      # tsc across workspaces
   keep it (`stoppedBy` on the task), and every routed line says why it went
   where it did. Regression: `test/routing.smoke.ts` + `test/thread.smoke.ts`
   (both part of `npm run smoke`).
+- Rules are layered: every team has `data/teams/<id>/RULES.md` (the
+  owner's, created from a template and never overwritten; `parseRules` in
+  shared reads it — "- " bullets, free "## " groups, HTML comments are help
+  text) and a project's own `CLAUDE.md` (loaded by the SDK for the worker)
+  adds on top. Team records carry the file as `rules` for clients (never
+  stored in teams.json; a 3 s stat watcher republishes hand edits). Before a
+  worker starts, `detectRuleConflicts` (quick check) compares the two — only
+  when the team has rules AND the project has a CLAUDE.md, once per version
+  of both — and each genuine contradiction becomes a master card
+  (`rules-…`, `choices` = custom button labels; approve = project wins, deny
+  = team wins, so phone signatures are unchanged). The answer is appended
+  under "## Resolved conflicts" as `[<projectId>] …`; workers see only their
+  project's decisions. A stopped card records nothing. Edit via the desktop
+  Teams page, `team.rules.set`/`team.rules.add`, or `/rule <team>: <text>`.
+  Live check: `npx tsx test/rules-conflict.live.ts`.
 - Composer slash-commands (parsed client-side, deterministic): /team add
   <name>: <charter> · /team workers <team> <n> · /team remove <team> ·
+  /rule <team>: <rule> ·
   /project add <name> <path> [description] · /project remove <project>.
   Prefixing a task with @<project> pins it to that project.
 - Model choices (Settings > Models, `models.set`) are an override LAYER in

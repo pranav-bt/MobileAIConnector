@@ -1292,6 +1292,88 @@ try {
 
   console.log('model choices ok: per-field precedence, exact id + effort reach the engine, Haiku effort dropped, persisted, reset restores defaults');
 
+  // 25. Team rules: every team has a RULES.md (template, mirrored to clients);
+  // a project's CLAUDE.md adds on top. A genuine conflict between the two
+  // asks the owner once (two-answer card), the answer is saved to the team's
+  // rules and reaches the worker, and a stopped card records nothing.
+  const rulesPath = join(dataDir, 'teams', 'coding', 'RULES.md');
+  const templateRules = readFileSync(rulesPath, 'utf8');
+  if (!templateRules.includes('## Rules') || !templateRules.includes('## Resolved conflicts')) fail('RULES.md template missing its sections');
+  const snapCoding = snapshot.snapshot.teams.find((team) => team.id === 'coding');
+  if (snapCoding?.rules !== templateRules) fail('team record does not mirror RULES.md to clients');
+  const codingRules = (test: (rules: string) => boolean) => (e: HubEvent) =>
+    e.type === 'team.updated' && e.team.id === 'coding' && test(e.team.rules ?? '');
+  // Team refs resolve by name too; the rule lands under "## Rules".
+  ws.send(encodeCommand({ type: 'team.rules.add', teamId: 'Coding team', rule: 'Always indent with tabs (MOCK-CONFLICT)' }));
+  await waitFor('rule added and mirrored', codingRules((rules) => rules.includes('- Always indent with tabs (MOCK-CONFLICT)')));
+  const added = readFileSync(rulesPath, 'utf8');
+  if (added.indexOf('- Always indent with tabs') > added.indexOf('## Resolved conflicts')) fail('rule appended outside ## Rules');
+
+  const rulebookDir = mkdtempSync(join(tmpdir(), 'Rulebook-'));
+  writeFileSync(join(rulebookDir, 'CLAUDE.md'), '# Rulebook\n\n- Indent with 2 spaces.\n');
+  ws.send(encodeCommand({ type: 'project.register', name: 'Rulebook', workspaceDir: rulebookDir }));
+  await waitFor('rulebook project registered', (e) => e.type === 'project.updated' && e.project.id === 'rulebook');
+
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: '@rulebook coding: format the config loader' }));
+  const ruleCard = await waitFor(
+    'rule-conflict card',
+    since(mark, (e) => e.type === 'permission.updated' && e.request.id.startsWith('rules-') && e.request.status === 'pending'),
+    15000,
+  );
+  if (ruleCard.type !== 'permission.updated') fail('unreachable');
+  const card = ruleCard.request;
+  if (!card.choices || !card.choices[0].includes('Rulebook') || !/indent with tabs/i.test(card.summary ?? '') || !card.flags.includes('rule conflict')) {
+    fail(`rule card is not a clear two-answer question: ${JSON.stringify(card)}`);
+  }
+  if (events.slice(mark).some((e) => e.type === 'activity' && e.entry.taskId === card.taskId && e.entry.message.startsWith('mock: model'))) {
+    fail('the worker started before the owner settled the rule conflict');
+  }
+  ws.send(encodeCommand({ type: 'permission.respond', requestId: card.id, decision: 'approve', scope: 'once' }));
+  await waitFor('worker sees the rules and the decision', since(mark, (e) => e.type === 'activity' && e.entry.message === 'mock: team rules 1 · decided 1'), 15000);
+  const decidedFile = readFileSync(rulesPath, 'utf8');
+  const resolvedPart = decidedFile.slice(decidedFile.indexOf('## Resolved conflicts'));
+  if (!resolvedPart.includes("- [rulebook] indentation: follow Rulebook's rule")) fail(`answer not recorded under Resolved conflicts:\n${decidedFile}`);
+
+  // Asked once: the next task in the same project goes straight to work.
+  await waitIdle('rulebook task done', 'coding');
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: '@rulebook coding: format the config writer' }));
+  await waitFor('second worker gets the saved decision', since(mark, (e) => e.type === 'activity' && e.entry.message === 'mock: team rules 1 · decided 1'), 15000);
+  if (events.slice(mark).some((e) => e.type === 'permission.updated' && e.request.id.startsWith('rules-'))) fail('owner asked again about a settled conflict');
+  // Another project sees the team rules but never Rulebook's decision.
+  await waitIdle('second rulebook task done', 'coding');
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: '@castlewars coding: polish the tower sprites' }));
+  await waitFor('other project: rules without the decision', since(mark, (e) => e.type === 'activity' && e.entry.message === 'mock: team rules 1 · decided 0'), 15000);
+
+  // Hand edits in any editor reach the clients (watcher, ~3 s).
+  await waitIdle('castlewars task done', 'coding');
+  writeFileSync(rulesPath, readFileSync(rulesPath, 'utf8').replace('## Rules\n', '## Rules\n- Prefer small commits\n'));
+  await waitFor('hand edit mirrored', codingRules((rules) => rules.includes('- Prefer small commits')), 8000);
+
+  // Deleting the decision re-asks; stopping the task at the card records nothing.
+  const withoutDecision = readFileSync(rulesPath, 'utf8').split('\n').filter((line) => !line.startsWith('- [rulebook]')).join('\n');
+  ws.send(encodeCommand({ type: 'team.rules.set', teamId: 'coding', markdown: withoutDecision }));
+  await waitFor('decision removed', codingRules((rules) => rules.includes('Prefer small commits') && !rules.includes('[rulebook]')));
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: '@rulebook coding: format the config reader' }));
+  const reAsk = await waitFor(
+    'deleted decision asks again',
+    since(mark, (e) => e.type === 'permission.updated' && e.request.id.startsWith('rules-') && e.request.status === 'pending'),
+    15000,
+  );
+  if (reAsk.type !== 'permission.updated') fail('unreachable');
+  ws.send(encodeCommand({ type: 'task.stop', taskId: reAsk.request.taskId }));
+  await waitFor('stopped at the rule card', since(mark, (e) => e.type === 'task.updated' && e.task.id === reAsk.request.taskId && e.task.status === 'paused'));
+  await waitFor('rule card expired', since(mark, (e) => e.type === 'permission.updated' && e.request.id === reAsk.request.id && e.request.status === 'expired'));
+  await settle();
+  if (readFileSync(rulesPath, 'utf8').includes('[rulebook]')) fail('a stopped rule card recorded a decision');
+  if (events.slice(mark).some((e) => e.type === 'activity' && e.entry.taskId === reAsk.request.taskId && e.entry.message.startsWith('mock: model'))) fail('a worker ran after its rule card was stopped');
+  ws.send(encodeCommand({ type: 'team.rules.set', teamId: 'coding', markdown: templateRules }));
+  await waitFor('coding rules restored', codingRules((rules) => rules === templateRules));
+  console.log('team rules ok: RULES.md per team, mirrored + hand edits, conflict asked once with two answers, saved per project, stop records nothing');
+
   // 29. Event log: rolls over instead of growing without bound, and appends
   // off the publish path so a busy run isn't paying for a sync write each
   // time. Driven directly — 8 MB of real events would be a slow smoke.

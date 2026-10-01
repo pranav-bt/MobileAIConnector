@@ -358,7 +358,7 @@ class MainActivity : FragmentActivity() {
         )
         prompt.authenticate(
             BiometricPrompt.PromptInfo.Builder()
-                .setTitle("Approve this?")
+                .setTitle(request.choices?.getOrNull(0)?.let { "$it?" } ?: "Approve this?")
                 .setSubtitle("Signed with this device's key")
                 .setDescription((request.summary ?: request.command).take(300))
                 .setNegativeButtonText("Cancel")

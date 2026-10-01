@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MODEL_DEFAULTS, isInternalTask, resolveModel, type Agent, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
@@ -16,12 +17,14 @@ import {
   explainPermission,
   plainPermissionSummary,
   type PermissionContext,
+  detectRuleConflicts,
+  type RuleConflict,
 } from './master.js';
 import { capturePcScreen, saveIncomingFile, shareFile } from '../files.js';
 import { evaluatePermission } from './policy.js';
 import { delay, isInside } from './util.js';
 import type { PermissionMode } from '../config.js';
-import type { TeamRegistry } from './teams.js';
+import { parseRules, type ParsedRules, type TeamRegistry } from './teams.js';
 import type { ProjectRegistry } from './projects.js';
 
 // The real thing: master intake -> team lead -> worker -> lead review ->
@@ -138,6 +141,13 @@ export class Orchestrator implements CommandHandlers {
   // Owner's model choices (a layer over defaults; see ModelOverridesSchema).
   #models: ModelOverrides = { teams: {} };
   #onModelsChange: (overrides: ModelOverrides) => void = () => {};
+  // Team rules (RULES.md) vs project CLAUDE.md: rule-set versions already
+  // checked and settled, checks in flight (parallel parts share one), and
+  // the file stamps the watcher compares to republish hand edits.
+  #rulesSettled = new Set<string>();
+  #rulesChecks = new Map<string, Promise<void>>();
+  #rulesStamps = new Map<string, string>();
+  #rulesTimer: NodeJS.Timeout | null = null;
 
   #projects: ProjectRegistry;
   #policy: { mode: PermissionMode };
@@ -182,12 +192,71 @@ export class Orchestrator implements CommandHandlers {
     });
   }
 
+  // Every team record goes out with its RULES.md, so clients show the rules
+  // the workers actually get. The stamp keeps the watcher from re-sending.
+  #publishTeam(team: Team): void {
+    this.#rulesStamps.set(team.id, this.#registry.rulesStamp(team.id));
+    this.#bus.publish({ type: 'team.updated', team: this.#registry.withRules(team) });
+  }
+
+  // Hand edits to RULES.md (any editor) reach the clients within ~3 s; a
+  // stat per team per tick, the file is only read when it changed.
+  #watchRules(): void {
+    if (this.#rulesTimer) return;
+    this.#rulesTimer = setInterval(() => {
+      for (const team of this.#registry.all()) {
+        if (this.#registry.rulesStamp(team.id) !== this.#rulesStamps.get(team.id)) this.#publishTeam(team);
+      }
+    }, 3000);
+    this.#rulesTimer.unref();
+  }
+
+  stopRulesWatch(): void {
+    if (this.#rulesTimer) clearInterval(this.#rulesTimer);
+    this.#rulesTimer = null;
+  }
+
+  // "coding", "coding-team", "Coding team", "Cod" — exact id first.
+  #findTeam(ref: string): Team | undefined {
+    const key = ref.trim().toLowerCase();
+    const teams = this.#registry.all();
+    return (
+      this.#registry.get(key) ??
+      this.#registry.get(`${key}-team`) ??
+      teams.find((team) => team.name.toLowerCase() === key) ??
+      teams.find((team) => team.name.toLowerCase().startsWith(key) || team.id.startsWith(key))
+    );
+  }
+
+  setTeamRules(teamRef: string, markdown: string): void {
+    const team = this.#findTeam(teamRef);
+    if (!team) {
+      this.#activity('master', null, `no team called "${teamRef}" — rules not saved`);
+      return;
+    }
+    this.#registry.setRules(team.id, markdown);
+    this.#publishTeam(team);
+    const count = parseRules(markdown).rules.length;
+    this.#activity('master', null, `${team.name} rules saved — ${count} rule${count === 1 ? '' : 's'}`);
+  }
+
+  addTeamRule(teamRef: string, rule: string): void {
+    const team = this.#findTeam(teamRef);
+    if (!team || !this.#registry.addRule(team.id, rule)) {
+      this.#activity('master', null, `no team called "${teamRef}" — rule not added`);
+      return;
+    }
+    this.#publishTeam(team);
+    this.#activity('master', null, `rule added for ${team.name}: ${rule.slice(0, 80)}`);
+  }
+
   init(): void {
+    this.#watchRules();
     for (const project of this.#projects.all()) {
       this.#bus.publish({ type: 'project.updated', project });
     }
     for (const team of this.#registry.all()) {
-      this.#bus.publish({ type: 'team.updated', team });
+      this.#publishTeam(team);
       this.#publishAgent({
         id: `${team.id}-lead`,
         name: `${team.name.replace(/ team$/i, '')} Lead`,
@@ -573,6 +642,33 @@ export class Orchestrator implements CommandHandlers {
       }
       if (teamMemory) sections.push('Team notes:', teamMemory);
     }
+    // The owner's standing rules for this team; the project's CLAUDE.md (the
+    // SDK loads it for the worker) adds on top. Only this project's decided
+    // conflicts are shown — never another project's.
+    if (task.teamId) {
+      const { rules, resolutions } = parseRules(this.#registry.readRules(task.teamId));
+      if (rules.length > 0) {
+        const decided = this.#projectResolutions(resolutions, task.projectId ?? this.#projects.defaultProject().id);
+        if (history.length === 0 && !teamMemory) sections.push('---');
+        sections.push(
+          'Team rules from the owner — follow them in every project:',
+          ...rules.map((rule) => `- ${rule}`),
+          '',
+          "This project's own CLAUDE.md (already loaded for you) adds on top of these rules.",
+        );
+        if (decided.length > 0) {
+          sections.push(
+            'Conflicts the owner already decided for this project (these override both rule sets):',
+            ...decided.map((line) => `- ${line}`),
+            '',
+          );
+        }
+        sections.push(
+          "If a team rule and this project's CLAUDE.md contradict and nothing above settles it, don't pick one yourself: " +
+            'do the rest of the task and describe the conflict in your report so the owner can decide.',
+        );
+      }
+    }
     if (this.#projects.roots.length > 0) {
       const workspaceDir =
         ((task.projectId ? this.#projects.get(task.projectId) : undefined) ?? this.#projects.defaultProject())
@@ -687,8 +783,13 @@ export class Orchestrator implements CommandHandlers {
     this.#runningCwds.set(taskId, scope.cwd);
 
     try {
+      // Team rules vs this project's CLAUDE.md: the owner settles genuine
+      // conflicts before the worker starts (the prompt is built after, so it
+      // carries the answers).
+      await this.#settleRuleConflicts(taskId, team, project, workerId);
+      if (this.#stopping.has(taskId)) throw new Error('stopped while settling rules');
       const result = await this.#engine.runWorker({
-        prompt: this.#buildWorkerPrompt(task),
+        prompt: this.#buildWorkerPrompt(this.#bus.state.tasks[taskId] ?? task),
         team,
         model: workerSpec,
         cwd: scope.cwd,
@@ -748,7 +849,14 @@ export class Orchestrator implements CommandHandlers {
       this.#patchTask(taskId, { status: 'review', progressPct: 95 });
       this.#patchAgent(workerId, { status: 'reporting', activity: 'reporting to lead' });
       this.#patchAgent(`${team.id}-lead`, { status: 'working', activity: `reviewing: ${task.title.slice(0, 40)}` });
-      const review = await reviewWorkerReport(this.#engine, team, task.title, result.synopsis, leadSpec);
+      const review = await reviewWorkerReport(
+        this.#engine,
+        team,
+        task.title,
+        result.synopsis,
+        leadSpec,
+        parseRules(this.#registry.readRules(team.id)).rules,
+      );
       this.#recordTokens(leadSpec.tier, review.tokens);
       if (review.memoryNote) {
         this.#registry.appendMemory(team.id, review.memoryNote);
@@ -1339,6 +1447,148 @@ export class Orchestrator implements CommandHandlers {
     if (nextTaskId) void this.#runTask(nextTaskId, team);
   }
 
+  // --- team rules vs project rules ---------------------------------------
+
+  // The project's own rules file, as its workers' SDK session loads it.
+  #projectRulesMd(project: Project): string {
+    const dir = project.workspaceDir || this.#workspaceDir;
+    for (const path of [join(dir, 'CLAUDE.md'), join(dir, '.claude', 'CLAUDE.md')]) {
+      try {
+        if (existsSync(path)) return readFileSync(path, 'utf8').slice(0, 8000);
+      } catch {
+        // unreadable: treated as no project rules
+      }
+    }
+    return '';
+  }
+
+  // Resolutions are recorded as "[<projectId>] …"; a project only sees its own.
+  #projectResolutions(resolutions: string[], projectId: string): string[] {
+    const prefix = `[${projectId}] `;
+    return resolutions.filter((line) => line.startsWith(prefix)).map((line) => line.slice(prefix.length));
+  }
+
+  #rulesKey(teamId: string, project: Project, parsed: ParsedRules, projectMd: string): string {
+    const digest = createHash('sha1')
+      .update(parsed.rules.join('\n'))
+      .update('\0')
+      .update(this.#projectResolutions(parsed.resolutions, project.id).join('\n'))
+      .update('\0')
+      .update(projectMd)
+      .digest('hex');
+    return `${teamId}|${project.id}|${digest}`;
+  }
+
+  // Zero cost unless the team has rules AND the project has a CLAUDE.md;
+  // then one quick check per version of the two, shared by parallel runs.
+  async #settleRuleConflicts(taskId: string, team: Team, project: Project, workerId: string): Promise<void> {
+    const parsed = parseRules(this.#registry.readRules(team.id));
+    if (parsed.rules.length === 0) return;
+    const projectMd = this.#projectRulesMd(project);
+    if (!projectMd.trim()) return;
+    const key = this.#rulesKey(team.id, project, parsed, projectMd);
+    if (this.#rulesSettled.has(key)) return;
+    let check = this.#rulesChecks.get(key);
+    if (!check) {
+      check = this.#checkRuleConflicts(taskId, team, project, parsed, projectMd, workerId, key).finally(() =>
+        this.#rulesChecks.delete(key),
+      );
+      this.#rulesChecks.set(key, check);
+    }
+    await check;
+  }
+
+  async #checkRuleConflicts(
+    taskId: string,
+    team: Team,
+    project: Project,
+    parsed: ParsedRules,
+    projectMd: string,
+    workerId: string,
+    key: string,
+  ): Promise<void> {
+    this.#patchAgent(workerId, { activity: `checking team rules against ${project.name}` });
+    const model = this.#checksModel();
+    const result = await detectRuleConflicts(
+      this.#engine,
+      {
+        teamName: team.name,
+        projectName: project.name,
+        teamRules: parsed.rules,
+        resolutions: this.#projectResolutions(parsed.resolutions, project.id),
+        projectMd,
+      },
+      model,
+    );
+    this.#recordTokens(model.tier, result.tokens);
+    if (!result.ok) {
+      // Not settled: the worker is told to report conflicts, and the next run checks again.
+      this.#activity('master', taskId, `couldn't check ${team.name} rules against ${project.name} — the worker will flag any conflict`);
+      return;
+    }
+    for (const [index, conflict] of result.conflicts.entries()) {
+      const winner = await this.#askRuleConflict(taskId, team, project, conflict, workerId, index);
+      if (!winner) return; // stopped before answering: nothing recorded, asked again next time
+      const rule = winner === 'project' ? `${project.name}'s rule` : 'the team rule';
+      this.#registry.recordResolution(
+        team.id,
+        `[${project.id}] ${conflict.topic}: follow ${rule} — team: "${conflict.teamRule}" / ${project.name}: "${conflict.projectRule}" (decided ${new Date().toISOString().slice(0, 10)})`,
+      );
+      this.#publishTeam(team);
+      this.#activity('master', taskId, `${team.name} in ${project.name}: ${conflict.topic} → following ${rule} (saved to the team's rules)`);
+    }
+    this.#rulesSettled.add(key);
+    // Recording answers changed the file; that version is settled too.
+    const after = parseRules(this.#registry.readRules(team.id));
+    this.#rulesSettled.add(this.#rulesKey(team.id, project, after, projectMd));
+  }
+
+  // A master card with two answers: approve = the project's rule wins, deny =
+  // the team's rule wins (the signed decision stays approve/deny). Resolves
+  // null when the card expired instead (the task was stopped).
+  async #askRuleConflict(
+    taskId: string,
+    team: Team,
+    project: Project,
+    conflict: RuleConflict,
+    workerId: string,
+    index: number,
+  ): Promise<'project' | 'team' | null> {
+    const requestId = `rules-${team.id}-${project.id}-${now().toString(36)}-${index}`;
+    const teamLabel = team.name.replace(/ team$/i, '');
+    this.#bus.publish({
+      type: 'permission.updated',
+      request: {
+        id: requestId,
+        taskId,
+        agentId: 'master',
+        teamId: team.id,
+        command: `${team.name} rule: "${conflict.teamRule}"\n${project.name} CLAUDE.md: "${conflict.projectRule}"`,
+        summary:
+          `${team.name}'s rules say "${conflict.teamRule}", but ${project.name}'s CLAUDE.md says "${conflict.projectRule}". ` +
+          `Which should ${teamLabel} follow in ${project.name}? Your choice is saved to the team's rules.`,
+        choices: [`Follow ${project.name}`, `Follow ${teamLabel} rules`],
+        flags: ['rule conflict'],
+        reason: `Rule conflict on ${conflict.topic}. Approve = ${project.name}'s CLAUDE.md wins; deny = the ${team.name} rule wins.`,
+        status: 'pending',
+        scope: 'once',
+        requestedAt: now(),
+        resolvedAt: null,
+      },
+    });
+    this.#patchAgent(workerId, { status: 'waiting_permission', activity: 'waiting on your rule choice' });
+    this.#patchAgent('master', { status: 'waiting_permission', activity: `asking which ${conflict.topic} rule wins` });
+    this.#patchTask(taskId, { status: 'awaiting_permission' });
+    this.#activity('master', taskId, `${team.name} rules and ${project.name}'s CLAUDE.md disagree on ${conflict.topic} — asking you`);
+    const decision = await new Promise<'approve' | 'deny'>((resolve) => this.#pendingResolvers.set(requestId, resolve));
+    this.#masterStatus();
+    if (this.#bus.state.permissions[requestId]?.status === 'expired') return null;
+    // Restore only this task (a parallel part may share the answer).
+    if (this.#bus.state.tasks[taskId]?.status === 'awaiting_permission') this.#patchTask(taskId, { status: 'in_flight' });
+    this.#patchAgent(workerId, { status: 'working', activity: 'rules settled — starting' });
+    return decision === 'approve' ? 'project' : 'team';
+  }
+
   #raisePermission(
     taskId: string,
     workerId: string,
@@ -1427,8 +1677,9 @@ export class Orchestrator implements CommandHandlers {
       request: { ...request, status: decision === 'approve' ? 'approved' : 'denied', resolvedAt: now() },
     });
     // Master's project-switch card: intake is waiting and sets the task's
-    // status and project itself.
-    if (requestId.startsWith('route-')) {
+    // status and project itself. Rule-conflict cards: the run waiting on the
+    // answer records it and restores the task's status.
+    if (requestId.startsWith('route-') || requestId.startsWith('rules-')) {
       const resolve = this.#pendingResolvers.get(requestId);
       this.#pendingResolvers.delete(requestId);
       resolve?.(decision);
@@ -1443,7 +1694,7 @@ export class Orchestrator implements CommandHandlers {
           ? this.#registry.update({ teamId: team.id, maxConcurrentWorkers: team.maxConcurrentWorkers + 1 })
           : null;
         if (updated) {
-          this.#bus.publish({ type: 'team.updated', team: updated });
+          this.#publishTeam(updated);
           this.#activity(
             'master',
             null,
@@ -1476,7 +1727,7 @@ export class Orchestrator implements CommandHandlers {
     mcpServers?: Record<string, unknown>;
   }): void {
     const team = this.#registry.add(input);
-    this.#bus.publish({ type: 'team.updated', team });
+    this.#publishTeam(team);
     this.#publishAgent({
       id: `${team.id}-lead`,
       name: `${team.name.replace(/ team$/i, '')} Lead`,
@@ -1502,7 +1753,7 @@ export class Orchestrator implements CommandHandlers {
   }): void {
     const team = this.#registry.update(input);
     if (!team) return;
-    this.#bus.publish({ type: 'team.updated', team });
+    this.#publishTeam(team);
     this.#activity(
       'master',
       null,
