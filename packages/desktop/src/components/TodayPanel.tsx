@@ -32,8 +32,8 @@ function TaskCard(props: { state: HubState; task: Task; showProgress?: boolean }
 function ApprovalCard(props: { state: HubState; request: PermissionRequest; send: (command: ClientCommand) => void }): JSX.Element {
   const { state, request, send } = props;
   const [showCommand, setShowCommand] = useState(false);
-  const respond = (decision: 'approve' | 'deny') =>
-    send({ type: 'permission.respond', requestId: request.id, decision, scope: 'once' });
+  const respond = (decision: 'approve' | 'deny', choice?: number) =>
+    send({ type: 'permission.respond', requestId: request.id, decision, scope: 'once', ...(choice === undefined ? {} : { choice }) });
   return (
     <div className="tcard awaiting">
       <div style={{ fontSize: 12.5, color: 'var(--text)', lineHeight: 1.5 }}>{request.summary ?? request.command}</div>
@@ -70,14 +70,28 @@ function ApprovalCard(props: { state: HubState; request: PermissionRequest; send
           )}
         </div>
       )}
-      <div className="btn-row">
-        <button className="btn approve" onClick={() => respond('approve')}>
-          {request.choices?.[0] ?? 'Approve'}
-        </button>
-        <button className="btn deny" onClick={() => respond('deny')}>
-          {request.choices?.[1] ?? 'Deny'}
-        </button>
-      </div>
+      {request.options ? (
+        // A pick-one question: one button per option, then "None of these".
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10 }}>
+          {request.options.map((label, index) => (
+            <button key={index} className="btn approve" style={{ width: '100%' }} onClick={() => respond('approve', index)}>
+              {label}
+            </button>
+          ))}
+          <button className="btn deny" style={{ width: '100%' }} onClick={() => respond('deny')}>
+            None of these
+          </button>
+        </div>
+      ) : (
+        <div className="btn-row">
+          <button className="btn approve" onClick={() => respond('approve')}>
+            {request.choices?.[0] ?? 'Approve'}
+          </button>
+          <button className="btn deny" onClick={() => respond('deny')}>
+            {request.choices?.[1] ?? 'Deny'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

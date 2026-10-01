@@ -127,7 +127,7 @@ private fun AgentChip(agent: Agent) {
 }
 
 @Composable
-private fun ApprovalCard(request: PermissionRequest, snapshot: Snapshot, onRespond: (PermissionRequest, String) -> Unit) {
+private fun ApprovalCard(request: PermissionRequest, snapshot: Snapshot, onRespond: (PermissionRequest, String, Int?) -> Unit) {
     val agentName = snapshot.agents.firstOrNull { it.id == request.agentId }?.name ?: request.agentId
     val teamName = snapshot.teams.firstOrNull { it.id == request.teamId }?.name ?: (request.teamId ?: "")
     Column(
@@ -162,15 +162,33 @@ private fun ApprovalCard(request: PermissionRequest, snapshot: Snapshot, onRespo
                 Text(request.reason, color = HQ.text2, fontSize = 11.sp, lineHeight = 15.sp)
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        val options = request.options
+        if (options != null) {
+            // A pick-one question: one button per option, then "None of these".
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                options.forEachIndexed { index, label ->
+                    Button(
+                        onClick = { onRespond(request, "approve", index) },
+                        modifier = Modifier.fillMaxWidth().height(44.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = HQ.accentSolid, contentColor = HQ.accentInk),
+                    ) { Text(label, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1) }
+                }
+                OutlinedButton(
+                    onClick = { onRespond(request, "deny", null) },
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    shape = RoundedCornerShape(8.dp),
+                ) { Text("None of these", color = HQ.red, fontSize = 13.sp) }
+            }
+        } else Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
-                onClick = { onRespond(request, "approve") },
+                onClick = { onRespond(request, "approve", null) },
                 modifier = Modifier.weight(1f).height(44.dp),
                 shape = RoundedCornerShape(8.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = HQ.accentSolid, contentColor = HQ.accentInk),
             ) { Text(request.choices?.getOrNull(0) ?: "Approve", fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1) }
             OutlinedButton(
-                onClick = { onRespond(request, "deny") },
+                onClick = { onRespond(request, "deny", null) },
                 modifier = Modifier.weight(1f).height(44.dp),
                 shape = RoundedCornerShape(8.dp),
             ) { Text(request.choices?.getOrNull(1) ?: "Deny", color = HQ.red, fontSize = 13.sp, maxLines = 1) }
@@ -211,7 +229,7 @@ fun MainScreen(
     onToggleBackground: (Boolean) -> Unit,
     jarvisEnabled: Boolean,
     onToggleJarvis: (Boolean) -> Unit,
-    onRespond: (PermissionRequest, String) -> Unit,
+    onRespond: (PermissionRequest, String, Int?) -> Unit,
     onSubmitTask: (String) -> Unit,
     onVoice: () -> Unit,
     onSendFile: () -> Unit,
@@ -415,7 +433,7 @@ private fun OfficeTab(
     snapshot: Snapshot,
     connected: Boolean,
     pending: List<PermissionRequest>,
-    onRespond: (PermissionRequest, String) -> Unit,
+    onRespond: (PermissionRequest, String, Int?) -> Unit,
     onFreelancerSend: (String, String) -> Unit,
 ) {
     val master = snapshot.agents.firstOrNull { it.role == "master" }

@@ -22,8 +22,8 @@ const projects = [
   project('pancakestack', 'PancakeStack'),
 ];
 const teams = [
-  { id: 'qa-testing', name: 'QA & Testing', charter: 'tests things' },
-  { id: 'coding', name: 'Coding', charter: 'builds things' },
+  { id: 'qa-testing', name: 'QA & Testing', charter: 'tests things', allowedTools: ['read', 'bash'] },
+  { id: 'coding', name: 'Coding', charter: 'builds things', allowedTools: ['read', 'edit', 'bash'] },
 ] as unknown as Team[];
 
 // A master that always wants CastleWars, in both the project and the title.
@@ -38,6 +38,7 @@ const greedy = (reply: object): OrchestratorEngine =>
 const castleReply = {
   teamId: 'qa-testing',
   projectId: 'castlewars',
+  project: 'thread',
   title: 'Audit CastleWars for a fully playable, publishable build',
   reason: 'mentions bases',
 };
@@ -51,14 +52,64 @@ const thread = { projectId: 'pancakestack', recent: ['"build the map and assets"
 const inherited = await routeTask(greedy(castleReply), teams, projects, 'mobileaiconnector', ask, null, undefined, thread);
 if (inherited.projectId !== 'pancakestack') fail(`unnamed ask went to ${inherited.projectId}, not the thread's project`);
 if (/castle/i.test(inherited.title)) fail(`title still names CastleWars: ${inherited.title}`);
-if (/castlewars/i.test(prompts.at(-1)!)) fail('the routing prompt offered CastleWars for an ask that never named it');
+// Other projects are listed for suggestions only — the model can't pick them.
+if (!/you may suggest, never pick/.test(prompts.at(-1)!)) fail('the routing prompt does not mark other projects as suggestion-only');
 if (!prompts.at(-1)!.includes('build the map and assets')) fail('the routing prompt is missing the recent conversation');
 if (inherited.projectBasis !== 'thread') fail(`unnamed ask basis is ${inherited.projectBasis}, not thread`);
 
-// 2. No thread yet → the default project, never the model's guess.
+// 2. No thread yet → the owner is asked; never a default, never the model's guess.
 const fresh = await routeTask(greedy(castleReply), teams, projects, 'mobileaiconnector', ask, null);
-if (fresh.projectId !== 'mobileaiconnector') fail(`threadless unnamed ask went to ${fresh.projectId}`);
-if (fresh.projectBasis !== 'default') fail(`threadless basis is ${fresh.projectBasis}, not default`);
+if (fresh.projectBasis !== 'ask' || fresh.projectId !== '') fail(`threadless unnamed ask was not asked: ${fresh.projectBasis} ${fresh.projectId}`);
+if (!fresh.question) fail('an ask decision carries no question');
+
+// 2b. The ask doesn't fit the thread → asked, with the model's guesses and
+// the thread as options — even a greedy CastleWars guess is only an option.
+const off = await routeTask(
+  greedy({ ...castleReply, project: 'unsure', suggest: ['castlewars', 'NotAThing', 'PancakeStackOld'] }),
+  teams,
+  projects,
+  'mobileaiconnector',
+  'plan the guest list for saturday',
+  null,
+  undefined,
+  thread,
+  [],
+  [{ name: 'PancakeStackOld', path: 'D:\\Work\\Roblox\\PancakeStackOld' }],
+);
+const offered = (off.question?.options ?? []).map((option) => (option.kind === 'project' ? option.id : `folder:${option.name}`));
+if (off.projectBasis !== 'ask') fail(`off-thread ask basis is ${off.projectBasis}, not ask`);
+if (offered.join(',') !== 'castlewars,folder:PancakeStackOld,pancakestack') fail(`off-thread options wrong: ${offered.join(',')}`);
+if (!/PancakeStack work/.test(off.question?.reason ?? '')) fail(`off-thread reason unclear: ${off.question?.reason}`);
+
+// 2c. A missing verdict is not a licence: asked, not defaulted.
+const vague = await routeTask(greedy({ teamId: 'coding', title: 'x' }), teams, projects, 'mobileaiconnector', 'do the thing', null, undefined, thread);
+if (vague.projectBasis !== 'ask') fail(`no verdict should ask, got ${vague.projectBasis}`);
+
+// 2d. "General" (about no project) runs in the hub workspace — but only for
+// teams that run no commands; shell work is always asked.
+const textTeams = [...teams, { id: 'personal-assistant-team', name: 'PA', charter: 'todos', allowedTools: ['read', 'edit'] }] as unknown as Team[];
+const general = await routeTask(
+  greedy({ teamId: 'personal-assistant-team', project: 'general', title: 'Add eggs to todos' }),
+  textTeams,
+  projects,
+  'mobileaiconnector',
+  'add eggs to my todos',
+  null,
+  undefined,
+  thread,
+);
+if (general.projectBasis !== 'general' || general.projectId !== 'mobileaiconnector') fail(`general ask: ${general.projectBasis} ${general.projectId}`);
+const generalShell = await routeTask(
+  greedy({ teamId: 'coding', project: 'general', title: 'Clean temp files' }),
+  textTeams,
+  projects,
+  'mobileaiconnector',
+  'clean up the temp files',
+  null,
+  undefined,
+  thread,
+);
+if (generalShell.projectBasis !== 'ask') fail(`a "general" shell task was not asked: ${generalShell.projectBasis}`);
 
 // 3. Naming the project (any spacing) lets the model pick it.
 const named = await routeTask(
@@ -101,6 +152,8 @@ const broken = {
 const fallback = await routeTask(broken, teams, projects, 'mobileaiconnector', ask, null, undefined, thread);
 if (fallback.projectId !== 'pancakestack' || !fallback.fallback) fail('keyword fallback did not inherit the thread project');
 if (fallback.projectBasis !== 'thread') fail(`fallback basis is ${fallback.projectBasis}, not thread`);
+const lost = await routeTask(broken, teams, projects, 'mobileaiconnector', ask, null);
+if (lost.projectBasis !== 'ask') fail(`offline with no thread should ask, got ${lost.projectBasis}`);
 
 // 6. Name matching: spacing-insensitive, but whole words only.
 const hits = (text: string) => namedProjects(projects, text).map((p) => p.id);

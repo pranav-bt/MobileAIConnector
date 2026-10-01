@@ -111,6 +111,10 @@ async function waitIdle(label: string, teamId?: string, timeoutMs = 30000): Prom
   }
 }
 
+// Events from index `mark` on, matching `test`.
+const since = (mark: number, test: (e: HubEvent) => boolean) => (e: HubEvent) => events.indexOf(e) >= mark && test(e);
+let mark = 0;
+
 try {
   await new Promise<void>((resolve, reject) => {
     ws.on('open', () => resolve());
@@ -128,7 +132,7 @@ try {
   console.log(`registry ok: ${snapshot.snapshot.teams.length} teams, ${leadCount} leads, master seeded`);
 
   // 1. Routing by charter: mentions design -> design team, full lifecycle.
-  ws.send(encodeCommand({ type: 'task.submit', text: 'Write up the design direction for the mobile app' }));
+  ws.send(encodeCommand({ type: 'task.submit', text: '@mobileaiconnector Write up the design direction for the mobile app' }));
   const routed = await waitFor(
     'design task routed to design team',
     (e) => e.type === 'task.updated' && e.task.detail.startsWith('Write up the design') && e.task.teamId === 'design',
@@ -302,6 +306,26 @@ try {
     fail('out-of-roots project was registered anyway');
   }
   console.log('workspace-roots policy ok: out-of-roots registration refused');
+
+  // 7b. The thread's project (sandbox) was removed: an unnamed ask now has
+  // no thread, so it is ASKED — never run in a default. Answering "None"
+  // runs nothing; a pin re-anchors the thread for the scenarios below.
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: 'coding: orphan-test where does this go' }));
+  const orphanCard = await waitFor(
+    'threadless ask asks which project',
+    since(mark, (e) => e.type === 'permission.updated' && e.request.id.startsWith('project-') && e.request.status === 'pending'),
+  ).catch((error) => {
+    const lines = events.slice(mark).filter((e) => e.type === 'activity' && e.entry.agentId === 'master');
+    console.error(lines.map((e) => (e.type === 'activity' ? e.entry.message : '')).join('\n'));
+    throw error;
+  });
+  if (orphanCard.type !== 'permission.updated' || !orphanCard.request.options?.length) fail('which-project card has no options');
+  ws.send(encodeCommand({ type: 'permission.respond', requestId: orphanCard.request.id, decision: 'deny', scope: 'once' }));
+  await waitFor('orphan not run', since(mark, (e) => e.type === 'task.updated' && e.task.id === orphanCard.request.taskId && e.task.status === 'paused'));
+  ws.send(encodeCommand({ type: 'task.submit', text: '@mobileaiconnector coding: anchor-thread note' }));
+  await waitFor('thread re-anchored', (e) => e.type === 'task.updated' && e.task.detail.includes('anchor-thread') && e.task.status === 'done', 15000);
+  console.log('threadless ask ok: asked which project (no default), None runs nothing');
 
   // 8. Permission policy — auto (default): plain edits run without asking…
   ws.send(encodeCommand({ type: 'task.submit', text: 'coding: edit-test tweak the readme' }));
@@ -1219,7 +1243,6 @@ try {
   // Fields resolve independently (per-team > all-role > default), the engine
   // receives the exact model id and effort, an effort the model can't take
   // (Haiku) is dropped, chips follow, it persists, and reset restores all.
-  const since = (mark: number, test: (e: HubEvent) => boolean) => (e: HubEvent) => events.indexOf(e) >= mark && test(e);
   const ranOn = (mark: number, label: string, expected: string) =>
     waitFor(label, since(mark, (e) => e.type === 'activity' && e.entry.message === `mock: model ${expected}`), 15000);
   ws.send(
@@ -1247,7 +1270,7 @@ try {
   const savedConfig = JSON.parse(readFileSync(join(dataDir, 'config.json'), 'utf8'));
   if (savedConfig.modelOverrides?.worker?.model !== 'claude-haiku-4-5-20251001') fail('model overrides were not persisted to config.json');
 
-  let mark = events.length;
+  mark = events.length;
   ws.send(encodeCommand({ type: 'task.submit', text: 'coding: models-probe-one' }));
   // all-workers Haiku; its 'low' effort is dropped (Haiku has no effort control)
   await ranOn(mark, 'coding worker on the all-workers model, effort dropped for Haiku', 'claude-haiku-4-5-20251001 · effort default');

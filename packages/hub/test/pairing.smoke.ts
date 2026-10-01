@@ -149,9 +149,37 @@ try {
 
   // 4. Signature-gated approvals.
   local.send(encodeCommand({ type: 'task.submit', text: 'Please install the coding test tooling' }));
+
+  // 4-pre. No thread yet, so the master asks which project — a pick-one
+  // card. The phone's answer must be signed over "approve:<id>#<choice>":
+  // a signature over the plain "approve:<id>" (or another index) is refused.
+  const question = await waitFor(
+    'which-project card',
+    (e) => e.type === 'permission.updated' && e.request.status === 'pending' && e.request.id.startsWith('project-'),
+  );
+  if (question.type !== 'permission.updated' || !question.request.options?.length) fail('no pick-one card');
+  const questionId = question.request.id;
+  const signOver = (message: string) => cryptoSign(null, Buffer.from(message, 'utf8'), deviceSign.privateKey).toString('base64');
+  const answer = (signatureB64: string, choice?: number) =>
+    phone.send(
+      sealed.seal(
+        encodeCommand({ type: 'permission.respond', requestId: questionId, decision: 'approve', scope: 'once', signatureB64, ...(choice === undefined ? {} : { choice }) }),
+      ),
+    );
+  answer(signOver(`approve:${questionId}`), 0); // signed without the choice
+  answer(signOver(`approve:${questionId}#1`), 0); // signed for another option
+  answer(signOver(`approve:${questionId}#0`)); // choice missing
+  await sleep(700);
+  if (events.some((e) => e.type === 'permission.updated' && e.request.id === questionId && e.request.status === 'approved')) {
+    fail('a pick-one answer was accepted without a signature over its choice');
+  }
+  answer(signOver(`approve:${questionId}#0`), 0);
+  await waitFor('signed pick accepted', (e) => e.type === 'permission.updated' && e.request.id === questionId && e.request.status === 'approved');
+  console.log('pick-one answers: signature must cover the choice');
+
   const pending = await waitFor(
     'permission request',
-    (e) => e.type === 'permission.updated' && e.request.status === 'pending',
+    (e) => e.type === 'permission.updated' && e.request.status === 'pending' && !e.request.id.startsWith('project-'),
   );
   if (pending.type !== 'permission.updated') fail('unreachable');
   const requestId = pending.request.id;

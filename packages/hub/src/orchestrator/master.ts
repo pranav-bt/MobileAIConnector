@@ -12,19 +12,22 @@ export interface PlanStep {
   instruction: string;
 }
 
-export type ProjectBasis = 'pinned' | 'named' | 'thread' | 'default';
+export type ProjectBasis = 'pinned' | 'named' | 'thread' | 'general' | 'ask';
 
 export interface RoutingDecision {
   teamId: string;
-  projectId: string;
+  projectId: string; // '' when projectBasis is 'ask'
   title: string;
   reason: string;
   tokens: number;
   fallback: boolean;
   // Why projectId was chosen: an @project pin, a project named in the text,
-  // the owner's current thread, or the default (no thread yet). 'named' is
-  // the only basis that can leave the thread, so it is what gets confirmed.
+  // the owner's current thread, or a general ask that is about no project
+  // (no shell work; runs in the hub workspace). 'named' is the only basis
+  // that can leave the thread, so it is what gets confirmed. 'ask' means the
+  // master doesn't know — the owner is asked (see `question`), never a default.
   projectBasis: ProjectBasis;
+  question: ProjectQuestion | null;
   // Present when the master decomposed the task into a sequenced multi-team
   // plan (each step gets the previous step's synopsis as a handover).
   steps: PlanStep[] | null;
@@ -66,65 +69,105 @@ export function ownerRulesBlock(rules: string[], heading: string): string[] {
   return [heading, ...rules.map((rule) => `- ${rule.slice(0, 300)}`), ''];
 }
 
-function routingPrompt(
-  teams: Team[],
-  candidates: Project[],
-  fallbackProjectId: string,
-  projectFixed: boolean,
-  recent: string[],
-  text: string,
-  masterRules: string[],
-): string {
-  const teamLines = teams
+// A project folder under the workspace roots that isn't registered yet.
+export interface FolderCandidate {
+  name: string;
+  path: string;
+}
+
+// What the master can offer when it has to ask which project an ask is for.
+export type ProjectOption = { kind: 'project'; id: string; name: string } | { kind: 'folder'; name: string; path: string };
+
+export interface ProjectQuestion {
+  reason: string;
+  options: ProjectOption[]; // 0-4; empty = nothing to suggest, the owner names it
+}
+
+function projectLine(project: Project): string {
+  return `* project: ${project.id} | ${project.name} | ${project.description || '(no description)'}`;
+}
+
+function routingPrompt(args: {
+  teams: Team[];
+  mode: 'pinned' | 'named' | 'unnamed';
+  candidates: Project[]; // pinned: the pin; named: named + thread; unnamed: the thread's (0-1)
+  others: Project[]; // unnamed only: every other registered project — suggestions, never picks
+  folders: FolderCandidate[]; // unnamed only: unregistered project folders — suggestions
+  recent: string[];
+  recentWork: string[];
+  text: string;
+  masterRules: string[];
+}): string {
+  const teamLines = args.teams
     .map((team) => `- id: ${team.id}\n  name: ${team.name}\n  charter: ${team.charter}${toolsLine(team, '  ')}`)
     .join('\n');
-  const projectLines = candidates
-    .map((project) => `* project: ${project.id} | ${project.name} | ${project.description || '(no description)'}`)
-    .join('\n');
-  const projectRule = projectFixed
-    ? [
-        'Project (fixed — the owner did not name another one, so this task continues the current thread;',
-        'do NOT pick, mention or title it after any other project):',
-        projectLines,
-      ]
-    : [
-        'Projects (only these may be picked — the owner named them or it is the current thread):',
-        projectLines,
-        '',
-        `If none clearly matches, use "${fallbackProjectId}".`,
-      ];
+  const thread = args.candidates[0];
+  const projectRule =
+    args.mode === 'pinned'
+      ? ['Project (pinned by the owner with @ — fixed; do NOT title the task after any other project):', projectLine(thread!)]
+      : args.mode === 'named'
+        ? [
+            'Projects (only these may be picked — the owner named them, or it is the current thread):',
+            ...args.candidates.map(projectLine),
+          ]
+        : [
+            thread
+              ? `The owner's current thread is in this project (where their last asks went):\n${projectLine(thread)}`
+              : 'The owner has no current thread yet.',
+            '',
+            'Other registered projects (for your judgment only — you may suggest, never pick):',
+            ...(args.others.length ? args.others.map(projectLine) : ['(none)']),
+            ...(args.folders.length
+              ? ['Project folders on the PC that are not registered yet (suggest by name if the ask is clearly about one):',
+                 ...args.folders.map((folder) => `* folder: ${folder.name} | ${folder.path}`)]
+              : []),
+            '',
+            'Decide which project this ask is about — "project" in your reply:',
+            '- "thread": it continues the current thread. This is the normal case: follow-ups, vague references',
+            '  ("make it faster", "the map", "fix that bug"), and anything that could plausibly be about the thread\'s',
+            '  project ARE the thread. Only an ask that is clearly about something else is not.',
+            '- "general": it is not about any project or codebase at all — a personal errand, todo, reminder,',
+            '  calendar item, or a general question or research unrelated to any project.',
+            '- "unsure": there is no thread and it is about some project, or it is clearly about something other',
+            "  than the thread's project. Then list up to 3 likely projects in \"suggest\" (registered ids or folder",
+            '  names, most likely first); the owner will be asked. Asking is cheap; work in the wrong project is not.',
+          ];
   return [
-    'You are the master agent of Agent HQ. Route the incoming task to the team whose charter fits best,',
-    'and to the project it concerns.',
+    'You are the master agent of Agent HQ. Route the incoming task to the team whose charter fits best.',
     '',
     'Teams:',
     teamLines,
     '',
     ...projectRule,
     '',
-    ...(recent.length
+    ...(args.recent.length
       ? [
-          'Recent conversation with the owner (oldest first) — the task most likely continues it, so',
-          'resolve vague references ("the game", "the map") against these, not against project names:',
-          ...recent.map((line) => `- ${line}`),
+          "Recent conversation with the owner (oldest first, [project] it ran in) — the task most likely continues it,",
+          'so resolve vague references ("the game", "the map") against these, not against project names:',
+          ...args.recent.map((line) => `- ${line}`),
           '',
         ]
       : []),
+    ...(args.recentWork.length
+      ? ['Recently finished work (titles only, newest first):', ...args.recentWork.map((line) => `- ${line}`), '']
+      : []),
     ...ownerRulesBlock(
-      masterRules,
-      "The owner's rules for picking teams and plans (follow them; they never change the project above):",
+      args.masterRules,
+      "The owner's rules for picking teams and plans (follow them; they never change the project rules above):",
     ),
-    `Task: "${text}"`,
+    `Task: "${args.text}"`,
     '',
     'Reply with ONLY a JSON object, no other text.',
     'Single-team task (the common case):',
-    '{"teamId": "<team id>", "projectId": "<project id>", "title": "<short imperative title, max 60 chars>", "reason": "<one sentence>"}',
+    args.mode === 'unnamed'
+      ? '{"teamId": "<team id>", "project": "<thread|general|unsure>", "suggest": ["<project id or folder name>"], "title": "<short imperative title, max 60 chars>", "reason": "<one sentence>"}'
+      : '{"teamId": "<team id>", "projectId": "<project id>", "title": "<short imperative title, max 60 chars>", "reason": "<one sentence>"}',
     '',
     'ONLY if the task genuinely needs teams working in sequence (e.g., design',
     'produces a spec first, then coding implements it), reply instead with a',
     'plan of 2-3 steps — each step runs after the previous one finishes and',
-    'receives its report as a handover:',
-    '{"projectId": "<project id>", "title": "<overall title>", "reason": "<one sentence>", "plan": [{"teamId": "<team id>", "title": "<step title>", "instruction": "<what this team should do>"}, ...]}',
+    'receives its report as a handover — adding "plan": [{"teamId": "<team id>", "title": "<step title>", "instruction": "<what this team should do>"}, ...]',
+    'to the same object (teamId may then be omitted).',
   ].join('\n');
 }
 
@@ -141,7 +184,12 @@ function keywordFallback(teams: Team[], text: string): Team {
 export interface RoutingThread {
   projectId: string | null;
   recent: string[];
+  recentWork?: string[];
 }
+
+// Teams that can run commands can't take a "general" ask outside a project:
+// shell work always belongs to some project, so it is asked instead.
+const runsCommands = (team: Team | undefined): boolean => !!team && (team.allowedTools ?? []).includes('bash');
 
 export async function routeTask(
   engine: OrchestratorEngine,
@@ -153,24 +201,60 @@ export async function routeTask(
   model: ModelSpec = resolveModel(MASTER_MODEL),
   thread: RoutingThread = { projectId: null, recent: [] },
   masterRules: string[] = [],
+  folders: FolderCandidate[] = [],
 ): Promise<RoutingDecision> {
   const fallbackTeam = keywordFallback(teams, text);
   const fallbackTitle = text.slice(0, 60);
-  // The model never guesses a project from topic words: an explicit @project
-  // wins, then projects named in the text (the model picks among those and
-  // the thread's), and otherwise the task stays in the thread's project.
-  const liveThreadProject = projects.find((project) => project.id === thread.projectId);
-  const threadProject = liveThreadProject ?? projects.find((project) => project.id === defaultProjectId);
-  const inheritedProjectId = forcedProjectId ?? threadProject?.id ?? defaultProjectId;
-  const inheritedBasis: ProjectBasis = forcedProjectId ? 'pinned' : liveThreadProject ? 'thread' : 'default';
-  const named = forcedProjectId ? [] : namedProjects(projects, text);
-  const projectFixed = named.length === 0;
-  const candidates = projectFixed
-    ? projects.filter((project) => project.id === inheritedProjectId)
-    : [...new Set([...named, ...(threadProject ? [threadProject] : [])])];
+  // The model never moves a task to a project on its own: an explicit
+  // @project wins, then projects named in the text (the model picks among
+  // those and the thread's), then the thread's project when the ask fits it.
+  // Anything else — no thread, or an ask clearly about something else — is a
+  // question for the owner, never a silent default.
+  const threadProject = projects.find((project) => project.id === thread.projectId);
+  const pinned = forcedProjectId ? projects.find((project) => project.id === forcedProjectId) : undefined;
+  const named = pinned ? [] : namedProjects(projects, text);
+  const mode: 'pinned' | 'named' | 'unnamed' = pinned ? 'pinned' : named.length > 0 ? 'named' : 'unnamed';
+  const candidates =
+    mode === 'pinned' ? [pinned!] : mode === 'named' ? [...new Set([...named, ...(threadProject ? [threadProject] : [])])] : threadProject ? [threadProject] : [];
+  const others = mode === 'unnamed' ? projects.filter((project) => project.id !== threadProject?.id) : [];
+  const offered = mode === 'unnamed' ? folders.slice(0, 20) : [];
+
+  const option = (ref: string): ProjectOption | null => {
+    const key = ref.trim().toLowerCase();
+    const project = projects.find((candidate) => candidate.id === key || candidate.name.toLowerCase() === key);
+    if (project) return { kind: 'project', id: project.id, name: project.name };
+    const folder = offered.find((candidate) => candidate.name.toLowerCase() === key);
+    return folder ? { kind: 'folder', name: folder.name, path: folder.path } : null;
+  };
+  const question = (reason: string, suggest: unknown[] = []): ProjectQuestion => {
+    const options: ProjectOption[] = [];
+    const push = (entry: ProjectOption | null) => {
+      if (!entry || options.length >= 4) return;
+      const key = entry.kind === 'project' ? entry.id : entry.path;
+      if (!options.some((existing) => (existing.kind === 'project' ? existing.id : existing.path) === key)) options.push(entry);
+    };
+    for (const ref of suggest) if (typeof ref === 'string') push(option(ref));
+    if (threadProject) push({ kind: 'project', id: threadProject.id, name: threadProject.name });
+    return { reason, options };
+  };
+  const decided = (fields: Omit<RoutingDecision, 'question'> & { question?: ProjectQuestion | null }): RoutingDecision => ({
+    question: null,
+    ...fields,
+  });
+
   try {
     const { text: reply, tokens } = await engine.complete({
-      prompt: routingPrompt(teams, candidates, inheritedProjectId, projectFixed, thread.recent, text, masterRules),
+      prompt: routingPrompt({
+        teams,
+        mode,
+        candidates,
+        others,
+        folders: offered,
+        recent: thread.recent,
+        recentWork: thread.recentWork ?? [],
+        text,
+        masterRules,
+      }),
       model,
     });
     const jsonMatch = reply.match(/\{[\s\S]*\}/);
@@ -178,14 +262,54 @@ export async function routeTask(
     const parsed = JSON.parse(jsonMatch[0]) as {
       teamId?: unknown;
       projectId?: unknown;
+      project?: unknown;
+      suggest?: unknown;
       title?: unknown;
       reason?: unknown;
       plan?: unknown;
     };
-    const routedProject = projectFixed ? undefined : candidates.find((candidate) => candidate.id === parsed.projectId);
-    const projectId = routedProject?.id ?? inheritedProjectId;
-    const projectBasis: ProjectBasis =
-      routedProject && named.includes(routedProject) && routedProject.id !== inheritedProjectId ? 'named' : inheritedBasis;
+
+    // Which project, by mode. `null` = ask the owner.
+    let projectId: string | null;
+    let projectBasis: ProjectBasis;
+    let ask: ProjectQuestion | null = null;
+    if (mode === 'pinned') {
+      projectId = pinned!.id;
+      projectBasis = 'pinned';
+    } else if (mode === 'named') {
+      const routed = candidates.find((candidate) => candidate.id === parsed.projectId);
+      const pick = routed ?? (named.length === 1 ? named[0] : undefined);
+      if (pick) {
+        projectId = pick.id;
+        projectBasis = threadProject && pick.id === threadProject.id ? 'thread' : 'named';
+      } else {
+        projectId = null;
+        projectBasis = 'ask';
+        ask = { reason: 'You named more than one project.', options: candidates.slice(0, 4).map((p) => ({ kind: 'project', id: p.id, name: p.name })) };
+      }
+    } else {
+      const verdict = parsed.project;
+      // Spliced into "… — <reason>.", so drop its own closing period.
+      const reason = typeof parsed.reason === 'string' ? parsed.reason.trim().replace(/[.\s]+$/, '') : '';
+      const suggest = Array.isArray(parsed.suggest) ? parsed.suggest : [];
+      if (verdict === 'thread' && threadProject) {
+        projectId = threadProject.id;
+        projectBasis = 'thread';
+      } else if (verdict === 'general') {
+        projectId = defaultProjectId;
+        projectBasis = 'general';
+      } else {
+        projectId = null;
+        projectBasis = 'ask';
+        ask = question(
+          threadProject
+            ? `It doesn't look like ${threadProject.name} work${reason ? ` — ${reason}` : ''}.`
+            : `Nothing so far says which project it is${reason ? ` — ${reason}` : ''}.`,
+          suggest,
+        );
+      }
+    }
+
     // A model title that drags in a project the owner didn't name would put
     // the wrong game on the task card; the owner's own words replace it.
     const strays = projects.filter((project) => project.id !== projectId && !named.includes(project));
@@ -196,41 +320,51 @@ export async function routeTask(
     const title = cleanTitle(parsed.title, 60, fallbackTitle);
     const reason = typeof parsed.reason === 'string' ? parsed.reason : '';
 
+    let steps: PlanStep[] | null = null;
     if (Array.isArray(parsed.plan) && parsed.plan.length >= 2) {
-      const steps: PlanStep[] = [];
+      const planned: PlanStep[] = [];
       for (const raw of parsed.plan.slice(0, 3)) {
         if (typeof raw !== 'object' || raw === null) continue;
         const step = raw as { teamId?: unknown; title?: unknown; instruction?: unknown };
         const team = teams.find((candidate) => candidate.id === step.teamId);
         if (!team || typeof step.instruction !== 'string' || !step.instruction.trim()) continue;
-        steps.push({
-          teamId: team.id,
-          title: cleanTitle(step.title, 50, team.name),
-          instruction: step.instruction.trim(),
-        });
+        planned.push({ teamId: team.id, title: cleanTitle(step.title, 50, team.name), instruction: step.instruction.trim() });
       }
-      if (steps.length >= 2) {
-        return { teamId: steps[0]!.teamId, projectId, projectBasis, title, reason, tokens, fallback: false, steps };
-      }
+      if (planned.length >= 2) steps = planned;
+    }
+    const team = steps ? teams.find((candidate) => candidate.id === steps![0]!.teamId) : teams.find((candidate) => candidate.id === parsed.teamId);
+    if (!team) throw new Error(`routing picked unknown team: ${String(parsed.teamId)}`);
+
+    // "General" is only for work that runs no commands; shell work is asked.
+    const working = steps ? steps.map((step) => teams.find((candidate) => candidate.id === step.teamId)) : [team];
+    if (projectBasis === 'general' && working.some(runsCommands)) {
+      projectId = null;
+      projectBasis = 'ask';
+      const why = reason.trim().replace(/[.\s]+$/, '');
+      ask = question(`It runs commands, so it belongs in a project${why ? ` — ${why}` : ''}.`, Array.isArray(parsed.suggest) ? parsed.suggest : []);
     }
 
-    const team = teams.find((candidate) => candidate.id === parsed.teamId);
-    if (!team) throw new Error(`routing picked unknown team: ${String(parsed.teamId)}`);
-    return { teamId: team.id, projectId, projectBasis, title, reason, tokens, fallback: false, steps: null };
+    return decided({ teamId: team.id, projectId: projectId ?? '', projectBasis, question: ask, title, reason, tokens, fallback: false, steps });
   } catch (error) {
     console.warn('[orchestrator] routing call failed, using keyword fallback:', error);
-    return {
+    // Offline: a pin, a single named project or the thread still hold;
+    // otherwise ask rather than guess.
+    const keep = pinned ?? (named.length === 1 ? named[0] : undefined) ?? threadProject;
+    const basis: ProjectBasis = pinned ? 'pinned' : named.length === 1 && keep !== threadProject ? 'named' : 'thread';
+    return decided({
       teamId: fallbackTeam.id,
-      projectId: inheritedProjectId,
-      projectBasis: inheritedBasis,
+      projectId: keep?.id ?? '',
+      projectBasis: keep ? basis : 'ask',
+      question: keep ? null : question('The master could not be reached to work out the project.'),
       title: fallbackTitle,
       reason: 'keyword fallback',
       tokens: 0,
       fallback: true,
       steps: null,
-    };
+    });
   }
 }
+
 
 // Master's coordination pass: after ANY team files a completed-task report,
 // the master reads it and decides whether a DIFFERENT team must pick work up

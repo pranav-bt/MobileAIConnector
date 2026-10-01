@@ -152,9 +152,18 @@ export class SecurityController {
 
   // Approvals arriving over a device session must be signed by the paired
   // device's Ed25519 key over `${decision}:${requestId}`.
-  verifyApproval(requestId: string, decision: 'approve' | 'deny', signatureB64: string | undefined): boolean {
-    if (!signatureB64) return false;
-    return this.#pairing.verifyApprovalSignature(`${decision}:${requestId}`, signatureB64);
+  // The signed message is `${decision}:${requestId}`, plus `#${choice}` for a
+  // pick-one card — request ids never contain '#', so a signature for one
+  // answer can't be replayed as another.
+  verifyApproval(
+    requestId: string,
+    decision: 'approve' | 'deny',
+    signatureB64: string | undefined,
+    choice?: number,
+  ): boolean {
+    if (!signatureB64 || requestId.includes('#')) return false;
+    const message = `${decision}:${requestId}${choice === undefined ? '' : `#${choice}`}`;
+    return this.#pairing.verifyApprovalSignature(message, signatureB64);
   }
 
   stop(): void {

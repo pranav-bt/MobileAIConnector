@@ -77,7 +77,10 @@ export function startServer(
             else security.revokeDevice();
             return;
           case 'permission.respond':
-            if (mode === 'device' && !security.verifyApproval(command.requestId, command.decision, command.signatureB64)) {
+            if (
+              mode === 'device' &&
+              !security.verifyApproval(command.requestId, command.decision, command.signatureB64, command.choice)
+            ) {
               console.warn('[hub] rejected device approval with missing/invalid signature');
               return;
             }

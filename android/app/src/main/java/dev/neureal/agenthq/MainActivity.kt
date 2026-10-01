@@ -287,7 +287,7 @@ class MainActivity : FragmentActivity() {
                         disableJarvis()
                     }
                 },
-                onRespond = { request, decision -> respondWithBiometric(request, decision) },
+                onRespond = { request, decision, choice -> respondWithBiometric(request, decision, choice) },
                 onSubmitTask = { text ->
                     hub.submitTask(text) { error ->
                         if (error != null) runOnUiThread { Toast.makeText(this, "$error — task not sent", Toast.LENGTH_LONG).show() }
@@ -336,11 +336,11 @@ class MainActivity : FragmentActivity() {
 
     // Approvals sit behind biometrics when the device has them; the Ed25519
     // signature is what the hub actually verifies either way.
-    private fun respondWithBiometric(request: PermissionRequest, decision: String) {
+    private fun respondWithBiometric(request: PermissionRequest, decision: String, choice: Int? = null) {
         val canBiometric = BiometricManager.from(this)
             .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK) == BiometricManager.BIOMETRIC_SUCCESS
         if (!canBiometric || decision == "deny") {
-            hub.respondPermission(request.id, decision)
+            hub.respondPermission(request.id, decision, choice)
             return
         }
         val prompt = BiometricPrompt(
@@ -348,7 +348,7 @@ class MainActivity : FragmentActivity() {
             ContextCompat.getMainExecutor(this),
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    hub.respondPermission(request.id, decision)
+                    hub.respondPermission(request.id, decision, choice)
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
@@ -358,7 +358,7 @@ class MainActivity : FragmentActivity() {
         )
         prompt.authenticate(
             BiometricPrompt.PromptInfo.Builder()
-                .setTitle(request.choices?.getOrNull(0)?.let { "$it?" } ?: "Approve this?")
+                .setTitle(choice?.let { request.options?.getOrNull(it) }?.let { "$it?" } ?: request.choices?.getOrNull(0)?.let { "$it?" } ?: "Approve this?")
                 .setSubtitle("Signed with this device's key")
                 .setDescription((request.summary ?: request.command).take(300))
                 .setNegativeButtonText("Cancel")

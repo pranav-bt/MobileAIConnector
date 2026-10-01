@@ -103,6 +103,7 @@ export class MockEngine implements OrchestratorEngine {
         return {
           text: JSON.stringify({
             projectId,
+            project: 'thread',
             title: 'Multi-step feature',
             reason: 'mock plan',
             plan: [
@@ -114,10 +115,22 @@ export class MockEngine implements OrchestratorEngine {
         };
       }
       const teamId = teamIds.find((id) => id && text.includes(id)) ?? teamIds[0] ?? 'coding';
+      // Unnamed asks: "unsure-test" doesn't fit the thread (suggesting any
+      // listed project id or folder named in the ask), "general-test" is
+      // about no project; everything else continues the thread.
+      const folders = [...args.prompt.matchAll(/^\* folder: ([^|]+?) \|/gm)].map((match) => match[1] ?? '');
+      const project = text.includes('unsure-test') ? 'unsure' : text.includes('general-test') ? 'general' : 'thread';
+      // (the first listed project is the thread's; the rest are suggestions)
+      const words = new Set(text.split(/[^a-z0-9-]+/));
+      const mentioned = [...projectIds, ...folders].filter((ref) => ref && words.has(ref.toLowerCase()));
+      const noThread = args.prompt.includes('The owner has no current thread yet.');
+      const suggest = mentioned.length > 0 ? mentioned : projectIds.slice(noThread ? 0 : 1, 4);
       return {
         text: JSON.stringify({
           teamId,
           projectId,
+          project,
+          suggest,
           title: (taskMatch?.[1] ?? 'task').slice(0, 60),
           reason: 'mock routing by keyword',
         }),

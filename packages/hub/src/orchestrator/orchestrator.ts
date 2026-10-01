@@ -14,6 +14,8 @@ import {
   type ParallelPlan,
   type PlanStep,
   type RoutingThread,
+  type FolderCandidate,
+  type ProjectQuestion,
   explainPermission,
   plainPermissionSummary,
   type PermissionContext,
@@ -29,7 +31,7 @@ import { evaluatePermission } from './policy.js';
 import { delay, isInside, type LockedDir } from './util.js';
 import type { PermissionMode } from '../config.js';
 import { parseRules, type ParsedRules, type TeamRegistry } from './teams.js';
-import type { ProjectRegistry } from './projects.js';
+import { slugify, type ProjectRegistry } from './projects.js';
 
 // The real thing: master intake -> team lead -> worker -> lead review ->
 // synopsis. Per-team concurrency respected; overflow queues. Every state
@@ -118,7 +120,7 @@ export class Orchestrator implements CommandHandlers {
   #workerCounters = new Map<string, number>();
   #activeWorkers = new Map<string, number>();
   #queues = new Map<string, string[]>();
-  #pendingResolvers = new Map<string, (decision: 'approve' | 'deny') => void>();
+  #pendingResolvers = new Map<string, (decision: 'approve' | 'deny', choice?: number) => void>();
   #controllers = new Map<string, AbortController>();
   #stopping = new Set<string>();
   #qaSource = new Map<string, string>(); // [QA] taskId -> source taskId
@@ -526,10 +528,75 @@ export class Orchestrator implements CommandHandlers {
     const asks = Object.values(this.#bus.state.tasks)
       .filter((task) => task.ownerAsk && task.projectId && task.id !== excludeTaskId && counts(task))
       .sort((a, b) => a.createdAt - b.createdAt);
+    const projectName = (id: string | null) => (id ? this.#projects.get(id)?.name ?? id : '?');
+    // Finished top-level work, newest first — context for suggestions when
+    // the master has to ask (titles only: older records' projects are unreliable).
+    const recentWork = Object.values(this.#bus.state.tasks)
+      .filter((task) => task.status === 'done' && !isInternalTask(task) && !/^\[(QA|fix\d*)\]/.test(task.title))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, 6)
+      .map((task) => task.title.slice(0, 80));
     return {
       projectId: asks[asks.length - 1]?.projectId ?? null,
-      recent: asks.slice(-4).map((task) => `"${task.ownerAsk!.replace(/\s+/g, ' ').slice(0, 200)}" → ${task.title}`),
+      recent: asks
+        .slice(-5)
+        .map((task) => `[${projectName(task.projectId)}] "${task.ownerAsk!.replace(/\s+/g, ' ').slice(0, 200)}" → ${task.title}`),
+      recentWork,
     };
+  }
+
+  // The master doesn't know which project an ask is for: a pick-one card
+  // with its best guesses (registered projects, or unregistered folders —
+  // picking one registers it), plus "None of these". Resolves the project,
+  // or null when the owner declined or stopped the task.
+  async #askProject(taskId: string, team: Team, text: string, question: ProjectQuestion): Promise<Project | null> {
+    const requestId = `project-${taskId}`;
+    if (question.options.length === 0) {
+      this.#activity('master', taskId, `not sure which project "${text.slice(0, 50)}" is for, and nothing looks likely — ${question.reason}`);
+      return null;
+    }
+    const labels = question.options.map((option) => (option.kind === 'project' ? option.name : `${option.name} (new)`));
+    const listed = question.options
+      .map((option, index) => `${index + 1}. ${option.kind === 'project' ? option.name : `${option.name} — not registered yet: ${option.path}`}`)
+      .join('\n');
+    this.#bus.publish({
+      type: 'permission.updated',
+      request: {
+        id: requestId,
+        taskId,
+        agentId: 'master',
+        teamId: team.id,
+        command: listed || '(no likely project found)',
+        summary:
+          `Which project is "${text.replace(/\s+/g, ' ').slice(0, 100)}" for? ${question.reason} ` +
+          'Pick one (a "new" one gets registered first), or None and resend it with @project.',
+        options: labels,
+        flags: ['which project?'],
+        reason: question.reason,
+        status: 'pending',
+        scope: 'once',
+        requestedAt: now(),
+        resolvedAt: null,
+      },
+    });
+    this.#patchTask(taskId, { teamId: team.id, status: 'awaiting_permission' });
+    this.#patchAgent('master', { status: 'waiting_permission', activity: 'asking which project' });
+    this.#activity('master', taskId, `not sure which project "${text.slice(0, 50)}" is for — asking you`);
+    const { decision, choice } = await new Promise<{ decision: 'approve' | 'deny'; choice?: number }>((resolve) =>
+      this.#pendingResolvers.set(requestId, (decision, choice) => resolve({ decision, choice })),
+    );
+    const picked = decision === 'approve' && choice !== undefined ? question.options[choice] : undefined;
+    if (!picked) return null;
+    if (picked.kind === 'project') return this.#projects.get(picked.id) ?? null;
+    try {
+      const project = this.#projects.register({ name: picked.name, workspaceDir: picked.path });
+      this.#bus.publish({ type: 'project.updated', project });
+      this.#activity('master', taskId, `project registered: ${project.name} → ${project.workspaceDir}`);
+      return project;
+    } catch (error) {
+      this.#activity('master', taskId, `couldn't register ${picked.name}: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
   }
 
   async #intake(rawText: string): Promise<void> {
@@ -550,6 +617,20 @@ export class Orchestrator implements CommandHandlers {
 
     this.#taskCounter += 1;
     const taskId = `t-${now().toString(36)}-${this.#taskCounter}`;
+
+    // A pin to a folder that exists but isn't registered (@pancakestack while
+    // D:\Work\Roblox\PancakeStack is unregistered) becomes the question:
+    // "register it and run there?" Anything else that doesn't resolve fails.
+    let pinnedFolder: FolderCandidate | undefined;
+    if (unknownPin) {
+      const key = slugify(unknownPin);
+      const folder = this.#projects.discoverFolders().find((candidate) => slugify(candidate.name) === key);
+      if (folder && atMatch?.[2]) {
+        pinnedFolder = { name: folder.name, path: folder.path };
+        text = atMatch[2].trim();
+        unknownPin = null;
+      }
+    }
 
     // A pin to a project that isn't registered must not quietly run somewhere
     // else: nothing runs, and the owner is told what to do instead.
@@ -610,6 +691,7 @@ export class Orchestrator implements CommandHandlers {
       masterModel,
       thread,
       this.#masterRules(MASTER_SECTIONS.routing, 'plan'),
+      this.#projects.discoverFolders(),
     );
     this.#recordTokens(masterModel.tier, decision.tokens);
     this.#routingCount -= 1;
@@ -621,13 +703,51 @@ export class Orchestrator implements CommandHandlers {
       return;
     }
 
-    let project = this.#projects.get(decision.projectId) ?? this.#projects.defaultProject();
+    // An @pin to an unregistered folder: that folder is the only question.
+    if (pinnedFolder) {
+      decision.projectBasis = 'ask';
+      decision.question = {
+        reason: `@${pinnedFolder.name} isn't registered as a project yet.`,
+        options: [{ kind: 'folder', ...pinnedFolder }],
+      };
+    }
+
+    // Not sure which project: ask — never fall back to a default.
+    let project: Project | undefined = this.#projects.get(decision.projectId);
     let basis: string = {
       pinned: '@pin',
       named: 'named in your ask',
       thread: 'continues your thread',
-      default: 'no thread yet — default project',
+      general: 'general ask — not about a project',
+      ask: 'you picked it',
     }[decision.projectBasis];
+    if (decision.projectBasis === 'ask' || !project) {
+      this.#patchTask(taskId, { title: decision.title });
+      const picked = await this.#askProject(
+        taskId,
+        team,
+        text,
+        decision.question ?? { reason: 'The master could not tell which project it is.', options: [] },
+      );
+      if (this.#halted(taskId)) {
+        this.#stopping.delete(taskId);
+        this.#masterStatus();
+        return;
+      }
+      if (!picked) {
+        // Declined: nothing ran, and the ask leaves the thread.
+        this.#patchTask(taskId, {
+          status: 'paused',
+          stoppedBy: 'owner',
+          synopsis: 'Not run — which project? Resend it with @project (or /project add <name> <path> first).',
+        });
+        this.#activity('master', taskId, `not run: no project picked for "${decision.title.slice(0, 50)}"`);
+        this.#masterStatus();
+        return;
+      }
+      project = picked;
+      basis = 'you picked it';
+    }
 
     // Naming a project in passing ("make PancakeStack look like CastleWars")
     // must not silently hand another repo to a worker with write access:
@@ -1940,20 +2060,22 @@ export class Orchestrator implements CommandHandlers {
     return new Promise((resolve) => this.#pendingResolvers.set(requestId, resolve));
   }
 
-  respondPermission(requestId: string, decision: 'approve' | 'deny'): void {
+  respondPermission(requestId: string, decision: 'approve' | 'deny', _scope?: 'once' | 'task', choice?: number): void {
     const request = this.#bus.state.permissions[requestId];
     if (!request || request.status !== 'pending') return;
+    // A pick-one card is only answered by a valid option (or a deny).
+    if (request.options && decision === 'approve' && (choice === undefined || !request.options[choice])) return;
     this.#bus.publish({
       type: 'permission.updated',
       request: { ...request, status: decision === 'approve' ? 'approved' : 'denied', resolvedAt: now() },
     });
-    // Master's project-switch card: intake is waiting and sets the task's
-    // status and project itself. Rule-conflict cards: the run waiting on the
-    // answer records it and restores the task's status.
-    if (requestId.startsWith('route-') || requestId.startsWith('rules-') || requestId.startsWith('stuck-')) {
+    // Master cards — the project question and project switch (intake waits
+    // and sets the task's status and project itself), rule conflicts (the
+    // run records the answer and restores the task's status), stuck tasks.
+    if (['route-', 'project-', 'rules-', 'stuck-'].some((prefix) => requestId.startsWith(prefix))) {
       const resolve = this.#pendingResolvers.get(requestId);
       this.#pendingResolvers.delete(requestId);
-      resolve?.(decision);
+      resolve?.(decision, request.options ? choice : undefined);
       return;
     }
     // Master's scale-up ask: no worker is waiting on this — approving raises

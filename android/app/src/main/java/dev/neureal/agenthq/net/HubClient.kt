@@ -238,9 +238,10 @@ class HubClient(private val store: KV, private val deviceName: String) {
         socket?.send("{\"t\":\"enc\",\"n\":\"$nonce\",\"c\":\"$ciphertext\"}")
     }
 
-    fun respondPermission(requestId: String, decision: String) {
-        val signature = identity.signApproval(decision, requestId)
-        sendCommand(dev.neureal.agenthq.model.Commands.respondPermission(requestId, decision, signature))
+    // A pick-one answer signs "$decision:$requestId#$choice", so it can't be replayed as another option.
+    fun respondPermission(requestId: String, decision: String, choice: Int? = null) {
+        val signature = identity.signApproval(decision, if (choice == null) requestId else "$requestId#$choice")
+        sendCommand(dev.neureal.agenthq.model.Commands.respondPermission(requestId, decision, signature, choice))
     }
 
     // Submit a task, waiting for the session first — raw sendCommand drops

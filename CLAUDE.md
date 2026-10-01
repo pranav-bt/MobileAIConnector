@@ -136,16 +136,27 @@ npm run typecheck      # tsc across workspaces
   junction can't tunnel out. Workers are told the same: READ/SEARCH anywhere
   under the workspace roots, WRITE only in their project (+ the phone
   inbox/outbox; the PA team also gets its desk, `data/pa`, from any project).
-- The master never guesses a project from topic words ("the map", "the
-  bases"). `routeTask` resolves it deterministically: `@project` pin >
-  projects the owner named in the text (`namedProjects`, spacing-insensitive
-  whole words; the model may pick only among those + the thread's) > the
-  thread's project (latest non-stopped task carrying `ownerAsk`) > default.
-  When nothing is named the prompt shows only that one project, and a model
-  title naming any other project is replaced by the owner's words. Leaving
+- The master never guesses a project and never falls back to a default.
+  `routeTask` resolves it deterministically: `@project` pin > projects the
+  owner named in the text (`namedProjects`, spacing-insensitive whole words;
+  the model may pick only among those + the thread's) > the thread's project
+  (latest non-stopped task carrying `ownerAsk`) when the model's verdict is
+  `"project": "thread"` (follow-ups and vague references are the thread) >
+  `"general"` (about no project — errands, todos, questions; runs in the hub
+  workspace, and only for teams without `bash`) > otherwise ASK: a
+  `project-<taskId>` pick-one card (`PermissionRequest.options`, answer =
+  approve + `choice`, phone-signed over `approve:<id>#<choice>`) offering the
+  model's suggestions + the thread's project. Suggestions may be unregistered
+  folders under the workspace roots (`ProjectRegistry.discoverFolders`;
+  picking one registers it), and an @pin to such a folder offers the same.
+  "None of these" runs nothing (paused, leaves the thread). Other projects
+  appear in the prompt as suggestion-only; a model title naming a project
+  the task isn't in is replaced by the owner's words. Live check:
+  `npx tsx test/routing-ask.live.ts`. Leaving
   the thread's project because a name was mentioned takes a master card
   (`route-<taskId>`; deny keeps it in the thread, an @pin skips it). An
-  @pin to an unregistered project fails the task loudly and runs nothing.
+  @pin that matches neither a project nor a folder fails the task loudly and
+  runs nothing.
   Only an ask the owner stopped leaves the thread; KILL ALL and a restart
   keep it (`stoppedBy` on the task), and every routed line says why it went
   where it did. Regression: `test/routing.smoke.ts` + `test/thread.smoke.ts`

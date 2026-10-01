@@ -67,6 +67,8 @@ data class PermissionRequest(
     val summary: String? = null,
     // Custom [approve, deny] labels when the card is a question (e.g. which rule wins).
     val choices: List<String>? = null,
+    // A pick-one question: one button per option (approve + its index), plus "None of these".
+    val options: List<String>? = null,
     val flags: List<String> = emptyList(),
     val reason: String = "",
     val status: String,
@@ -266,12 +268,13 @@ object Commands {
         put("from", "phone")
     }
 
-    fun respondPermission(requestId: String, decision: String, signatureB64: String): JsonObject = buildJsonObject {
+    fun respondPermission(requestId: String, decision: String, signatureB64: String, choice: Int? = null): JsonObject = buildJsonObject {
         put("type", "permission.respond")
         put("requestId", requestId)
         put("decision", decision)
         put("scope", "once")
         put("signatureB64", signatureB64)
+        if (choice != null) put("choice", choice)
     }
 }
 

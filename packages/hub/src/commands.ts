@@ -7,7 +7,7 @@ import type { ClientCommand, ModelOverrides } from '@agent-hq/shared';
 export interface CommandHandlers {
   submitTask(text: string, projectId: string | null): void;
   stopTask(taskId: string): void;
-  respondPermission(requestId: string, decision: 'approve' | 'deny', scope: 'once' | 'task'): void;
+  respondPermission(requestId: string, decision: 'approve' | 'deny', scope: 'once' | 'task', choice?: number): void;
   createTeam(input: {
     name: string;
     charter: string;
@@ -55,7 +55,7 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
     case 'task.stop':
       return handlers.stopTask(command.taskId);
     case 'permission.respond':
-      return handlers.respondPermission(command.requestId, command.decision, command.scope);
+      return handlers.respondPermission(command.requestId, command.decision, command.scope, command.choice);
     case 'team.create':
       return handlers.createTeam(command);
     case 'team.update':

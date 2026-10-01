@@ -43,6 +43,9 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     // Phone approvals are signed with the device key; the hub verifies
     // the signature before acting. Absent for desktop (local trust).
     signatureB64: z.string().optional(),
+    // The picked option on a pick-one card (PermissionRequest.options);
+    // signed along with the decision: `${decision}:${requestId}#${choice}`.
+    choice: z.number().int().min(0).max(3).optional(),
   }),
   z.object({
     type: z.literal('team.create'),

@@ -4,7 +4,7 @@
 //
 // Usage: npx tsx test/thread.smoke.ts   (mock engine, no usage)
 
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
@@ -14,11 +14,22 @@ import { startHub } from '../src/index.js';
 const PORT = Number(process.env['THREAD_SMOKE_PORT'] ?? 4611);
 const dataDir = mkdtempSync(join(tmpdir(), 'agent-hq-thread-'));
 const claudeProjectsDir = mkdtempSync(join(tmpdir(), 'agent-hq-thread-claude-'));
+// A root holding one unregistered project folder (scenario 12); listed first
+// so the folder scan reaches it before wandering the whole temp dir.
+const sparesRoot = mkdtempSync(join(tmpdir(), 'agent-hq-thread-spares-'));
+const spareName = `Sparebox${Date.now().toString(36)}`;
+mkdirSync(join(sparesRoot, spareName));
+writeFileSync(join(sparesRoot, spareName, 'CLAUDE.md'), '# spare project\n');
+const pinName = `Pinbox${Date.now().toString(36)}`;
+mkdirSync(join(sparesRoot, pinName, '.git'), { recursive: true });
 const hubOptions = {
   engine: 'mock' as const,
   dataDir,
   claudeProjectsDir,
-  workspaceRoots: [{ key: 'tmp', path: tmpdir(), label: 'test sandbox' }],
+  workspaceRoots: [
+    { key: 'spares', path: sparesRoot, label: 'spare projects' },
+    { key: 'tmp', path: tmpdir(), label: 'test sandbox' },
+  ],
 };
 
 let failures = 0;
@@ -203,6 +214,68 @@ try {
   await c.done('after-restart');
   await settle();
   check('10b. the thread survives a hub restart', c.latest('after-restart')?.projectId === 'pancakestack', c.latest('after-restart')?.projectId ?? '');
+
+  // 11. An ask that clearly isn't thread work is ASKED, never guessed: a
+  // pick-one card with the master's guesses + the thread. Picking runs it there.
+  c.submit('coding: unsure-test the balance sheet off-one');
+  const offOne = (await c.created('off-one')).task;
+  const question = (await c.card(offOne.id, 'project-')).request;
+  const labels = question.options ?? [];
+  check(
+    '11a. off-thread ask raises a which-project card',
+    labels.includes('CastleWars') && labels.at(-1) === 'PancakeStack',
+    labels.join('|') || 'no options',
+  );
+  check('11b. nothing ran before the answer', !c.events.some((e) => e.type === 'agent.updated' && e.agent.taskId === offOne.id && e.agent.role === 'worker'));
+  c.send({ type: 'permission.respond', requestId: question.id, decision: 'approve', scope: 'once', choice: labels.indexOf('CastleWars') });
+  await c.done('off-one');
+  check('11c. the picked project runs it', c.latest('off-one')?.projectId === 'castlewars', c.latest('off-one')?.projectId ?? '');
+  c.submit('coding: and tighten the numbers after-pick');
+  await c.done('after-pick');
+  check('11d. the thread follows the pick', c.latest('after-pick')?.projectId === 'castlewars', c.latest('after-pick')?.projectId ?? '');
+
+  // 12. An unregistered project folder can be picked: it gets registered.
+  c.submit(`coding: unsure-test ${spareName.toLowerCase()} needs a lobby off-two`);
+  const offTwo = (await c.created('off-two')).task;
+  const folderCard = (await c.card(offTwo.id, 'project-')).request;
+  const folderIndex = folderCard.options?.findIndex((label) => label === `${spareName} (new)`) ?? -1;
+  check('12a. unregistered folder offered as "new"', folderIndex >= 0, folderCard.options?.join('|') ?? '');
+  c.send({ type: 'permission.respond', requestId: folderCard.id, decision: 'approve', scope: 'once', choice: Math.max(0, folderIndex) });
+  await c.done('off-two');
+  const spareId = spareName.toLowerCase();
+  check('12b. picking it registers + runs there', c.latest('off-two')?.projectId === spareId, c.latest('off-two')?.projectId ?? '');
+
+  // 13. "None of these": nothing runs, the ask leaves the thread.
+  c.submit('coding: unsure-test something else entirely off-three');
+  const offThree = (await c.created('off-three')).task;
+  const noneCard = (await c.card(offThree.id, 'project-')).request;
+  c.send({ type: 'permission.respond', requestId: noneCard.id, decision: 'deny', scope: 'once' });
+  await c.waitFor('declined ask paused', (e) => e.type === 'task.updated' && e.task.id === offThree.id && e.task.status === 'paused');
+  check('13a. declined: not run, says what to do', /which project\?/.test(c.latest('off-three')?.synopsis ?? ''), c.latest('off-three')?.synopsis ?? '');
+  c.submit('coding: follow-up after-none');
+  await c.done('after-none');
+  check('13b. the thread is where it was', c.latest('after-none')?.projectId === spareId, c.latest('after-none')?.projectId ?? '');
+
+  // 14. "General" asks (about no project) run without asking — only for
+  // teams that run no commands; a shell team is asked instead.
+  c.submit('design: general-test pick a colour for my bedroom gen-one');
+  await c.done('gen-one');
+  check('14a. general ask, text team: no card, hub workspace', c.latest('gen-one')?.projectId === 'mobileaiconnector', c.latest('gen-one')?.projectId ?? '');
+  c.submit('coding: general-test clean my downloads gen-two');
+  const genTwo = (await c.created('gen-two')).task;
+  const genCard = await c.card(genTwo.id, 'project-');
+  check('14b. general ask, shell team: asked', !!genCard);
+  c.send({ type: 'permission.respond', requestId: genCard.request.id, decision: 'deny', scope: 'once' });
+
+  // 15. @pin to a folder that exists but isn't registered: offered for
+  // registration (one option), not refused.
+  c.submit(`@${pinName.toLowerCase()} coding: set up the repo pin-folder`);
+  const pinTask = (await c.created('pin-folder')).task;
+  const pinCard = (await c.card(pinTask.id, 'project-')).request;
+  check('15a. unregistered @pin offers to register it', pinCard.options?.join('|') === `${pinName} (new)`, pinCard.options?.join('|') ?? '');
+  c.send({ type: 'permission.respond', requestId: pinCard.id, decision: 'approve', scope: 'once', choice: 0 });
+  await c.done('pin-folder');
+  check('15b. registered and ran there', c.latest('pin-folder')?.projectId === pinName.toLowerCase(), c.latest('pin-folder')?.projectId ?? '');
 } catch (error) {
   check('run', false, error instanceof Error ? error.message : String(error));
 }

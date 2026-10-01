@@ -1,6 +1,18 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, type Dirent } from 'node:fs';
 import { basename, join, resolve, sep } from 'node:path';
 import type { Project, WorkspaceRoot } from '@agent-hq/shared';
+
+// A folder under the workspace roots that could be registered as a project.
+export interface ProjectFolder {
+  name: string;
+  path: string;
+  mtimeMs: number;
+}
+
+// What makes a folder a project rather than a folder of projects.
+const PROJECT_MARKER =
+  /^(\.git|\.claude|CLAUDE\.md|README(\.md)?|package\.json|requirements\.txt|default\.project\.json|Cargo\.toml|pyproject\.toml|go\.mod|.+\.sln|.+\.rbxlx?|src)$/i;
+const SKIP_FOLDER = /^(\.|node_modules$|venv$|backups?$|temp$|tmp$|libraries$)/i;
 
 // Projects are config records (data/projects.json): a workspace directory a
 // worker runs inside plus a token ledger. The hub's own workspace is always
@@ -17,6 +29,7 @@ export class ProjectRegistry {
   #projects = new Map<string, Project>();
   #defaultId = '';
   #roots: WorkspaceRoot[];
+  #folderCache: { at: number; folders: ProjectFolder[] } | null = null;
 
   constructor(dataDir: string, workspaceRoots: WorkspaceRoot[]) {
     this.#filePath = join(dataDir, 'projects.json');
@@ -93,6 +106,56 @@ export class ProjectRegistry {
     );
   }
 
+  // Project folders under the workspace roots that aren't registered yet
+  // (e.g. D:\Work\Roblox\PancakeStack) — offered when the master has to ask
+  // which project an ask is for; picking one registers it. A folder with
+  // project markers is a project; one without is a container (D:\Work\Roblox)
+  // and is looked into once. Bounded (readdir budget, newest first, 30 max)
+  // and cached for a minute: routing calls this on every ask.
+  discoverFolders(): ProjectFolder[] {
+    if (this.#folderCache && Date.now() - this.#folderCache.at < 60_000) return this.#folderCache.folders;
+    const registered = new Set([...this.#projects.values()].map((project) => resolve(project.workspaceDir).toLowerCase()));
+    const found: ProjectFolder[] = [];
+    let budget = 80; // readdir calls per scan
+    const list = (dir: string): Dirent[] => {
+      if (budget-- <= 0) return [];
+      try {
+        return readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return [];
+      }
+    };
+    const usable = (entry: Dirent) => entry.isDirectory() && !SKIP_FOLDER.test(entry.name);
+    const add = (path: string, name: string) => {
+      if (registered.has(resolve(path).toLowerCase())) return;
+      let mtimeMs = 0;
+      try {
+        mtimeMs = statSync(path).mtimeMs;
+      } catch {
+        return;
+      }
+      found.push({ name, path, mtimeMs });
+    };
+    for (const root of this.#roots) {
+      for (const entry of list(root.path).filter(usable)) {
+        const path = join(root.path, entry.name);
+        const inside = list(path);
+        const subfolders = inside.filter(usable);
+        // A container (D:\Work\Roblox): no project markers and several
+        // sub-folders — those are the projects. Anything else is a project
+        // itself, code or not (a trip folder of documents counts).
+        if (inside.some((child) => PROJECT_MARKER.test(child.name)) || subfolders.length < 3) {
+          add(path, entry.name);
+          continue;
+        }
+        for (const child of subfolders) add(join(path, child.name), child.name);
+      }
+    }
+    const folders = found.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 30);
+    this.#folderCache = { at: Date.now(), folders };
+    return folders;
+  }
+
   defaultProject(): Project {
     const project = this.#projects.get(this.#defaultId) ?? [...this.#projects.values()][0];
     if (!project) throw new Error('project registry is empty');
@@ -108,6 +171,7 @@ export class ProjectRegistry {
     const project = this.#build(input);
     this.#projects.set(project.id, project);
     this.#save();
+    this.#folderCache = null;
     return project;
   }
 
@@ -115,6 +179,7 @@ export class ProjectRegistry {
     if (id === this.#defaultId) return false; // the hub workspace stays
     const removed = this.#projects.delete(id);
     if (removed) this.#save();
+    this.#folderCache = null;
     return removed;
   }
 

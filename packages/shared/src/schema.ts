@@ -130,6 +130,10 @@ export const PermissionRequestSchema = z.object({
   // rather than a permission (e.g. which rule wins). The signed decision is
   // still approve/deny, so phone signatures are unchanged.
   choices: z.tuple([z.string(), z.string()]).optional(),
+  // A pick-one question (e.g. "which project is this for?"): one button per
+  // option, each an approve carrying its index (`choice`), plus a deny
+  // ("none of these"). Phone signatures then cover `${decision}:${id}#${choice}`.
+  options: z.array(z.string()).min(1).max(4).optional(),
   flags: z.array(z.string()),
   reason: z.string(),
   status: PermissionStatusSchema,
