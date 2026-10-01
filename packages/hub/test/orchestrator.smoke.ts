@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, utimesS
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
-import { decodeEvent, encodeCommand, type HubEvent } from '@agent-hq/shared';
+import { decodeEvent, encodeCommand, parseRules, rulesFor, type HubEvent } from '@agent-hq/shared';
+import { refusedWrite } from '../src/engine/claude.js';
 import { startHub } from '../src/index.js';
 import { HubBus } from '../src/bus.js';
 import { startEventLog } from '../src/persist.js';
@@ -34,7 +35,17 @@ const claudeProjectsDir = mkdtempSync(join(tmpdir(), 'agent-hq-claude-'));
 const castleCwd = join(tmpdir(), 'CastleWars');
 const bnbCwd = join(tmpdir(), 'BuildAndBattle');
 let freelancerCalls = 0;
+// A stand-in ~/.claude.json: the MCP servers "configured on this PC".
+const claudeConfigPath = join(claudeProjectsDir, 'claude.json');
+writeFileSync(
+  claudeConfigPath,
+  JSON.stringify({
+    mcpServers: { Fake_Studio: { type: 'stdio', command: 'cmd.exe', args: ['/c', 'exit'] } },
+    projects: { 'D:/Somewhere': { mcpServers: { Fake_Figma: { type: 'http', url: 'http://127.0.0.1:9/mcp' } } } },
+  }),
+);
 const hub = await startHub({
+  claudeConfigPath,
   engine: 'mock',
   port: PORT,
   dataDir,
@@ -1373,6 +1384,157 @@ try {
   ws.send(encodeCommand({ type: 'team.rules.set', teamId: 'coding', markdown: templateRules }));
   await waitFor('coding rules restored', codingRules((rules) => rules === templateRules));
   console.log('team rules ok: RULES.md per team, mirrored + hand edits, conflict asked once with two answers, saved per project, stop records nothing');
+
+  // 26. Team tools + connections + master rules. Tools live under "## Tools"
+  // in a team's RULES.md and reach its workers; MCP connections are granted
+  // by name from the PC's catalog (exactly those, nothing else); the master
+  // has its own RULES.md, mirrored on HubInfo.
+  if (!templateRules.includes('## Tools')) fail('team RULES.md template has no ## Tools section');
+  const masterPath = join(dataDir, 'master', 'RULES.md');
+  const masterTemplate = readFileSync(masterPath, 'utf8');
+  for (const heading of ['## Routing', '## Handover', '## Splitting', '## When a task is stuck']) {
+    if (!masterTemplate.includes(heading)) fail(`master RULES.md template missing ${heading}`);
+  }
+  const latestInfo = () => [...events].reverse().find((e) => e.type === 'hub.updated' || e.type === 'snapshot');
+  const infoOf = (e: HubEvent | undefined) => (e?.type === 'hub.updated' ? e.info : e?.type === 'snapshot' ? e.snapshot.info : undefined);
+  if (infoOf(latestInfo())?.masterRules !== masterTemplate) fail('master rules not mirrored on HubInfo');
+  const catalog = infoOf(latestInfo())?.mcpCatalog ?? [];
+  if (catalog.join(',') !== 'Fake_Figma,Fake_Studio') fail(`MCP catalog wrong: ${catalog.join(',')}`);
+
+  ws.send(encodeCommand({ type: 'team.rules.add', teamId: 'design', section: 'tools', rule: 'magick (ImageMagick CLI): resize and convert images' }));
+  await waitFor(
+    'tool added under ## Tools',
+    (e) => e.type === 'team.updated' && e.team.id === 'design' && (e.team.rules ?? '').includes('## Tools\n- magick (ImageMagick CLI)'),
+  );
+  ws.send(encodeCommand({ type: 'team.mcp.set', teamId: 'design', servers: ['Fake_Studio', 'Not_On_This_PC'] }));
+  const granted = await waitFor('connection granted by name', (e) => e.type === 'team.updated' && e.team.id === 'design' && 'Fake_Studio' in e.team.mcpServers);
+  if (granted.type !== 'team.updated' || Object.keys(granted.team.mcpServers).join(',') !== 'Fake_Studio') fail('unknown MCP name was granted');
+  await waitFor('unknown connection reported', (e) => e.type === 'activity' && e.entry.message.includes('not configured on this PC: Not_On_This_PC'));
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: '@castlewars design: resize the icon sheet' }));
+  await waitFor('worker sees its tools', since(mark, (e) => e.type === 'activity' && e.entry.message === 'mock: team tools 1'), 15000);
+  await waitFor('worker gets exactly its connections', since(mark, (e) => e.type === 'activity' && e.entry.message === 'mock: mcp [Fake_Studio]'), 15000);
+  await waitIdle('icon task done', 'design');
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: '@castlewars coding: tidy the tower module' }));
+  await waitFor('ungranted team gets no connections', since(mark, (e) => e.type === 'activity' && e.entry.message === 'mock: mcp []'), 15000);
+  ws.send(encodeCommand({ type: 'team.mcp.set', teamId: 'design', servers: [] }));
+  await waitFor('connections cleared', (e) => e.type === 'team.updated' && e.team.id === 'design' && Object.keys(e.team.mcpServers).length === 0);
+
+  // Master rules: /rule master/<section> lands in that section and on HubInfo.
+  ws.send(encodeCommand({ type: 'team.rules.add', teamId: 'master', section: 'handover', rule: 'Icons always go to the design team' }));
+  await waitFor('master rule mirrored', (e) => e.type === 'hub.updated' && (e.info.masterRules ?? '').includes('## Handover\n- Icons always go to the design team'));
+  const masterParsed = parseRules(readFileSync(masterPath, 'utf8'));
+  if (rulesFor(masterParsed, ['handover']).join() !== '[Handover] Icons always go to the design team') fail('handover rule not scoped to handovers');
+  if (rulesFor(masterParsed, ['stuck']).length !== 0) fail('a handover rule leaked into the stuck pass');
+  await waitIdle('tower task done', 'coding');
+  console.log('team tools ok: ## Tools reach workers, MCP granted by name from the PC catalog (exactly those), master rules per section on HubInfo');
+
+  // 27. Stuck tasks. A run that fails, or a report the lead calls stuck,
+  // makes the master propose ONE way forward and ask (two-answer card);
+  // approving runs it. A master rule can let it act without asking. Work a
+  // recovery spawned never gets a second automatic pass.
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: '@castlewars coding: crash-test the build pipeline' }));
+  const stuckCard = await waitFor(
+    'stuck card after a crash',
+    since(mark, (e) => e.type === 'permission.updated' && e.request.id.startsWith('stuck-') && e.request.status === 'pending'),
+    15000,
+  );
+  if (stuckCard.type !== 'permission.updated') fail('unreachable');
+  const crashed = stuckCard.request;
+  if (crashed.choices?.join('|') !== 'Do it|Leave it' || !/got stuck/.test(crashed.summary ?? '') || !/hand it to the Design team/.test(crashed.summary ?? '')) {
+    fail(`stuck card unclear: ${crashed.summary}`);
+  }
+  if (events.slice(mark).some((e) => e.type === 'task.updated' && e.task.title.startsWith('[handover]'))) fail('recovery ran before the owner answered');
+  ws.send(encodeCommand({ type: 'permission.respond', requestId: crashed.id, decision: 'approve', scope: 'once' }));
+  const handover = await waitFor(
+    'approved handover ran',
+    since(mark, (e) => e.type === 'task.updated' && e.task.title.startsWith('[handover]') && e.task.teamId === 'design' && e.task.status === 'done'),
+    15000,
+  );
+  if (handover.type !== 'task.updated' || handover.task.projectId !== 'castlewars') fail('recovery left the stuck task\'s project');
+
+  // Lead-flagged stuck + "Leave it": nothing runs.
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: '@castlewars coding: blocked-test the studio sync' }));
+  const blockedCard = await waitFor(
+    'stuck card from the lead review',
+    since(mark, (e) => e.type === 'permission.updated' && e.request.id.startsWith('stuck-') && e.request.status === 'pending'),
+    15000,
+  );
+  if (blockedCard.type !== 'permission.updated') fail('unreachable');
+  const blockedTask = events.slice(mark).find((e) => e.type === 'task.updated' && e.task.id === blockedCard.request.taskId && e.task.status === 'failed');
+  if (!blockedTask || blockedTask.type !== 'task.updated' || !blockedTask.task.synopsis?.startsWith('Stuck — ')) fail('lead-flagged stuck task not marked stuck');
+  if (events.slice(mark).some((e) => e.type === 'task.updated' && e.task.title.startsWith('[QA]') && e.task.detail.includes('blocked-test'))) {
+    fail('a stuck task was sent to QA');
+  }
+  ws.send(encodeCommand({ type: 'permission.respond', requestId: blockedCard.request.id, decision: 'deny', scope: 'once' }));
+  await waitFor('left as is', since(mark, (e) => e.type === 'activity' && e.entry.message.startsWith('left as is:')));
+  await settle();
+  if (events.slice(mark).some((e) => e.type === 'task.updated' && /^\[(handover|retry)\]/.test(e.task.title))) fail('a declined recovery ran anyway');
+
+  // A master rule lets it go ahead alone — here a split into two steps.
+  ws.send(encodeCommand({ type: 'team.rules.add', teamId: 'master', section: 'stuck', rule: 'Go ahead without asking me (MOCK-AUTO)' }));
+  await waitFor('stuck rule mirrored', (e) => e.type === 'hub.updated' && (e.info.masterRules ?? '').includes('MOCK-AUTO'));
+  await waitIdle('coding idle before the auto recovery', 'coding');
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: '@castlewars coding: crash-test split-me the loader' }));
+  await waitFor('auto recovery announced', since(mark, (e) => e.type === 'activity' && e.entry.message.includes('your master rules allow it without asking')), 15000);
+  await waitFor('split step 2 done', since(mark, (e) => e.type === 'task.updated' && e.task.title.startsWith('Step 2/2') && e.task.teamId === 'coding' && e.task.status === 'done'), 20000);
+  if (events.slice(mark).some((e) => e.type === 'permission.updated' && e.request.id.startsWith('stuck-'))) fail('asked although the master rules allow acting alone');
+
+  // A recovered task that gets stuck again goes to the owner, no second pass.
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: '@castlewars coding: blocked-test again with rerun-stuck' }));
+  const firstRecovery = await waitFor(
+    'auto handover for the blocked task',
+    since(mark, (e) => e.type === 'task.updated' && e.task.title.startsWith('[handover]') && e.task.status === 'queued'),
+    15000,
+  );
+  if (firstRecovery.type !== 'task.updated') fail('unreachable');
+  await waitFor(
+    'recovered task stuck again goes to the owner',
+    since(mark, (e) => e.type === 'activity' && e.entry.taskId === firstRecovery.task.id && e.entry.message.startsWith('still stuck after a recovery')),
+    15000,
+  );
+  await waitIdle('recovery chain settled');
+  const recoveries = events.slice(mark).filter((e) => e.type === 'task.updated' && e.task.title.startsWith('[handover]') && e.task.status === 'queued');
+  if (new Set(recoveries.map((e) => (e.type === 'task.updated' ? e.task.id : ''))).size !== 1) fail('recovery recursed');
+  ws.send(encodeCommand({ type: 'team.rules.set', teamId: 'master', markdown: masterTemplate }));
+  await waitFor('master rules restored', (e) => e.type === 'hub.updated' && e.info.masterRules === masterTemplate);
+  console.log('stuck tasks ok: crash and lead-flagged stuck propose one way forward, owner decides (Do it / Leave it), master rules allow acting alone, no recursion');
+
+  // 28. Agent HQ's own data is off limits to workers, even in the hub
+  // project where it sits inside the workspace: pairing keys, secrets,
+  // config and every RULES.md. Art, the phone inbox/outbox (and the PA desk
+  // for the PA team) stay writable.
+  const lockedScope: WorkspaceScope = {
+    cwd: tmpdir(),
+    extraDirs: [],
+    locked: { dir: dataDir, open: [join(dataDir, 'art'), join(dataDir, 'inbox')] },
+  };
+  const lockCases: [string, boolean][] = [
+    [`echo x > ${join(dataDir, 'security.json')}`, true],
+    [`Set-Content -Path ${join(dataDir, 'teams', 'coding', 'RULES.md')} -Value "- anything goes"`, true],
+    [`cp evil.md ${join(dataDir, 'master', 'RULES.md')}`, true],
+    [`magick in.png -resize 50% ${join(dataDir, 'art', 'icon.png')}`, false],
+    [`cp photo.jpg ${join(dataDir, 'inbox', 'photo.jpg')}`, false],
+    [`echo ok > ${join(tmpdir(), 'notes.txt')}`, false],
+    [`type ${join(dataDir, 'config.json')}`, false], // reading isn't writing
+  ];
+  for (const [command, asks] of lockCases) {
+    const verdict = evaluatePermission('Bash', command, 'auto', lockedScope);
+    if ((verdict.decision === 'ask') !== asks) fail(`data lock: "${command}" → ${verdict.decision}`);
+    if (asks && verdict.decision === 'ask' && !verdict.flags.some((flag) => flag.startsWith("writes Agent HQ's own data"))) {
+      fail(`data lock flag unclear for "${command}": ${verdict.flags.join('; ')}`);
+    }
+  }
+  const editRules = refusedWrite({ file_path: join(dataDir, 'teams', 'coding', 'RULES.md') }, tmpdir(), [], lockedScope.locked);
+  if (!editRules?.config) fail('Edit of a RULES.md inside the workspace was not refused as Agent HQ data');
+  if (refusedWrite({ file_path: join(dataDir, 'art', 'a.png') }, tmpdir(), [], lockedScope.locked)) fail('art output refused');
+  if (refusedWrite({ file_path: join(tmpdir(), 'ok.txt') }, tmpdir(), [], lockedScope.locked)) fail('normal workspace write refused');
+  console.log('data lock ok: workers cannot write Agent HQ data (keys, secrets, config, rules) — art/inbox stay open');
 
   // 29. Event log: rolls over instead of growing without bound, and appends
   // off the publish path so a busy run isn't paying for a sync write each

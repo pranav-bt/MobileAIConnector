@@ -73,7 +73,13 @@ npm run typecheck      # tsc across workspaces
   command (`team.create`), and the office UI renders rooms from the registry.
   A team record may carry per-team MCP server grants (`mcpServers`): its
   workers get exactly those connections (e.g. Roblox Studio for QA and the
-  Game Engine team). Teams chartered for web work (`web` in allowedTools)
+  Game Engine team) — enforced by `strictMcpConfig`, without which every
+  worker also inherited the PC's user-scope servers (`test/probe-mcp-scope.ts`).
+  Grants are picked by name from the servers configured for Claude Code on
+  this PC (`engine/mcp-catalog.ts` reads ~/.claude.json; `HubInfo.mcpCatalog`),
+  via `team.mcp.set` — local clients only, and raw `mcpServers` in
+  team.create/update from a device session are dropped (a connection is a
+  program the hub starts). Teams chartered for web work (`web` in allowedTools)
   browse without permission cards in auto mode. Roster setup lives in
   `tools/setup-teams.mjs` (idempotent, talks to the running hub).
 - Interdisciplinary flow is master-driven: after every completed report the
@@ -82,6 +88,18 @@ npm run typecheck      # tsc across workspaces
   instead — real issues spawn a `[fix]` task back to the source team, capped
   at two rounds before escalating to the owner. Both are depth-capped so
   follow-ups can't cascade.
+- Stuck tasks get one recovery pass (`planRecovery`, quick check): a task is
+  stuck when its run fails, when the lead review returns `stuck` (the worker
+  did not achieve the main goal — the task is marked failed "Stuck — …", no
+  QA, no coordination), or when QA still fails after two fix rounds (no plain
+  retry then). The master proposes ONE move — retry / handover / split (2-3
+  sequential steps via `#runChain`) / ask — from charters, team tools and the
+  master rules, and raises a `stuck-<taskId>` card (Do it / Leave it) unless
+  a master rule explicitly allows acting alone (`auto`, only honored when
+  master rules exist). Account-wide failures (usage/rate limits, sign-in,
+  network) are "ask" without a model call. Work a recovery spawned — and its
+  QA/fix/handover descendants (`#recoveryRound`) — is never auto-recovered
+  again; it escalates. Live check: `npx tsx test/stuck.live.ts`.
 - Big build tasks fan out (lead split pass, `planParallelSplit` in
   master.ts): before a bash-capable team runs a task, its lead may split it
   into a shared contract + optional `[scaffold]` + 2..min(4, worker cap)
@@ -145,11 +163,25 @@ npm run typecheck      # tsc across workspaces
   = team wins, so phone signatures are unchanged). The answer is appended
   under "## Resolved conflicts" as `[<projectId>] …`; workers see only their
   project's decisions. A stopped card records nothing. Edit via the desktop
-  Teams page, `team.rules.set`/`team.rules.add`, or `/rule <team>: <text>`.
-  Live check: `npx tsx test/rules-conflict.live.ts`.
+  Teams page, `team.rules.set`/`team.rules.add` (optional `section`), or
+  `/rule <team>[/<section>]: <text>`. Live check:
+  `npx tsx test/rules-conflict.live.ts`. Bullets under "## Tools" are the
+  team's tools (what to use for which job): workers get them as a list,
+  routing/handover/recovery prompts see their names — guidance only, every
+  command still goes through `evaluatePermission`. The master has its own
+  `data/master/RULES.md` (teamId "master"; on `HubInfo.masterRules`):
+  "## Rules" applies everywhere, "## Routing" / "## Handover" /
+  "## Splitting" / "## When a task is stuck" feed only that pass
+  (`rulesFor`). Master rules never move a task's project. Rules files live in
+  the hub's data dir, which workers can't write (below).
+- Agent HQ's own data dir (pairing keys, secrets, config, every RULES.md) is
+  locked for workers even in the hub project, where it sits inside the
+  workspace: `LockedDir` (util.ts) — Write/Edit refused by the engine
+  (`refusedWrite`), shell writes raise a card ("writes Agent HQ's own data").
+  Open: `data/art`, inbox/outbox, and `data/pa` for the PA team.
 - Composer slash-commands (parsed client-side, deterministic): /team add
   <name>: <charter> · /team workers <team> <n> · /team remove <team> ·
-  /rule <team>: <rule> ·
+  /rule <team>[/<section>]: <rule> (team "master" = the master's rules) ·
   /project add <name> <path> [description] · /project remove <project>.
   Prefixing a task with @<project> pins it to that project.
 - Model choices (Settings > Models, `models.set`) are an override LAYER in

@@ -34,6 +34,24 @@ export function containsPath(parent: string, child: string): boolean {
   return c === p || c.startsWith(p.endsWith(sep) ? p : p + sep);
 }
 
+// Agent HQ's own data dir (pairing keys, secrets, config, every RULES.md).
+// It sits inside the hub project's workspace, so a worker there could
+// otherwise rewrite its own rules or the paired device. Only `open` folders
+// (art, inbox/outbox, the PA desk for the PA team) stay writable.
+export interface LockedDir {
+  dir: string;
+  open: string[];
+}
+
+// May a worker write `target` (already absolute)? Inside one of its roots,
+// and not into the locked dir unless inside one of its open folders.
+export function writableBy(target: string, roots: string[], locked?: LockedDir): boolean {
+  const full = realPath(target);
+  if (!roots.filter(Boolean).map(realPath).some((root) => containsPath(root, full))) return false;
+  if (!locked || !containsPath(realPath(locked.dir), full)) return true;
+  return locked.open.filter(Boolean).map(realPath).some((dir) => containsPath(dir, full));
+}
+
 // Path containment — the check behind project isolation. Resolve both sides
 // through realPath so a junction can't tunnel out of the workspace.
 export function isInside(child: string, parent: string): boolean {

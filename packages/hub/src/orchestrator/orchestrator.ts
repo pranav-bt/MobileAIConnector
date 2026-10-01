@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { MODEL_DEFAULTS, isInternalTask, resolveModel, type Agent, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
+import { MODEL_DEFAULTS, isInternalTask, resolveModel, rulesFor, toolName, type Agent, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine } from '../engine/types.js';
@@ -19,10 +19,14 @@ import {
   type PermissionContext,
   detectRuleConflicts,
   type RuleConflict,
+  planRecovery,
+  type RecoveryPlan,
+  type StuckContext,
 } from './master.js';
+import { MASTER_SECTIONS } from './rules-file.js';
 import { capturePcScreen, saveIncomingFile, shareFile } from '../files.js';
 import { evaluatePermission } from './policy.js';
-import { delay, isInside } from './util.js';
+import { delay, isInside, type LockedDir } from './util.js';
 import type { PermissionMode } from '../config.js';
 import { parseRules, type ParsedRules, type TeamRegistry } from './teams.js';
 import type { ProjectRegistry } from './projects.js';
@@ -148,6 +152,12 @@ export class Orchestrator implements CommandHandlers {
   #rulesChecks = new Map<string, Promise<void>>();
   #rulesStamps = new Map<string, string>();
   #rulesTimer: NodeJS.Timeout | null = null;
+  #onInfoChange: () => void = () => {};
+  #mcpCatalog: () => Record<string, unknown> = () => ({});
+  // Stuck tasks the master already ran a recovery pass for (one per task).
+  #recoveryAsked = new Set<string>();
+  // Tasks a recovery spawned (and their QA/fix/handover descendants) -> 1.
+  #recoveryRound = new Map<string, number>();
 
   #projects: ProjectRegistry;
   #policy: { mode: PermissionMode };
@@ -203,10 +213,12 @@ export class Orchestrator implements CommandHandlers {
   // stat per team per tick, the file is only read when it changed.
   #watchRules(): void {
     if (this.#rulesTimer) return;
+    this.#rulesStamps.set('master', this.#registry.rulesStamp('master'));
     this.#rulesTimer = setInterval(() => {
       for (const team of this.#registry.all()) {
         if (this.#registry.rulesStamp(team.id) !== this.#rulesStamps.get(team.id)) this.#publishTeam(team);
       }
+      if (this.#registry.rulesStamp('master') !== this.#rulesStamps.get('master')) this.#publishMasterRules();
     }, 3000);
     this.#rulesTimer.unref();
   }
@@ -214,6 +226,26 @@ export class Orchestrator implements CommandHandlers {
   stopRulesWatch(): void {
     if (this.#rulesTimer) clearInterval(this.#rulesTimer);
     this.#rulesTimer = null;
+  }
+
+  // The master's rules reach clients on HubInfo (hub.updated).
+  #publishMasterRules(): void {
+    this.#rulesStamps.set('master', this.#registry.rulesStamp('master'));
+    this.#onInfoChange();
+  }
+
+  masterRulesText(): string {
+    return this.#registry.readRules('master');
+  }
+
+  // The owner's master rules for one kind of decision (see MASTER_SECTIONS).
+  #masterRules(...sections: string[]): string[] {
+    return rulesFor(parseRules(this.#registry.readRules('master')), sections);
+  }
+
+  // Team records with their RULES.md, so master prompts can see each team's tools.
+  #teamsWithRules(): Team[] {
+    return this.#registry.all().map((team) => this.#registry.withRules(team));
   }
 
   // "coding", "coding-team", "Coding team", "Cod" — exact id first.
@@ -228,26 +260,84 @@ export class Orchestrator implements CommandHandlers {
     );
   }
 
+  // A rules-file target: "master" (or "the master") is the master's own file.
+  #rulesTarget(ref: string): { id: string; name: string; team: Team | null } | null {
+    if (/^(the\s+)?master$/i.test(ref.trim())) return { id: 'master', name: 'Master', team: null };
+    const team = this.#findTeam(ref);
+    return team ? { id: team.id, name: team.name, team } : null;
+  }
+
+  #publishRules(target: { id: string; team: Team | null }): void {
+    if (target.team) this.#publishTeam(target.team);
+    else this.#publishMasterRules();
+  }
+
   setTeamRules(teamRef: string, markdown: string): void {
-    const team = this.#findTeam(teamRef);
-    if (!team) {
+    const target = this.#rulesTarget(teamRef);
+    if (!target) {
       this.#activity('master', null, `no team called "${teamRef}" — rules not saved`);
       return;
     }
-    this.#registry.setRules(team.id, markdown);
-    this.#publishTeam(team);
-    const count = parseRules(markdown).rules.length;
-    this.#activity('master', null, `${team.name} rules saved — ${count} rule${count === 1 ? '' : 's'}`);
+    this.#registry.setRules(target.id, markdown);
+    this.#publishRules(target);
+    const { rules, tools } = parseRules(markdown);
+    this.#activity(
+      'master',
+      null,
+      `${target.name} rules saved — ${rules.length} rule${rules.length === 1 ? '' : 's'}${tools.length ? `, ${tools.length} tool${tools.length === 1 ? '' : 's'}` : ''}`,
+    );
   }
 
-  addTeamRule(teamRef: string, rule: string): void {
-    const team = this.#findTeam(teamRef);
-    if (!team || !this.#registry.addRule(team.id, rule)) {
+  addTeamRule(teamRef: string, rule: string, section?: string): void {
+    const target = this.#rulesTarget(teamRef);
+    if (!target || !this.#registry.addRule(target.id, rule, section)) {
       this.#activity('master', null, `no team called "${teamRef}" — rule not added`);
       return;
     }
-    this.#publishTeam(team);
-    this.#activity('master', null, `rule added for ${team.name}: ${rule.slice(0, 80)}`);
+    this.#publishRules(target);
+    this.#activity('master', null, `${section ? `${section} ` : ''}rule added for ${target.name}: ${rule.slice(0, 80)}`);
+  }
+
+  // MCP connections by name from the PC's catalog (engine-provided). A team
+  // gets exactly these; names not in the catalog are refused, never guessed.
+  configureMcpCatalog(read: () => Record<string, unknown>): void {
+    this.#mcpCatalog = read;
+  }
+
+  mcpCatalogNames(): string[] {
+    return Object.keys(this.#mcpCatalog()).sort();
+  }
+
+  setTeamMcp(teamRef: string, names: string[]): void {
+    const team = this.#findTeam(teamRef);
+    if (!team) {
+      this.#activity('master', null, `no team called "${teamRef}" — connections unchanged`);
+      return;
+    }
+    const catalog = this.#mcpCatalog();
+    const wanted = [...new Set(names)];
+    const unknown = wanted.filter((name) => !(name in catalog) && !(name in team.mcpServers));
+    // A grant already on the record (e.g. set up by tools/setup-teams.mjs)
+    // may stay even when it isn't in the catalog; new ones must be in it.
+    const mcpServers = Object.fromEntries(
+      wanted
+        .filter((name) => name in catalog || name in team.mcpServers)
+        .map((name) => [name, name in catalog ? catalog[name] : team.mcpServers[name]]),
+    );
+    const updated = this.#registry.update({ teamId: team.id, mcpServers });
+    if (!updated) return;
+    this.#publishTeam(updated);
+    const granted = Object.keys(mcpServers);
+    this.#activity(
+      'master',
+      null,
+      `${team.name} connections: ${granted.length ? granted.join(', ') : 'none'}` +
+        (unknown.length ? ` (not configured on this PC: ${unknown.join(', ')})` : ''),
+    );
+  }
+
+  onInfoChange(publish: () => void): void {
+    this.#onInfoChange = publish;
   }
 
   init(): void {
@@ -353,6 +443,16 @@ export class Orchestrator implements CommandHandlers {
     const paDir = team && this.#isPaTeam(team) && this.#pa ? this.#pa.paths.dir : '';
     const extras = [this.#outboxDir, this.#inboxDir, paDir].filter(Boolean);
     return [...new Set(extras)].filter((dir) => existsSync(dir) && !isInside(dir, cwd));
+  }
+
+  // Agent HQ's own data dir is never writable by workers — it holds the
+  // pairing keys, secrets, config and every RULES.md, and sits inside the hub
+  // project's workspace. Open: generated art, the phone inbox/outbox, and the
+  // PA desk for the PA team.
+  #lockedData(team?: Team): LockedDir {
+    const dataDir = this.#registry.dataDir;
+    const paDir = team && this.#isPaTeam(team) && this.#pa ? this.#pa.paths.dir : '';
+    return { dir: dataDir, open: [join(dataDir, 'art'), this.#inboxDir, this.#outboxDir, paDir].filter(Boolean) };
   }
 
   #isPaTeam(team: Pick<Team, 'id'>): boolean {
@@ -502,13 +602,14 @@ export class Orchestrator implements CommandHandlers {
     const thread = this.#routingThread(taskId);
     const decision = await routeTask(
       this.#engine,
-      this.#registry.all(),
+      this.#teamsWithRules(),
       this.#projects.all(),
       this.#projects.defaultProject().id,
       text,
       forcedProjectId,
       masterModel,
       thread,
+      this.#masterRules(MASTER_SECTIONS.routing, 'plan'),
     );
     this.#recordTokens(masterModel.tier, decision.tokens);
     this.#routingCount -= 1;
@@ -570,7 +671,7 @@ export class Orchestrator implements CommandHandlers {
 
   // Sequenced multi-team plan: each step runs after the previous one and
   // receives its synopsis as a handover; QA follows only the final step.
-  async #runChain(firstTaskId: string, steps: PlanStep[], projectId: string, overallTitle: string): Promise<void> {
+  async #runChain(firstTaskId: string, steps: PlanStep[], projectId: string, overallTitle: string, recoveryRound = 0): Promise<void> {
     this.#activity(
       'master',
       firstTaskId,
@@ -588,6 +689,7 @@ export class Orchestrator implements CommandHandlers {
         : step.instruction;
 
       const taskId = index === 0 ? firstTaskId : `t-${now().toString(36)}-${++this.#taskCounter}`;
+      if (recoveryRound) this.#recoveryRound.set(taskId, recoveryRound);
       const record: Task = {
         id: taskId,
         title: `Step ${index + 1}/${steps.length} — ${step.title}`.slice(0, 60),
@@ -646,10 +748,19 @@ export class Orchestrator implements CommandHandlers {
     // SDK loads it for the worker) adds on top. Only this project's decided
     // conflicts are shown — never another project's.
     if (task.teamId) {
-      const { rules, resolutions } = parseRules(this.#registry.readRules(task.teamId));
+      const { rules, tools, resolutions } = parseRules(this.#registry.readRules(task.teamId));
+      if ((rules.length > 0 || tools.length > 0) && history.length === 0 && !teamMemory) sections.push('---');
+      // The team's tools: what to reach for, for which job. Guidance only —
+      // every command still goes through the normal permission checks.
+      if (tools.length > 0) {
+        sections.push(
+          "Tools your team has (from the owner) — use them for the jobs they're listed for:",
+          ...tools.map((tool) => `- ${tool}`),
+          '',
+        );
+      }
       if (rules.length > 0) {
         const decided = this.#projectResolutions(resolutions, task.projectId ?? this.#projects.defaultProject().id);
-        if (history.length === 0 && !teamMemory) sections.push('---');
         sections.push(
           'Team rules from the owner — follow them in every project:',
           ...rules.map((rule) => `- ${rule}`),
@@ -779,6 +890,7 @@ export class Orchestrator implements CommandHandlers {
     const scope = {
       cwd: project.workspaceDir || this.#workspaceDir,
       extraDirs: this.#extraDirs(project.workspaceDir || this.#workspaceDir, team),
+      locked: this.#lockedData(team),
     };
     this.#runningCwds.set(taskId, scope.cwd);
 
@@ -794,6 +906,7 @@ export class Orchestrator implements CommandHandlers {
         model: workerSpec,
         cwd: scope.cwd,
         extraDirs: scope.extraDirs,
+        locked: scope.locked,
         ...(piece ? { maxSubagents: 0 } : {}),
         signal: controller.signal,
         callbacks: {
@@ -863,6 +976,19 @@ export class Orchestrator implements CommandHandlers {
         this.#activity(`${team.id}-lead`, taskId, `noted for the team: ${review.memoryNote.slice(0, 80)}`);
       }
 
+      // The lead says the worker couldn't finish: the task is stuck — no QA,
+      // no handover pass; the master proposes a way forward instead.
+      if (review.stuck) {
+        const synopsis = `Stuck — ${review.stuck}\n${review.synopsis || ''}`.trim();
+        this.#patchTask(taskId, { status: 'failed', progressPct: 100, synopsis });
+        this.#activity(`${team.id}-lead`, taskId, `stuck: ${review.stuck.slice(0, 80)}`);
+        if (!team.allowedTools.includes('bash') && result.synopsis.trim().length > 300) {
+          this.#deliverReport(task, team, result.synopsis, synopsis);
+        }
+        void this.#recoverStuck(taskId, team, 'blocked', review.stuck);
+        return null;
+      }
+
       this.#patchTask(taskId, { status: 'done', progressPct: 100, synopsis: review.synopsis || null });
       this.#activity(`${team.id}-lead`, taskId, `report filed: ${task.title.slice(0, 50)}`);
       outcome = review.synopsis || '';
@@ -887,6 +1013,8 @@ export class Orchestrator implements CommandHandlers {
         const message = error instanceof Error ? error.message : String(error);
         this.#patchTask(taskId, { status: 'failed', synopsis: `Failed: ${message}` });
         this.#patchAgent(workerId, { status: 'blocked', activity: message.slice(0, 90) });
+        // A split piece's failure is its parent's to handle.
+        if (!piece) void this.#recoverStuck(taskId, team, 'failed', message);
       }
     } finally {
       this.#controllers.delete(taskId);
@@ -979,6 +1107,7 @@ export class Orchestrator implements CommandHandlers {
       maxParts,
       checkSpec,
       project.workspaceDir || this.#workspaceDir,
+      this.#masterRules(MASTER_SECTIONS.splitting, 'split'),
     );
     this.#recordTokens(checkSpec.tier, result.tokens);
     if (this.#halted(taskId)) {
@@ -1133,6 +1262,7 @@ export class Orchestrator implements CommandHandlers {
     const pieceId = `t-${now().toString(36)}-${this.#taskCounter}`;
     this.#splitChildren.set(parentId, [...(this.#splitChildren.get(parentId) ?? []), pieceId]);
     this.#taskDepth.set(pieceId, this.#taskDepth.get(parentId) ?? 0);
+    this.#carryRecovery(parentId, pieceId);
     this.#publishTask({
       id: pieceId,
       title: title.slice(0, 60),
@@ -1200,6 +1330,7 @@ export class Orchestrator implements CommandHandlers {
 
     this.#qaSource.set(taskId, sourceTaskId);
     this.#taskDepth.set(taskId, (this.#taskDepth.get(sourceTaskId) ?? 0) + 1);
+    this.#carryRecovery(sourceTaskId, taskId);
     this.#startOrQueue(taskId, qa, false);
   }
 
@@ -1246,11 +1377,12 @@ export class Orchestrator implements CommandHandlers {
     const checksModel = this.#checksModel();
     const { dispatch, tokens } = await coordinateFollowUp(
       this.#engine,
-      this.#registry.all(),
+      this.#teamsWithRules(),
       team,
       task.title,
       synopsis,
       checksModel,
+      this.#masterRules(MASTER_SECTIONS.handover),
     );
     this.#recordTokens(checksModel.tier, tokens);
 
@@ -1267,6 +1399,7 @@ export class Orchestrator implements CommandHandlers {
       this.#taskCounter += 1;
       const followId = `t-${now().toString(36)}-${this.#taskCounter}`;
       this.#taskDepth.set(followId, depth + 1);
+      this.#carryRecovery(taskId, followId);
       this.#publishTask({
         id: followId,
         title: item.title.slice(0, 60),
@@ -1286,6 +1419,141 @@ export class Orchestrator implements CommandHandlers {
       this.#activity('master', followId, `follow-up dispatched to ${target.name}: ${item.title.slice(0, 45)}`);
       this.#startOrQueue(followId, target, true);
     }
+  }
+
+  // --- stuck tasks ------------------------------------------------------
+  // A run failed, the lead says the worker couldn't finish, or QA still
+  // fails after two fix rounds: the master proposes ONE way forward (retry /
+  // handover / split) from the owner's master rules and the team's charters
+  // and tools, then asks — unless those rules explicitly let it act alone.
+  // Work a recovery spawned (and everything descending from it: QA, fixes,
+  // handovers) is never auto-recovered again; it escalates to the owner.
+
+  // Pass the recovery round to tasks spawned from `fromId`.
+  #carryRecovery(fromId: string, toId: string): void {
+    const round = this.#recoveryRound.get(fromId);
+    if (round) this.#recoveryRound.set(toId, round);
+  }
+
+  async #recoverStuck(
+    taskId: string,
+    team: Team,
+    kind: StuckContext['kind'],
+    problem: string,
+    opts: { allowRetry?: boolean } = {},
+  ): Promise<void> {
+    const task = this.#bus.state.tasks[taskId];
+    if (!task || isInternalTask(task) || this.#recoveryAsked.has(taskId)) return;
+    this.#recoveryAsked.add(taskId);
+    if ((this.#recoveryRound.get(taskId) ?? 0) >= 1) {
+      this.#activity('master', taskId, `still stuck after a recovery — needs you: ${task.title.slice(0, 50)}`);
+      return;
+    }
+    const model = this.#checksModel();
+    this.#patchAgent('master', { status: 'working', activity: `finding a way past: ${task.title.slice(0, 40)}` });
+    const { plan, tokens } = await planRecovery(
+      this.#engine,
+      this.#teamsWithRules(),
+      { team, taskTitle: task.title, taskDetail: task.detail, problem, kind, allowRetry: opts.allowRetry ?? true },
+      this.#masterRules('stuck', MASTER_SECTIONS.handover, MASTER_SECTIONS.splitting),
+      model,
+    );
+    this.#recordTokens(model.tier, tokens);
+    this.#masterStatus();
+    if (!plan || plan.action === 'ask') {
+      this.#activity('master', taskId, `stuck: ${task.title.slice(0, 45)} — needs you${plan ? `: ${plan.why}` : ''}`);
+      return;
+    }
+    const description = this.#describeRecovery(plan, team);
+    if (plan.auto) {
+      this.#activity('master', taskId, `stuck: ${task.title.slice(0, 45)} — ${description} (your master rules allow it without asking)`);
+      this.#runRecovery(taskId, team, plan, problem);
+      return;
+    }
+    if ((await this.#askRecovery(task, team, plan, problem, description)) === 'approve') {
+      this.#runRecovery(taskId, team, plan, problem);
+    } else {
+      this.#activity('master', taskId, `left as is: ${task.title.slice(0, 50)}`);
+    }
+  }
+
+  #describeRecovery(plan: RecoveryPlan, team: Team): string {
+    if (plan.action === 'retry') return `try again on the ${team.name} with a different approach`;
+    if (plan.action === 'handover') return `hand it to the ${this.#registry.get(plan.teamId ?? '')?.name ?? plan.teamId}`;
+    const route = plan.steps.map((step) => this.#registry.get(step.teamId)?.name ?? step.teamId).join(' → ');
+    return `split it into ${plan.steps.length} steps (${route})`;
+  }
+
+  // A master card with two answers; approve runs the proposal.
+  #askRecovery(task: Task, team: Team, plan: RecoveryPlan, problem: string, description: string): Promise<'approve' | 'deny'> {
+    const requestId = `stuck-${task.id}`;
+    const details =
+      plan.action === 'split'
+        ? plan.steps.map((step, index) => `${index + 1}. ${this.#registry.get(step.teamId)?.name ?? step.teamId}: ${step.title} — ${step.instruction}`).join('\n')
+        : plan.instruction;
+    this.#bus.publish({
+      type: 'permission.updated',
+      request: {
+        id: requestId,
+        taskId: task.id,
+        agentId: 'master',
+        teamId: team.id,
+        command: `Proposal: ${description}\n${details}`,
+        summary:
+          `${team.name} got stuck on "${task.title.slice(0, 60)}": ${problem.replace(/\s+/g, ' ').slice(0, 160)}. ` +
+          `The master suggests: ${description}. ${plan.why}`,
+        choices: ['Do it', 'Leave it'],
+        flags: ['stuck'],
+        reason: plan.why,
+        status: 'pending',
+        scope: 'once',
+        requestedAt: now(),
+        resolvedAt: null,
+      },
+    });
+    this.#activity('master', task.id, `stuck: ${task.title.slice(0, 45)} — suggesting: ${description}`);
+    return new Promise((resolve) => this.#pendingResolvers.set(requestId, resolve));
+  }
+
+  #runRecovery(taskId: string, team: Team, plan: RecoveryPlan, problem: string): void {
+    const task = this.#bus.state.tasks[taskId];
+    if (!task) return;
+    const round = (this.#recoveryRound.get(taskId) ?? 0) + 1;
+    const baseTitle = task.title.replace(/^\[(retry|handover)\]\s*/i, '');
+    const context =
+      `This continues a stuck task ("${task.title}", ${team.name}). What stopped it: ${problem.replace(/\s+/g, ' ').slice(0, 600)}\n\n` +
+      `The original ask: ${task.detail.slice(0, 1500)}`;
+    if (plan.action === 'split') {
+      const firstId = `t-${now().toString(36)}-${++this.#taskCounter}`;
+      this.#recoveryRound.set(firstId, round);
+      const steps = plan.steps.map((step, index) => (index === 0 ? { ...step, instruction: `${step.instruction}\n\n${context}` } : step));
+      void this.#runChain(firstId, steps, task.projectId ?? this.#projects.defaultProject().id, baseTitle, round);
+      return;
+    }
+    const target = this.#registry.get(plan.teamId ?? '');
+    if (!target) return;
+    if (target.id !== team.id) {
+      this.#holdMeeting([`${team.id}-lead`, `${target.id}-lead`], `stuck: ${baseTitle.slice(0, 32)}`);
+    }
+    const followId = `t-${now().toString(36)}-${++this.#taskCounter}`;
+    this.#taskDepth.set(followId, (this.#taskDepth.get(taskId) ?? 0) + 1);
+    this.#recoveryRound.set(followId, round);
+    this.#publishTask({
+      id: followId,
+      title: `[${plan.action}] ${baseTitle}`.slice(0, 60),
+      detail: `${plan.instruction}\n\n${context}`,
+      projectId: task.projectId,
+      teamId: target.id,
+      status: 'queued',
+      progressPct: 0,
+      agentIds: [],
+      synopsis: null,
+      tokensUsed: 0,
+      createdAt: now(),
+      updatedAt: now(),
+    });
+    this.#activity('master', followId, `${plan.action === 'retry' ? 'retrying' : 'handed over'} on ${target.name}: ${baseTitle.slice(0, 45)}`);
+    this.#startOrQueue(followId, target, true);
   }
 
   // QA verdict -> Meeting Room huddle -> [fix] task back to the source team.
@@ -1317,8 +1585,10 @@ export class Orchestrator implements CommandHandlers {
       this.#activity(
         'master',
         qaTaskId,
-        `QA still failing after ${round} fix rounds — needs your attention: ${rootTitle.slice(0, 45)}`,
+        `QA still failing after ${round} fix rounds: ${rootTitle.slice(0, 45)}`,
       );
+      // Stuck: the same team already tried twice, so no plain retry.
+      void this.#recoverStuck(source.id, sourceTeam, 'qa', evaluation.summary || qaSynopsis, { allowRetry: false });
       return;
     }
 
@@ -1363,6 +1633,7 @@ export class Orchestrator implements CommandHandlers {
     });
     this.#activity('master', fixId, `remediation assigned to ${sourceTeam.name}: ${fixTitle.slice(0, 45)}`);
     this.#taskDepth.set(fixId, (this.#taskDepth.get(qaTaskId) ?? 1) + 1);
+    this.#carryRecovery(qaTaskId, fixId);
     this.#startOrQueue(fixId, sourceTeam, true);
   }
 
@@ -1679,7 +1950,7 @@ export class Orchestrator implements CommandHandlers {
     // Master's project-switch card: intake is waiting and sets the task's
     // status and project itself. Rule-conflict cards: the run waiting on the
     // answer records it and restores the task's status.
-    if (requestId.startsWith('route-') || requestId.startsWith('rules-')) {
+    if (requestId.startsWith('route-') || requestId.startsWith('rules-') || requestId.startsWith('stuck-')) {
       const resolve = this.#pendingResolvers.get(requestId);
       this.#pendingResolvers.delete(requestId);
       resolve?.(decision);

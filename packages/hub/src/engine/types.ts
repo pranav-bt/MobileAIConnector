@@ -1,4 +1,5 @@
 import type { ModelSpec, Team } from '@agent-hq/shared';
+import type { LockedDir } from '../orchestrator/util.js';
 
 // The engine boundary. Anything that can run an agent (Claude Agent SDK
 // today, a Codex adapter later) implements this and emits nothing but the
@@ -30,6 +31,8 @@ export interface OrchestratorEngine {
     cwd: string;
     // Extra directory roots the worker's tools may roam (all subdirectories).
     extraDirs?: string[];
+    // Agent HQ's own data dir: never writable except its open folders.
+    locked?: LockedDir;
     // How many sub-agents the worker may run at once; 0 = none (a split part
     // is already one of several parallel workers). Defaults to the engine's.
     maxSubagents?: number;

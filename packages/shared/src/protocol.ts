@@ -65,10 +65,20 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     mcpServers: z.record(z.string(), z.unknown()).optional(),
   }),
   z.object({ type: z.literal('team.remove'), teamId: z.string() }),
-  // The owner's per-team rules (RULES.md): replace the whole file from an
-  // editor, or append one rule. teamId may be an id or a team name.
+  // The owner's rules files (RULES.md): replace the whole file from an
+  // editor, or append one rule (optionally under a section, e.g. "tools" or
+  // "stuck"). teamId may be an id, a team name, or "master".
   z.object({ type: z.literal('team.rules.set'), teamId: z.string().min(1), markdown: z.string().max(20000) }),
-  z.object({ type: z.literal('team.rules.add'), teamId: z.string().min(1), rule: z.string().min(1).max(500) }),
+  z.object({
+    type: z.literal('team.rules.add'),
+    teamId: z.string().min(1),
+    rule: z.string().min(1).max(500),
+    section: z.string().min(1).max(40).optional(),
+  }),
+  // Grant a team MCP connections by name, from the servers configured on
+  // this PC (HubInfo.mcpCatalog). Full replace; [] removes them all. Local
+  // clients only — a connection is a program the hub will start.
+  z.object({ type: z.literal('team.mcp.set'), teamId: z.string().min(1), servers: z.array(z.string().min(1)).max(20) }),
   z.object({
     type: z.literal('project.register'),
     name: z.string().min(1),

@@ -82,6 +82,18 @@ export function startServer(
               return;
             }
             break;
+          // An MCP connection is a program the hub starts for a team's
+          // workers — granted from the PC only, never from a device session.
+          case 'team.mcp.set':
+            if (mode !== 'plain' || !local) return;
+            break;
+          case 'team.create':
+          case 'team.update':
+            if ((mode !== 'plain' || !local) && command.mcpServers) {
+              dispatchCommand(handlers, { ...command, mcpServers: undefined });
+              return;
+            }
+            break;
           default:
             break;
         }

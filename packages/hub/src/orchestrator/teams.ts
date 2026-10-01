@@ -1,42 +1,25 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { RESOLVED_HEADING, RULES_HEADING, parseRules, type ParsedRules, type Team } from '@agent-hq/shared';
+import {
+  RULES_FILE,
+  appendToSection,
+  ensureRulesFile,
+  ensureTeamRules,
+  masterRulesTemplate,
+  readRulesFile,
+  resolveSection,
+  rulesFileStamp,
+  writeRulesFile,
+} from './rules-file.js';
 
 export { parseRules, type ParsedRules };
 
 // Teams are config records, persisted as data/teams.json. Creating a team is
 // inserting a record here — the office UI adds the room on the team.updated
-// event, nothing else needs to change.
-
-// RULES.md — the owner's standing rules for one team, in every project. The
-// owner writes it (desktop Teams page, /rule, or any editor); the hub only
-// appends: /rule lines into "## Rules" and conflict answers into
-// "## Resolved conflicts". A project's CLAUDE.md adds on top of it.
-export const RULES_FILE = 'RULES.md';
-
-function rulesTemplate(teamName: string): string {
-  return [
-    `# ${teamName} — rules`,
-    '',
-    '<!--',
-    `Your standing rules for every ${teamName} worker, in every project.`,
-    '- One rule per line, starting with "- ".',
-    '- Group rules under any "## " heading you like (Code style, Git, Testing, Tone...).',
-    "- A project's own CLAUDE.md adds on top of these. When the two disagree,",
-    '  Agent HQ asks you which one wins and records your answer under',
-    '  "Resolved conflicts". Delete a line there to be asked again.',
-    'Example:',
-    '## Git',
-    '- Never force-push.',
-    '-->',
-    '',
-    `## ${RULES_HEADING}`,
-    '',
-    `## ${RESOLVED_HEADING}`,
-    '',
-  ].join('\n');
-}
-
+// event, nothing else needs to change. Each team also has the owner's
+// RULES.md (rules, tools, resolved conflicts) next to its MEMORY.md; the
+// master's own RULES.md lives in data/master/.
 
 const DEFAULT_TEAMS: Omit<Team, 'createdAt' | 'memoryDir' | 'mcpServers'>[] = [
   {
@@ -77,11 +60,15 @@ const DEFAULT_TEAMS: Omit<Team, 'createdAt' | 'memoryDir' | 'mcpServers'>[] = [
 export class TeamRegistry {
   #filePath: string;
   #teamsDir: string;
+  #masterRulesPath: string;
   #teams = new Map<string, Team>();
+  readonly dataDir: string;
 
   constructor(dataDir: string) {
+    this.dataDir = dataDir;
     this.#filePath = join(dataDir, 'teams.json');
     this.#teamsDir = join(dataDir, 'teams');
+    this.#masterRulesPath = join(dataDir, 'master', RULES_FILE);
     mkdirSync(this.#teamsDir, { recursive: true });
   }
 
@@ -102,6 +89,7 @@ export class TeamRegistry {
       this.#save();
     }
     for (const team of this.#teams.values()) this.#ensureMemoryDir(team);
+    ensureRulesFile(this.#masterRulesPath, masterRulesTemplate());
   }
 
   #ensureMemoryDir(team: Team): void {
@@ -111,86 +99,51 @@ export class TeamRegistry {
       writeFileSync(charterPath, `# ${team.name}\n\n${team.charter}\n`);
     }
     // Never overwrite: RULES.md belongs to the owner once it exists.
-    const rulesPath = join(team.memoryDir, RULES_FILE);
-    if (!existsSync(rulesPath)) writeFileSync(rulesPath, rulesTemplate(team.name));
+    ensureTeamRules(join(team.memoryDir, RULES_FILE), team.name);
   }
 
+  // "master" names the master's own rules file; anything else is a team id.
   rulesPath(teamId: string): string | null {
+    if (teamId === 'master') return this.#masterRulesPath;
     const team = this.#teams.get(teamId);
     return team ? join(team.memoryDir, RULES_FILE) : null;
   }
 
   readRules(teamId: string): string {
     const path = this.rulesPath(teamId);
-    if (!path || !existsSync(path)) return '';
-    return readFileSync(path, 'utf8');
+    return path ? readRulesFile(path) : '';
   }
 
-  // mtime+size, so the watcher spots hand edits without reading the file.
   rulesStamp(teamId: string): string {
     const path = this.rulesPath(teamId);
-    if (!path || !existsSync(path)) return '';
-    const stat = statSync(path);
-    return `${stat.mtimeMs}:${stat.size}`;
+    return path ? rulesFileStamp(path) : '';
   }
 
   setRules(teamId: string, markdown: string): boolean {
     const path = this.rulesPath(teamId);
     if (!path) return false;
-    writeFileSync(path, markdown.endsWith('\n') ? markdown : markdown + '\n');
+    writeRulesFile(path, markdown);
     return true;
   }
 
-  // Appends a bullet at the end of a section (created before Resolved
-  // conflicts when missing). Everything else in the file is kept verbatim.
-  #appendToSection(teamId: string, heading: string, bullet: string): boolean {
-    const team = this.#teams.get(teamId);
-    if (!team) return false;
-    this.#ensureMemoryDir(team);
-    const lines = this.readRules(teamId).replace(/\s+$/, '').split(/\r?\n/);
-    const target = heading.toLowerCase();
-    let inComment = false; // headings inside the guidance comment don't count
-    let start = -1;
-    let resolvedAt = -1;
-    lines.forEach((raw, index) => {
-      const line = raw.trim();
-      if (inComment) {
-        if (line.includes('-->')) inComment = false;
-        return;
-      }
-      if (line.startsWith('<!--')) {
-        inComment = !line.includes('-->');
-        return;
-      }
-      const match = /^#{2,6}\s+(.+)$/.exec(line);
-      if (!match) return;
-      const name = match[1]!.trim().toLowerCase();
-      if (name === target && start < 0) start = index;
-      if (name === RESOLVED_HEADING.toLowerCase() && resolvedAt < 0) resolvedAt = index;
-    });
-    const entry = `- ${bullet.replace(/\s+/g, ' ').trim()}`;
-    if (start < 0) {
-      const at = resolvedAt >= 0 && target !== RESOLVED_HEADING.toLowerCase() ? resolvedAt : lines.length;
-      lines.splice(at, 0, ...(at > 0 && lines[at - 1]?.trim() ? [''] : []), `## ${heading}`, entry, '');
-    } else {
-      let end = start + 1;
-      while (end < lines.length && !/^#{1,6}\s/.test(lines[end]!.trim())) end++;
-      let insertAt = end;
-      while (insertAt > start + 1 && !lines[insertAt - 1]!.trim()) insertAt--;
-      lines.splice(insertAt, 0, entry);
-      if (insertAt === start + 1 && lines[start + 2]?.trim()) lines.splice(start + 2, 0, '');
-    }
-    this.setRules(teamId, lines.join('\n').replace(/\n{3,}/g, '\n\n'));
-    return true;
-  }
-
-  addRule(teamId: string, rule: string): boolean {
+  // One bullet into a section ("tools", "stuck", … — matched against the
+  // file's headings; default "## Rules").
+  addRule(teamId: string, rule: string, section?: string): boolean {
+    const path = this.rulesPath(teamId);
     const text = rule.trim().replace(/^[-*]\s+/, '');
-    return text.length > 0 && this.#appendToSection(teamId, RULES_HEADING, text);
+    if (!path || !text) return false;
+    const team = this.#teams.get(teamId);
+    if (team) this.#ensureMemoryDir(team);
+    else ensureRulesFile(path, masterRulesTemplate());
+    appendToSection(path, section ? resolveSection(readRulesFile(path), section) : RULES_HEADING, text);
+    return true;
   }
 
   recordResolution(teamId: string, line: string): boolean {
-    return this.#appendToSection(teamId, RESOLVED_HEADING, line);
+    const path = this.rulesPath(teamId);
+    if (!path) return false;
+    appendToSection(path, RESOLVED_HEADING, line);
+    return true;
   }
 
   // The record as clients see it: config + the owner's rules file.

@@ -293,6 +293,12 @@ export const HubInfoSchema = z.object({
   // strict: every gated tool asks.
   permissionMode: z.enum(['auto', 'strict']),
   modelOverrides: ModelOverridesSchema.default({ teams: {} }),
+  // The owner's rules for the master (data/master/RULES.md): routing,
+  // handovers, splitting, what to do when a task is stuck.
+  masterRules: z.string().optional(),
+  // MCP servers configured on this PC (names only) — what a team can be
+  // granted. Workers get exactly their team's grants, nothing else.
+  mcpCatalog: z.array(z.string()).optional(),
 });
 export type HubInfo = z.infer<typeof HubInfoSchema>;
 

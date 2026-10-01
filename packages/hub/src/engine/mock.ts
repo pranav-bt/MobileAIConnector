@@ -1,11 +1,30 @@
 import { join } from 'node:path';
 import type { ModelSpec, Team } from '@agent-hq/shared';
 import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './types.js';
+import type { LockedDir } from '../orchestrator/util.js';
 
 // Deterministic engine for tests and offline development: routes by team-id
 // keyword, "installs" trigger a permission request, everything resolves fast.
 export class MockEngine implements OrchestratorEngine {
   async complete(args: { prompt: string; model: ModelSpec }): Promise<{ text: string; tokens: number }> {
+    // Stuck-task recovery: "split-me" in the task proposes a 2-step split,
+    // anything else a handover to the design team; "MOCK-AUTO" in the
+    // owner's master rules lets the master act without asking.
+    if (args.prompt.includes('{"action"')) {
+      const auto = args.prompt.includes('MOCK-AUTO');
+      const plan = args.prompt.includes('split-me')
+        ? {
+            action: 'split',
+            steps: [
+              { teamId: 'design', title: 'Spec the piece', instruction: 'Mock: write the spec.' },
+              { teamId: 'coding', title: 'Build the piece', instruction: 'Mock: build it from the spec.' },
+            ],
+            why: 'Mock: smaller steps get past the blocker.',
+            auto,
+          }
+        : { action: 'handover', teamId: 'design', instruction: 'Mock: take this over.', why: 'Mock: design has what it needs.', auto };
+      return { text: JSON.stringify(plan), tokens: 6 };
+    }
     // Rule-conflict check: a team rule tagged MOCK-CONFLICT contradicts the
     // project's CLAUDE.md on indentation, until the owner has resolved it.
     if (args.prompt.includes('{"conflicts"')) {
@@ -128,11 +147,15 @@ export class MockEngine implements OrchestratorEngine {
       const synopsis =
         args.prompt.includes('remediate-me') && args.prompt.includes('[QA]') && !args.prompt.includes('[fix')
           ? 'ISSUES: QA found the remediate-me bug in the feature.'
-          : args.prompt.includes('handoff-test') && !args.prompt.includes('[QA]')
-            ? 'Done, but the icon set still needs the design team (handoff-test).'
-            : 'Mock lead review: work checked, looks complete.';
+          : args.prompt.includes('qa-stuck-test') && args.prompt.includes('[QA]')
+            ? 'ISSUES: the qa-stuck-test bug is still there.'
+            : args.prompt.includes('handoff-test') && !args.prompt.includes('[QA]')
+              ? 'Done, but the icon set still needs the design team (handoff-test).'
+              : 'Mock lead review: work checked, looks complete.';
+      // A worker report that says it could not finish reviews as stuck.
+      const stuck = args.prompt.includes('Could not finish') ? 'the worker has no Roblox Studio connection' : null;
       return {
-        text: JSON.stringify({ synopsis, memoryNote }),
+        text: JSON.stringify({ synopsis, memoryNote, stuck }),
         tokens: 9,
       };
     }
@@ -145,6 +168,7 @@ export class MockEngine implements OrchestratorEngine {
     model: ModelSpec;
     cwd: string;
     extraDirs?: string[];
+    locked?: LockedDir;
     maxSubagents?: number;
     callbacks: WorkerRunCallbacks;
     signal?: AbortSignal;
@@ -164,6 +188,18 @@ export class MockEngine implements OrchestratorEngine {
     if (rulesBlock !== undefined) {
       const decided = bullets(args.prompt.split('Conflicts the owner already decided')[1]);
       callbacks.onActivity(`mock: team rules ${bullets(rulesBlock)} · decided ${decided}`);
+    }
+    const toolsBlock = args.prompt.split('Tools your team has')[1];
+    if (toolsBlock !== undefined) callbacks.onActivity(`mock: team tools ${bullets(toolsBlock)}`);
+    callbacks.onActivity(`mock: mcp [${Object.keys(args.team.mcpServers ?? {}).join('|')}]`);
+    // A first attempt at "crash-test" fails outright; "blocked-test" reports
+    // it could not finish. Work a recovery spawned carries the stuck context
+    // and goes through, so the recovered task completes.
+    const recovered = taskText.includes('this continues a stuck task');
+    if (taskText.includes('crash-test') && !recovered) throw new Error('mock crash: the build tool is missing');
+    // "rerun-stuck" stays blocked even after a recovery (no second pass).
+    if (taskText.includes('blocked-test') && (!recovered || taskText.includes('rerun-stuck'))) {
+      return { synopsis: 'Could not finish: blocked-test needs a Roblox Studio connection this team lacks.', tokens: 30 };
     }
     if (args.maxSubagents !== undefined) callbacks.onActivity(`mock: subagents capped at ${args.maxSubagents}`);
     callbacks.onActivity('mock: examining the task');

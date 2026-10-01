@@ -3,7 +3,7 @@ import type { ClientCommand, HubState, WorkspaceRoot } from '@agent-hq/shared';
 import { isActive } from '../status';
 
 const HELP =
-  '/project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /rule <team>: <rule> · /permissions auto|strict · /todo <text> · /note <text> · /remind <when> <text> · /event <when> <title> · /pa on|off · /tasks pause|resume|killall';
+  '/project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /rule <team>[/<section>]: <rule> · /rule master/stuck: <rule> · /permissions auto|strict · /todo <text> · /note <text> · /remind <when> <text> · /event <when> <title> · /pa on|off · /tasks pause|resume|killall';
 
 export const WHEN_HELP = '<when>: "in 20m|2h|3d", "17:30", "tomorrow 09:00", or "2026-09-14 18:00"';
 
@@ -89,12 +89,15 @@ function parseSlashCommand(
     return { command: { type: 'team.remove', teamId: slug(match[1]) }, note: `removing team ${match[1]}` };
   }
   // "/rule coding: never force-push" appends to that team's RULES.md (the hub
-  // matches the team by id or name).
-  match = text.match(/^\/rules? ([^:]+):\s*(.+)$/i);
-  if (match && match[1] && match[2]) {
+  // matches the team by id or name; "master" is the master's own file).
+  // "/rule art/tools: magick: resize images" or "/rule master/stuck: …"
+  // targets a section.
+  match = text.match(/^\/rules? ([^:/]+)(?:\/([^:]+))?:\s*(.+)$/i);
+  if (match && match[1] && match[3]) {
+    const section = match[2]?.trim();
     return {
-      command: { type: 'team.rules.add', teamId: match[1].trim(), rule: match[2].trim() },
-      note: `rule added for ${match[1].trim()}`,
+      command: { type: 'team.rules.add', teamId: match[1].trim(), rule: match[3].trim(), ...(section ? { section } : {}) },
+      note: `${section ? `${section} ` : ''}rule added for ${match[1].trim()}`,
     };
   }
   match = text.match(/^\/project add (\S+)\s+(\S+)\s*(.*)$/i);

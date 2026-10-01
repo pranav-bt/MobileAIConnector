@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import type { PermissionMode } from '../config.js';
-import { containsPath, realPath } from './util.js';
+import { containsPath, realPath, writableBy, type LockedDir } from './util.js';
 
 // Permission policy. auto (default): routine work runs silently — edits,
 // builds, tests, git commits, and READING (files and the public web) — and
@@ -111,15 +111,18 @@ export interface WorkspaceScope {
   cwd: string;
   /** Everything else it may touch (the hub's phone inbox/outbox). */
   extraDirs: string[];
+  /** Agent HQ's own data dir — off limits apart from its open folders. */
+  locked?: LockedDir;
 }
 
-// The first out-of-project path a shell command would write to, or null.
+// The first path a shell command would write to that is out of the
+// project (or into Agent HQ's own data), or null.
 export function strayShellTarget(command: string, scope: WorkspaceScope): string | null {
-  const roots = [scope.cwd, ...scope.extraDirs].filter(Boolean).map(realPath);
+  const roots = [scope.cwd, ...scope.extraDirs].filter(Boolean);
   if (roots.length === 0) return null;
   const outside = (candidate: string): string | null => {
     const full = realPath(resolve(scope.cwd, candidate));
-    return roots.some((root) => containsPath(root, full)) ? null : full;
+    return writableBy(full, roots, scope.locked) ? null : full;
   };
 
   // A git command pointed at another repo writes there whatever it does.
@@ -165,7 +168,10 @@ export function evaluatePermission(
   if (toolName === 'Bash') {
     const flags = [...new Set(BASH_ESCALATIONS.filter((rule) => rule.pattern.test(command)).map((rule) => rule.flag))];
     const stray = scope ? strayShellTarget(command, scope) : null;
-    if (stray) flags.push(`writes outside this project (${stray})`);
+    if (stray) {
+      const config = scope?.locked && writableBy(stray, [scope.cwd, ...scope.extraDirs]);
+      flags.push(config ? `writes Agent HQ's own data (${stray})` : `writes outside this project (${stray})`);
+    }
     return flags.length > 0 ? { decision: 'ask', flags } : { decision: 'allow' };
   }
   return { decision: 'ask', flags: [] }; // unknown gated tool — be safe

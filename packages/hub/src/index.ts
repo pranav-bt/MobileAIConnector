@@ -19,6 +19,7 @@ import { SecurityController } from './security/controller.js';
 import { startLimitsPoller } from './usage/limits.js';
 import { loadHubConfig, saveModelOverrides, savePaEnabled, savePermissionMode, type PermissionMode, type WorkspaceRoot } from './config.js';
 import type { CommandHandlers } from './commands.js';
+import { readMcpCatalog } from './engine/mcp-catalog.js';
 
 export interface HubOptions {
   port?: number;
@@ -32,6 +33,7 @@ export interface HubOptions {
   freelancerOpenSessions?: () => number; // tests override the process scan
   freelancerRunner?: (sessionId: string, cwd: string, text: string) => Promise<string>; // tests override the sidecar
   paTickMs?: number; // tests speed up the PA desk clock
+  claudeConfigPath?: string; // tests override ~/.claude.json (the MCP catalog)
 }
 
 export interface RunningHub {
@@ -91,6 +93,8 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   let stopDemo: (() => void) | null = null;
   let stopSnapshots: (() => void) | null = null;
   let stopRules: (() => void) | null = null;
+  let masterRules = (): string => '';
+  let mcpCatalog = (): string[] => [];
   let workerCwds: () => string[] = () => [];
   let attachFreelancers: (manager: FreelancerManager) => void = () => {};
   const mode: 'demo' | 'claude' | 'mock' =
@@ -121,6 +125,10 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
       saveModelOverrides(dataDir, overrides);
       bus.publish({ type: 'hub.updated', info: makeInfo() });
     });
+    orchestrator.configureMcpCatalog(() => readMcpCatalog(options.claudeConfigPath));
+    orchestrator.onInfoChange(() => bus.publish({ type: 'hub.updated', info: makeInfo() }));
+    masterRules = () => orchestrator.masterRulesText();
+    mcpCatalog = () => orchestrator.mcpCatalogNames();
     orchestrator.init();
     workerCwds = () => orchestrator.activeWorkerCwds();
     attachFreelancers = (manager) => orchestrator.attachFreelancers(manager);
@@ -158,6 +166,8 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     workspaceRoots,
     permissionMode: permissionPolicy.mode,
     modelOverrides,
+    masterRules: masterRules(),
+    mcpCatalog: mcpCatalog(),
   });
   bus.publish({ type: 'hub.updated', info: makeInfo() });
 
