@@ -126,8 +126,10 @@ function routingPrompt(args: {
             '- "thread": it continues the current thread. This is the normal case: follow-ups, vague references',
             '  ("make it faster", "the map", "fix that bug"), and anything that could plausibly be about the thread\'s',
             '  project ARE the thread. Only an ask that is clearly about something else is not.',
-            '- "general": it is not about any project or codebase at all — a personal errand, todo, reminder,',
-            '  calendar item, or a general question or research unrelated to any project.',
+            '- "general": it is not about any project or codebase — a personal errand, todo, reminder, calendar',
+            '  item, a general question or research, or setup/admin work the owner says is not for a project',
+            '  (e.g. "a generic place for my API keys"). Any team, shell work included; it runs in the General',
+            '  workspace, a folder of its own outside every repo.',
             '- "unsure": there is no thread and it is about some project, or it is clearly about something other',
             "  than the thread's project. Then list up to 3 likely projects in \"suggest\" (registered ids or folder",
             '  names, most likely first); the owner will be asked. Asking is cheap; work in the wrong project is not.',
@@ -187,15 +189,13 @@ export interface RoutingThread {
   recentWork?: string[];
 }
 
-// Teams that can run commands can't take a "general" ask outside a project:
-// shell work always belongs to some project, so it is asked instead.
-const runsCommands = (team: Team | undefined): boolean => !!team && (team.allowedTools ?? []).includes('bash');
-
+// `generalProjectId` is the General workspace: where an ask about no project
+// runs (any team — setup, errands, generic files), outside every repo.
 export async function routeTask(
   engine: OrchestratorEngine,
   teams: Team[],
   projects: Project[],
-  defaultProjectId: string,
+  generalProjectId: string,
   text: string,
   forcedProjectId: string | null,
   model: ModelSpec = resolveModel(MASTER_MODEL),
@@ -211,12 +211,15 @@ export async function routeTask(
   // Anything else — no thread, or an ask clearly about something else — is a
   // question for the owner, never a silent default.
   const threadProject = projects.find((project) => project.id === thread.projectId);
+  const general = projects.find((project) => project.id === generalProjectId);
   const pinned = forcedProjectId ? projects.find((project) => project.id === forcedProjectId) : undefined;
-  const named = pinned ? [] : namedProjects(projects, text);
+  // "a general question" doesn't name the General workspace — only @general does.
+  const named = pinned ? [] : namedProjects(projects.filter((project) => project.id !== generalProjectId), text);
   const mode: 'pinned' | 'named' | 'unnamed' = pinned ? 'pinned' : named.length > 0 ? 'named' : 'unnamed';
   const candidates =
     mode === 'pinned' ? [pinned!] : mode === 'named' ? [...new Set([...named, ...(threadProject ? [threadProject] : [])])] : threadProject ? [threadProject] : [];
-  const others = mode === 'unnamed' ? projects.filter((project) => project.id !== threadProject?.id) : [];
+  const others =
+    mode === 'unnamed' ? projects.filter((project) => project.id !== threadProject?.id && project.id !== generalProjectId) : [];
   const offered = mode === 'unnamed' ? folders.slice(0, 20) : [];
 
   const option = (ref: string): ProjectOption | null => {
@@ -226,15 +229,19 @@ export async function routeTask(
     const folder = offered.find((candidate) => candidate.name.toLowerCase() === key);
     return folder ? { kind: 'folder', name: folder.name, path: folder.path } : null;
   };
+  // Options: the model's guesses, the thread's project, and always "General"
+  // (no project) last — so the card never comes up empty.
   const question = (reason: string, suggest: unknown[] = []): ProjectQuestion => {
     const options: ProjectOption[] = [];
+    const room = general ? 3 : 4;
     const push = (entry: ProjectOption | null) => {
-      if (!entry || options.length >= 4) return;
+      if (!entry || options.length >= room || (general && entry.kind === 'project' && entry.id === general.id)) return;
       const key = entry.kind === 'project' ? entry.id : entry.path;
       if (!options.some((existing) => (existing.kind === 'project' ? existing.id : existing.path) === key)) options.push(entry);
     };
     for (const ref of suggest) if (typeof ref === 'string') push(option(ref));
     if (threadProject) push({ kind: 'project', id: threadProject.id, name: threadProject.name });
+    if (general) options.push({ kind: 'project', id: general.id, name: general.name });
     return { reason, options };
   };
   const decided = (fields: Omit<RoutingDecision, 'question'> & { question?: ProjectQuestion | null }): RoutingDecision => ({
@@ -296,7 +303,7 @@ export async function routeTask(
         projectId = threadProject.id;
         projectBasis = 'thread';
       } else if (verdict === 'general') {
-        projectId = defaultProjectId;
+        projectId = generalProjectId;
         projectBasis = 'general';
       } else {
         projectId = null;
@@ -334,15 +341,6 @@ export async function routeTask(
     }
     const team = steps ? teams.find((candidate) => candidate.id === steps![0]!.teamId) : teams.find((candidate) => candidate.id === parsed.teamId);
     if (!team) throw new Error(`routing picked unknown team: ${String(parsed.teamId)}`);
-
-    // "General" is only for work that runs no commands; shell work is asked.
-    const working = steps ? steps.map((step) => teams.find((candidate) => candidate.id === step.teamId)) : [team];
-    if (projectBasis === 'general' && working.some(runsCommands)) {
-      projectId = null;
-      projectBasis = 'ask';
-      const why = reason.trim().replace(/[.\s]+$/, '');
-      ask = question(`It runs commands, so it belongs in a project${why ? ` — ${why}` : ''}.`, Array.isArray(parsed.suggest) ? parsed.suggest : []);
-    }
 
     return decided({ teamId: team.id, projectId: projectId ?? '', projectBasis, question: ask, title, reason, tokens, fallback: false, steps });
   } catch (error) {

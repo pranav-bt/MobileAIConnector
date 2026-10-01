@@ -536,8 +536,12 @@ export class Orchestrator implements CommandHandlers {
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, 6)
       .map((task) => task.title.slice(0, 80));
+    // General work (errands, setup) is part of the conversation but never the
+    // thread: the next unnamed follow-up continues the last real project.
+    const generalId = this.#projects.generalProject().id;
+    const projectAsks = asks.filter((task) => task.projectId !== generalId || generalId === this.#projects.defaultProject().id);
     return {
-      projectId: asks[asks.length - 1]?.projectId ?? null,
+      projectId: projectAsks[projectAsks.length - 1]?.projectId ?? null,
       recent: asks
         .slice(-5)
         .map((task) => `[${projectName(task.projectId)}] "${task.ownerAsk!.replace(/\s+/g, ' ').slice(0, 200)}" → ${task.title}`),
@@ -685,7 +689,7 @@ export class Orchestrator implements CommandHandlers {
       this.#engine,
       this.#teamsWithRules(),
       this.#projects.all(),
-      this.#projects.defaultProject().id,
+      this.#projects.generalProject().id,
       text,
       forcedProjectId,
       masterModel,

@@ -142,11 +142,15 @@ npm run typecheck      # tsc across workspaces
   the model may pick only among those + the thread's) > the thread's project
   (latest non-stopped task carrying `ownerAsk`) when the model's verdict is
   `"project": "thread"` (follow-ups and vague references are the thread) >
-  `"general"` (about no project — errands, todos, questions; runs in the hub
-  workspace, and only for teams without `bash`) > otherwise ASK: a
-  `project-<taskId>` pick-one card (`PermissionRequest.options`, answer =
-  approve + `choice`, phone-signed over `approve:<id>#<choice>`) offering the
-  model's suggestions + the thread's project. Suggestions may be unregistered
+  `"general"` (about no project — errands, questions, setup/admin work the
+  owner says isn't for a project; ANY team, shell work included) runs in the
+  built-in **General** project: its own folder outside every repo
+  (`~/AgentHQ/General`, `generalDir` option; `GENERAL_ID` in projects.ts,
+  never removed, never the thread, and the word "general" never names it —
+  only `@general`) > otherwise ASK: a `project-<taskId>` pick-one card
+  (`PermissionRequest.options`, answer = approve + `choice`, phone-signed over
+  `approve:<id>#<choice>`) offering the model's suggestions + the thread's
+  project + always General last, so it's never empty. Suggestions may be unregistered
   folders under the workspace roots (`ProjectRegistry.discoverFolders`;
   picking one registers it), and an @pin to such a folder offers the same.
   "None of these" runs nothing (paused, leaves the thread). Other projects

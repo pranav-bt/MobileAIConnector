@@ -25,6 +25,7 @@ mkdirSync(join(sparesRoot, pinName, '.git'), { recursive: true });
 const hubOptions = {
   engine: 'mock' as const,
   dataDir,
+  generalDir: mkdtempSync(join(tmpdir(), 'agent-hq-thread-general-')),
   claudeProjectsDir,
   workspaceRoots: [
     { key: 'spares', path: sparesRoot, label: 'spare projects' },
@@ -223,7 +224,7 @@ try {
   const labels = question.options ?? [];
   check(
     '11a. off-thread ask raises a which-project card',
-    labels.includes('CastleWars') && labels.at(-1) === 'PancakeStack',
+    labels.includes('CastleWars') && labels.includes('PancakeStack') && labels.at(-1) === 'General',
     labels.join('|') || 'no options',
   );
   check('11b. nothing ran before the answer', !c.events.some((e) => e.type === 'agent.updated' && e.agent.taskId === offOne.id && e.agent.role === 'worker'));
@@ -260,12 +261,15 @@ try {
   // teams that run no commands; a shell team is asked instead.
   c.submit('design: general-test pick a colour for my bedroom gen-one');
   await c.done('gen-one');
-  check('14a. general ask, text team: no card, hub workspace', c.latest('gen-one')?.projectId === 'mobileaiconnector', c.latest('gen-one')?.projectId ?? '');
-  c.submit('coding: general-test clean my downloads gen-two');
-  const genTwo = (await c.created('gen-two')).task;
-  const genCard = await c.card(genTwo.id, 'project-');
-  check('14b. general ask, shell team: asked', !!genCard);
-  c.send({ type: 'permission.respond', requestId: genCard.request.id, decision: 'deny', scope: 'once' });
+  check('14a. general ask: no card, runs in the General workspace', c.latest('gen-one')?.projectId === 'general', c.latest('gen-one')?.projectId ?? '');
+  // The owner's real case: setup work for a shell team that isn't about a project.
+  c.submit('tools: general-test set up a simple file for my API keys in a generic location gen-two');
+  await c.done('gen-two');
+  check('14b. general shell work runs too (no card)', c.latest('gen-two')?.projectId === 'general', c.latest('gen-two')?.projectId ?? '');
+  check('14c. no which-project card for it', !c.events.some((e) => e.type === 'permission.updated' && e.request.taskId === c.latest('gen-two')?.id));
+  c.submit('coding: back to the lobby gen-after');
+  await c.done('gen-after');
+  check('14d. general work never becomes the thread', c.latest('gen-after')?.projectId === spareId, c.latest('gen-after')?.projectId ?? '');
 
   // 15. @pin to a folder that exists but isn't registered: offered for
   // registration (one option), not refused.

@@ -19,6 +19,7 @@ const SKIP_FOLDER = /^(\.|node_modules$|venv$|backups?$|temp$|tmp$|libraries$)/i
 // registered as the default project, so single-project use needs no setup.
 
 const DEFAULT_QUOTA_TOKENS = 5_000_000;
+export const GENERAL_ID = 'general';
 
 export function slugify(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -52,13 +53,34 @@ export class ProjectRegistry {
     });
   }
 
-  init(defaultWorkspaceDir: string): void {
+  init(defaultWorkspaceDir: string, generalWorkspaceDir?: string): void {
     if (existsSync(this.#filePath)) {
       const stored = JSON.parse(readFileSync(this.#filePath, 'utf8')) as Project[];
       for (const project of stored) this.#projects.set(project.id, project);
     }
+    // "General" is where work that isn't about any project runs (errands,
+    // setup, generic files) — its own folder, outside every repo, so nothing
+    // generic ever lands in a codebase. Built in and never removed.
+    if (generalWorkspaceDir) {
+      const current = this.#projects.get(GENERAL_ID);
+      if (!current || current.workspaceDir !== generalWorkspaceDir) {
+        this.#projects.set(GENERAL_ID, {
+          ...(current ?? this.#build({ name: 'General', workspaceDir: generalWorkspaceDir })),
+          id: GENERAL_ID,
+          name: 'General',
+          description: "Not about any project — errands, setup, generic files. Its own folder, outside every repo.",
+          workspaceDir: generalWorkspaceDir,
+        });
+        this.#save();
+      }
+      mkdirSync(generalWorkspaceDir, { recursive: true });
+    }
     // The hub's workspace is always a project; re-register if missing.
-    const existing = [...this.#projects.values()].find((project) => project.workspaceDir === defaultWorkspaceDir);
+    // Compared normalized: "D:/x" and "d:\x" are the same folder on Windows.
+    const same = (a: string, b: string) => resolve(a).toLowerCase() === resolve(b).toLowerCase();
+    const existing = [...this.#projects.values()].find(
+      (project) => project.id !== GENERAL_ID && same(project.workspaceDir, defaultWorkspaceDir),
+    );
     if (existing) {
       this.#defaultId = existing.id;
     } else {
@@ -156,6 +178,11 @@ export class ProjectRegistry {
     return folders;
   }
 
+  // The General workspace (see init); the hub's own when none is configured.
+  generalProject(): Project {
+    return this.#projects.get(GENERAL_ID) ?? this.defaultProject();
+  }
+
   defaultProject(): Project {
     const project = this.#projects.get(this.#defaultId) ?? [...this.#projects.values()][0];
     if (!project) throw new Error('project registry is empty');
@@ -176,7 +203,7 @@ export class ProjectRegistry {
   }
 
   remove(id: string): boolean {
-    if (id === this.#defaultId) return false; // the hub workspace stays
+    if (id === this.#defaultId || id === GENERAL_ID) return false; // built in: they stay
     const removed = this.#projects.delete(id);
     if (removed) this.#save();
     this.#folderCache = null;

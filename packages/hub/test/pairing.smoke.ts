@@ -18,7 +18,7 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-const hub = await startHub({ engine: 'mock', port: PORT, dataDir: mkdtempSync(join(tmpdir(), 'agent-hq-sec-')) });
+const hub = await startHub({ engine: 'mock', port: PORT, dataDir: mkdtempSync(join(tmpdir(), 'agent-hq-sec-')), generalDir: mkdtempSync(join(tmpdir(), 'agent-hq-sec-general-')) });
 
 // --- local desktop-style client -----------------------------------------
 const local = new WebSocket(`ws://127.0.0.1:${PORT}`);

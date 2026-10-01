@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +35,7 @@ export interface HubOptions {
   freelancerRunner?: (sessionId: string, cwd: string, text: string) => Promise<string>; // tests override the sidecar
   paTickMs?: number; // tests speed up the PA desk clock
   claudeConfigPath?: string; // tests override ~/.claude.json (the MCP catalog)
+  generalDir?: string; // tests override ~/AgentHQ/General (the General workspace)
 }
 
 export interface RunningHub {
@@ -105,7 +107,8 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     const registry = new TeamRegistry(dataDir);
     registry.init();
     const projects = new ProjectRegistry(dataDir, workspaceRoots);
-    projects.init(cwd);
+    // General work (about no project) runs in its own folder outside every repo.
+    projects.init(cwd, options.generalDir ?? join(homedir(), 'AgentHQ', 'General'));
     const orchestrator = new Orchestrator(
       bus,
       engine,

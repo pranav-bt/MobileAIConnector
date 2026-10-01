@@ -49,6 +49,7 @@ const hub = await startHub({
   engine: 'mock',
   port: PORT,
   dataDir,
+  generalDir: mkdtempSync(join(tmpdir(), 'agent-hq-orch-general-')),
   claudeProjectsDir, // isolate the freelancer observer from real sessions
   freelancerOpenSessions: () => 2, // pretend two terminal sessions are open
   paTickMs: 300, // fast PA clock for scenario 21
