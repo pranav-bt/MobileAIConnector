@@ -10,3 +10,6 @@ android/local.properties
 .env
 .env.*
 .DS_Store
+
+# Owner's working docs (game ideas, notes) — local only, never committed
+docs/
