@@ -1296,6 +1296,41 @@ try {
   await ranOn(mark, 'after reset the coding worker is back on its team default', 'claude-sonnet-5 · effort default');
   const resetConfig = JSON.parse(readFileSync(join(dataDir, 'config.json'), 'utf8'));
   if (resetConfig.modelOverrides?.worker !== undefined) fail('reset did not clear the persisted overrides');
+
+  // 23b. Any seat, either engine: a Codex model on a seat runs on the Codex
+  // engine at its own effort levels (ultra), chips carry the exact model,
+  // and in Agent HQ's own project a Codex worker falls back to the team's
+  // Claude model (owner's decision until the data/ guard is proven there).
+  ws.send(
+    encodeCommand({
+      type: 'models.set',
+      overrides: { lead: { model: 'claude-opus-5-5' }, teams: { coding: { worker: { model: 'gpt-6.1-sol', effort: 'ultra' } } } },
+    }),
+  );
+  await waitFor('codex seat published', (e) => e.type === 'hub.updated' && e.info.modelOverrides.teams['coding']?.worker?.model === 'gpt-6.1-sol');
+  await waitIdle('coding idle before the codex probe', 'coding');
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: '@castlewars coding: codex-probe-one' }));
+  await ranOn(mark, 'codex worker gets the exact model + ultra effort', 'gpt-6.1-sol · effort ultra');
+  await waitFor('codex worker ran on the codex engine', since(mark, (e) => e.type === 'activity' && e.entry.message === 'mock: engine codex'), 15000);
+  await waitFor(
+    'worker chip carries the exact model',
+    since(mark, (e) => e.type === 'agent.updated' && e.agent.role === 'worker' && e.agent.teamId === 'coding' && e.agent.modelId === 'gpt-6.1-sol' && e.agent.model === 'codex'),
+  );
+  await waitFor('codex probe done', since(mark, (e) => e.type === 'task.updated' && e.task.detail.includes('codex-probe-one') && e.task.status === 'done'), 15000);
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: '@mobileaiconnector coding: codex-probe-hub' }));
+  await waitFor(
+    "codex seat falls back in Agent HQ's own project",
+    since(mark, (e) => e.type === 'activity' && e.entry.message.startsWith("Codex isn't used in Agent HQ's own project")),
+    15000,
+  );
+  await waitFor('fallback ran on claude', since(mark, (e) => e.type === 'activity' && e.entry.message === 'mock: engine claude'), 15000);
+  await waitIdle('codex probes settled', 'coding');
+  ws.send(encodeCommand({ type: 'models.set', overrides: { teams: {} } }));
+  await waitFor('codex seat reset', (e) => e.type === 'hub.updated' && !e.info.modelOverrides.teams['coding']);
+  console.log('codex seats ok: exact model + ultra effort on the codex engine, chips carry the model, hub project falls back to claude');
+
   // 24. The PA team can always write its own desk (data/pa), even when the
   // conversation thread is on another project; other teams never get it.
   ws.send(
@@ -1527,7 +1562,21 @@ try {
   if (new Set(recoveries.map((e) => (e.type === 'task.updated' ? e.task.id : ''))).size !== 1) fail('recovery recursed');
   ws.send(encodeCommand({ type: 'team.rules.set', teamId: 'master', markdown: masterTemplate }));
   await waitFor('master rules restored', (e) => e.type === 'hub.updated' && e.info.masterRules === masterTemplate);
-  console.log('stuck tasks ok: crash and lead-flagged stuck propose one way forward, owner decides (Do it / Leave it), master rules allow acting alone, no recursion');
+  // Stuck because the owner denied an approval: that was their decision —
+  // no recovery proposal, no stuck card.
+  mark = events.length;
+  ws.send(encodeCommand({ type: 'task.submit', text: '@castlewars coding: denystuck-test add the package' }));
+  const denyCard = await waitFor(
+    'install card to deny',
+    since(mark, (e) => e.type === 'permission.updated' && e.request.id.startsWith('perm-') && e.request.status === 'pending'),
+    15000,
+  );
+  if (denyCard.type !== 'permission.updated') fail('unreachable');
+  ws.send(encodeCommand({ type: 'permission.respond', requestId: denyCard.request.id, decision: 'deny', scope: 'once' }));
+  await waitFor('no retry after the owner said no', since(mark, (e) => e.type === 'activity' && e.entry.message.startsWith('not retrying:')), 15000);
+  await settle();
+  if (events.slice(mark).some((e) => e.type === 'permission.updated' && e.request.id.startsWith('stuck-'))) fail('a stuck card followed the owner\'s own denial');
+  console.log('stuck tasks ok: crash and lead-flagged stuck propose one way forward, owner decides (Do it / Leave it), master rules allow acting alone, no recursion, none after your own denial');
 
   // 28. Agent HQ's own data is off limits to workers, even in the hub
   // project where it sits inside the workspace: pairing keys, secrets,

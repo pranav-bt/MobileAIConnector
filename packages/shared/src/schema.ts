@@ -4,7 +4,9 @@ import { z } from 'zod';
 // desktop app, and the phone exchange is defined here. A Codex adapter (or
 // any other engine) plugs in by emitting these same events.
 
-export const ModelTierSchema = z.enum(['opus', 'sonnet', 'haiku']);
+// Model family — the bucket usage meters and office chips use. 'codex' is
+// every OpenAI Codex model (a second engine, see MODEL_CATALOG.engine).
+export const ModelTierSchema = z.enum(['opus', 'sonnet', 'haiku', 'codex']);
 export type ModelTier = z.infer<typeof ModelTierSchema>;
 
 // Tier -> concrete model id. Only the engine layer reads this.
@@ -12,7 +14,12 @@ export const MODEL_IDS: Record<ModelTier, string> = {
   opus: 'claude-opus-5',
   sonnet: 'claude-sonnet-5',
   haiku: 'claude-haiku-4-5-20251001',
+  codex: 'gpt-6.1-sol',
 };
+
+// Which engine runs a model. The event vocabulary is the same for both.
+export const EngineIdSchema = z.enum(['claude', 'codex']);
+export type EngineId = z.infer<typeof EngineIdSchema>;
 
 export const AgentRoleSchema = z.enum(['master', 'lead', 'worker', 'freelancer']);
 export type AgentRole = z.infer<typeof AgentRoleSchema>;
@@ -57,6 +64,8 @@ export const AgentSchema = z.object({
   status: AgentStatusSchema,
   activity: z.string(),
   model: ModelTierSchema,
+  // The exact model it runs (catalog id) — chips show its label.
+  modelId: z.string().optional(),
   taskId: z.string().nullable(),
   tokensUsed: z.number(),
   updatedAt: z.number(),
@@ -167,8 +176,20 @@ export const UsageSchema = z.object({
     opus: z.number(),
     sonnet: z.number(),
     haiku: z.number(),
+    codex: z.number().default(0),
   }),
   overageEnabled: z.boolean(),
+  // The Codex (ChatGPT) plan's own limits, when Codex is in use. Plans differ
+  // in which windows they report, so each is optional.
+  codex: z
+    .object({
+      plan: z.string().nullable(),
+      windowPct: z.number().nullable(),
+      windowResetsAt: z.number().nullable(),
+      weeklyPct: z.number().nullable(),
+      weeklyResetsAt: z.number().nullable(),
+    })
+    .optional(),
 });
 export type Usage = z.infer<typeof UsageSchema>;
 
@@ -216,7 +237,8 @@ export const WorkspaceRootSchema = z.object({
 });
 export type WorkspaceRoot = z.infer<typeof WorkspaceRootSchema>;
 
-export const EffortLevelSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
+// 'ultra' exists only on some Codex models; each catalog entry lists its own.
+export const EffortLevelSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 export type EffortLevel = z.infer<typeof EffortLevelSchema>;
 
 // The models Settings > Models offers. Every id was verified to run through
@@ -228,19 +250,31 @@ export type EffortLevel = z.infer<typeof EffortLevelSchema>;
 export interface CatalogModel {
   id: string;
   label: string;
+  engine: EngineId;
   tier: ModelTier;
   description: string;
   efforts: EffortLevel[]; // empty = no effort control
   defaultEffort: EffortLevel | null;
 }
 const ALL_EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const CODEX_EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 export const MODEL_CATALOG: CatalogModel[] = [
-  { id: 'claude-opus-5-5', label: 'Opus 5.5', tier: 'opus', description: 'Best for everyday, complex tasks', efforts: ALL_EFFORTS, defaultEffort: 'high' },
-  { id: 'claude-opus-5', label: 'Opus 5', tier: 'opus', description: 'Best for everyday, complex tasks', efforts: ALL_EFFORTS, defaultEffort: 'high' },
-  { id: 'claude-fable-5-1', label: 'Fable 5.1', tier: 'opus', description: 'Most capable, for the hardest and longest-running tasks; heaviest on usage limits', efforts: ALL_EFFORTS, defaultEffort: 'medium' },
-  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', tier: 'sonnet', description: 'Efficient for routine tasks', efforts: ALL_EFFORTS, defaultEffort: 'medium' },
-  { id: 'claude-sonnet-5', label: 'Sonnet 5', tier: 'sonnet', description: 'Efficient for routine tasks', efforts: ALL_EFFORTS, defaultEffort: 'xhigh' },
-  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', tier: 'haiku', description: 'Fastest for quick answers; no effort control', efforts: [], defaultEffort: null },
+  { id: 'claude-opus-5-5', label: 'Opus 5.5', engine: 'claude', tier: 'opus', description: 'Best for everyday, complex tasks', efforts: ALL_EFFORTS, defaultEffort: 'high' },
+  { id: 'claude-opus-5', label: 'Opus 5', engine: 'claude', tier: 'opus', description: 'Best for everyday, complex tasks', efforts: ALL_EFFORTS, defaultEffort: 'high' },
+  { id: 'claude-fable-5-1', label: 'Fable 5.1', engine: 'claude', tier: 'opus', description: 'Most capable, for the hardest and longest-running tasks; heaviest on usage limits', efforts: ALL_EFFORTS, defaultEffort: 'medium' },
+  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', engine: 'claude', tier: 'sonnet', description: 'Efficient for routine tasks', efforts: ALL_EFFORTS, defaultEffort: 'medium' },
+  { id: 'claude-sonnet-5', label: 'Sonnet 5', engine: 'claude', tier: 'sonnet', description: 'Efficient for routine tasks', efforts: ALL_EFFORTS, defaultEffort: 'xhigh' },
+  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', engine: 'claude', tier: 'haiku', description: 'Fastest for quick answers; no effort control', efforts: [], defaultEffort: null },
+  // Codex (ChatGPT plan): ids, efforts and defaults from the account's
+  // model/list, each verified to run a turn (test/probe-codex-models.ts
+  // --live, 2026-10-15) — re-run after a Codex update.
+  { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol', engine: 'codex', tier: 'codex', description: 'Codex · latest workhorse model for coding and everyday work', efforts: CODEX_EFFORTS, defaultEffort: 'medium' },
+  { id: 'gpt-6-astra', label: 'GPT-6-Astra', engine: 'codex', tier: 'codex', description: 'Codex · frontier intelligence for the most demanding work', efforts: CODEX_EFFORTS, defaultEffort: 'medium' },
+  { id: 'gpt-6-sol', label: 'GPT-6-Sol', engine: 'codex', tier: 'codex', description: 'Codex · previous generation workhorse model', efforts: CODEX_EFFORTS, defaultEffort: 'medium' },
+  { id: 'gpt-6-luna', label: 'GPT-6-Luna', engine: 'codex', tier: 'codex', description: 'Codex · fast and affordable, for easier tasks', efforts: ALL_EFFORTS, defaultEffort: 'medium' },
+  { id: 'gpt-5.6-sol', label: 'GPT-5.6-Sol', engine: 'codex', tier: 'codex', description: 'Codex · older generation workhorse model', efforts: CODEX_EFFORTS, defaultEffort: 'medium' },
+  { id: 'gpt-5.6-terra', label: 'GPT-5.6-Terra', engine: 'codex', tier: 'codex', description: 'Codex · older balanced model for straightforward work', efforts: CODEX_EFFORTS, defaultEffort: 'medium' },
+  { id: 'gpt-5.6-luna', label: 'GPT-5.6-Luna', engine: 'codex', tier: 'codex', description: 'Codex · older fast and efficient model', efforts: ALL_EFFORTS, defaultEffort: 'medium' },
 ];
 export const catalogModel = (id: string): CatalogModel | undefined => MODEL_CATALOG.find((model) => model.id === id);
 
@@ -268,10 +302,12 @@ export const ModelOverridesSchema = z.object({
 export type ModelOverrides = z.infer<typeof ModelOverridesSchema>;
 export const MODEL_DEFAULTS = { master: 'opus', checks: 'haiku' } as const;
 
-// What the engine runs: a concrete id, an optional effort, and the family.
+// What the engine runs: a concrete id, an optional effort, the family, and
+// which engine runs it.
 export interface ModelSpec {
   id: string;
   tier: ModelTier;
+  engine: EngineId;
   effort?: EffortLevel;
 }
 
@@ -283,7 +319,12 @@ export function resolveModel(fallbackTier: ModelTier, ...layers: (ModelChoice | 
   const entry = catalogModel(id);
   const requested = layers.find((layer) => layer?.effort)?.effort;
   const effort = requested && entry?.efforts.includes(requested) ? requested : undefined;
-  return { id, tier: entry?.tier ?? fallbackTier, ...(effort ? { effort } : {}) };
+  return { id, tier: entry?.tier ?? fallbackTier, engine: entry?.engine ?? engineOf(id), ...(effort ? { effort } : {}) };
+}
+
+// Ids outside the catalog: Claude's are "claude-…", anything else is Codex.
+export function engineOf(id: string): EngineId {
+  return catalogModel(id)?.engine ?? (/^claude-/i.test(id) ? 'claude' : 'codex');
 }
 
 export const HubInfoSchema = z.object({

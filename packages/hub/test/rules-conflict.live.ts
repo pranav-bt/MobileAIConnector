@@ -6,9 +6,16 @@
 import { resolveModel } from '@agent-hq/shared';
 import { ClaudeEngine } from '../src/engine/claude.js';
 import { detectRuleConflicts, type RuleConflictContext } from '../src/orchestrator/master.js';
+import { CodexEngine } from '../src/engine/codex.js';
+import { EngineRouter } from '../src/engine/router.js';
 
-const engine = new ClaudeEngine();
-const model = resolveModel('haiku');
+// --model <id> runs these decisions on any catalog model (Claude or Codex).
+const modelArgIndex = process.argv.indexOf('--model');
+const pickedModel = modelArgIndex > 0 ? process.argv[modelArgIndex + 1] : undefined;
+const codexEngine = new CodexEngine();
+
+const engine = new EngineRouter({ claude: new ClaudeEngine(), codex: codexEngine });
+const model = resolveModel('haiku', pickedModel ? { model: pickedModel } : undefined);
 const projectMd = [
   '# CastleWars',
   '- Luau, 2-space indentation.',
@@ -75,4 +82,5 @@ for (const testCase of cases) {
   for (const c of conflicts) console.log(`   ${c.topic}: team "${c.teamRule}" vs project "${c.projectRule}"`);
 }
 console.log(pass ? '\nRULES LIVE PASS' : '\nRULES LIVE FAIL');
+codexEngine.close();
 process.exit(pass ? 0 : 1);

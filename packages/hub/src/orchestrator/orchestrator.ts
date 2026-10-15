@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { MODEL_DEFAULTS, isInternalTask, resolveModel, rulesFor, toolName, type Agent, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
+import { MODEL_DEFAULTS, catalogModel, isInternalTask, resolveModel, rulesFor, toolName, type Agent, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine } from '../engine/types.js';
@@ -143,7 +143,7 @@ export class Orchestrator implements CommandHandlers {
   // these dirs so hub workers don't double as "freelancers".
   #runningCwds = new Map<string, string>();
   #routingCount = 0;
-  #tokensByModel: Record<ModelTier, number> = { opus: 0, sonnet: 0, haiku: 0 };
+  #tokensByModel: Record<ModelTier, number> = { opus: 0, sonnet: 0, haiku: 0, codex: 0 };
   // Owner's model choices (a layer over defaults; see ModelOverridesSchema).
   #models: ModelOverrides = { teams: {} };
   #onModelsChange: (overrides: ModelOverrides) => void = () => {};
@@ -160,6 +160,8 @@ export class Orchestrator implements CommandHandlers {
   #recoveryAsked = new Set<string>();
   // Tasks a recovery spawned (and their QA/fix/handover descendants) -> 1.
   #recoveryRound = new Map<string, number>();
+  // Tasks where the owner denied an approval: getting stuck there is their call.
+  #ownerDenied = new Set<string>();
 
   #projects: ProjectRegistry;
   #policy: { mode: PermissionMode };
@@ -357,6 +359,7 @@ export class Orchestrator implements CommandHandlers {
         status: 'idle',
         activity: 'standing by',
         model: this.#leadSpec(team).tier,
+        modelId: this.#leadSpec(team).id,
         taskId: null,
         tokensUsed: 0,
         updatedAt: now(),
@@ -370,6 +373,7 @@ export class Orchestrator implements CommandHandlers {
       status: 'idle',
       activity: 'standing by',
       model: this.#masterModel().tier,
+      modelId: this.#masterModel().id,
       taskId: null,
       tokensUsed: 0,
       updatedAt: now(),
@@ -385,6 +389,7 @@ export class Orchestrator implements CommandHandlers {
       opus: Math.round((total * usage.modelMixPct.opus) / 100),
       sonnet: Math.round((total * usage.modelMixPct.sonnet) / 100),
       haiku: Math.round((total * usage.modelMixPct.haiku) / 100),
+      codex: Math.round((total * (usage.modelMixPct.codex ?? 0)) / 100),
     };
   }
 
@@ -423,14 +428,14 @@ export class Orchestrator implements CommandHandlers {
   #recordTokens(model: ModelTier, tokens: number): void {
     if (tokens <= 0) return;
     this.#tokensByModel[model] += tokens;
-    const total = this.#tokensByModel.opus + this.#tokensByModel.sonnet + this.#tokensByModel.haiku;
+    const total = Object.values(this.#tokensByModel).reduce((sum, count) => sum + count, 0);
     const pct = (tier: ModelTier) => (total > 0 ? Math.round((this.#tokensByModel[tier] / total) * 100) : 0);
     this.#bus.publish({
       type: 'usage.updated',
       usage: {
         ...this.#bus.state.usage,
         tokensToday: total,
-        modelMixPct: { opus: pct('opus'), sonnet: pct('sonnet'), haiku: pct('haiku') },
+        modelMixPct: { opus: pct('opus'), sonnet: pct('sonnet'), haiku: pct('haiku'), codex: pct('codex') },
       },
     });
   }
@@ -968,7 +973,7 @@ export class Orchestrator implements CommandHandlers {
   // hands it on or frees it); `noSplit` — skip the split pass; `startPct` —
   // progress to resume from (an integration run continues its parts' 70%).
   async #runTask(taskId: string, team: Team, autoQa = true, opts: RunOptions = {}): Promise<string | null> {
-    const workerSpec = this.#workerSpec(team);
+    let workerSpec = this.#workerSpec(team);
     const leadSpec = this.#leadSpec(team);
     const task = this.#bus.state.tasks[taskId];
     if (!task) {
@@ -985,6 +990,10 @@ export class Orchestrator implements CommandHandlers {
     // (an integration run starts from its parts' total).
     const piece = isInternalTask(task);
     const baseTokens = task.tokensUsed;
+    // Codex stays out of Agent HQ's own project for now (owner's decision):
+    // that seat runs on the team's own Claude model there instead.
+    const codexFallback = workerSpec.engine === 'codex' && project.id === this.#projects.defaultProject().id;
+    if (codexFallback) workerSpec = resolveModel(team.workerModel === 'codex' ? 'sonnet' : team.workerModel);
 
     if (!opts.slotHeld) this.#takeSlot(team.id);
     const workerNumber = (this.#workerCounters.get(team.id) ?? 0) + 1;
@@ -1000,6 +1009,7 @@ export class Orchestrator implements CommandHandlers {
       status: 'working',
       activity: 'starting…',
       model: workerSpec.tier,
+      modelId: workerSpec.id,
       taskId,
       tokensUsed: 0,
       updatedAt: now(),
@@ -1017,6 +1027,9 @@ export class Orchestrator implements CommandHandlers {
       locked: this.#lockedData(team),
     };
     this.#runningCwds.set(taskId, scope.cwd);
+    if (codexFallback) {
+      this.#activity(workerId, taskId, `Codex isn't used in Agent HQ's own project yet — this worker runs on ${catalogModel(workerSpec.id)?.label ?? workerSpec.id}`);
+    }
 
     try {
       // Team rules vs this project's CLAUDE.md: the owner settles genuine
@@ -1026,6 +1039,7 @@ export class Orchestrator implements CommandHandlers {
       if (this.#stopping.has(taskId)) throw new Error('stopped while settling rules');
       const result = await this.#engine.runWorker({
         prompt: this.#buildWorkerPrompt(this.#bus.state.tasks[taskId] ?? task),
+        title: task.title,
         team,
         model: workerSpec,
         cwd: scope.cwd,
@@ -1569,6 +1583,12 @@ export class Orchestrator implements CommandHandlers {
     const task = this.#bus.state.tasks[taskId];
     if (!task || isInternalTask(task) || this.#recoveryAsked.has(taskId)) return;
     this.#recoveryAsked.add(taskId);
+    // Stuck because the owner said no to one of its approvals: that was a
+    // decision, not a blocker — no recovery proposal, no card.
+    if (this.#ownerDenied.has(taskId)) {
+      this.#activity('master', taskId, `not retrying: ${task.title.slice(0, 50)} stopped at your denial`);
+      return;
+    }
     if ((this.#recoveryRound.get(taskId) ?? 0) >= 1) {
       this.#activity('master', taskId, `still stuck after a recovery — needs you: ${task.title.slice(0, 50)}`);
       return;
@@ -2102,6 +2122,7 @@ export class Orchestrator implements CommandHandlers {
       }
       return;
     }
+    if (decision === 'deny') this.#ownerDenied.add(request.taskId);
     this.#patchAgent(request.agentId, {
       status: 'working',
       activity: decision === 'approve' ? 'approved — continuing' : 'denied — adjusting approach',
@@ -2133,6 +2154,7 @@ export class Orchestrator implements CommandHandlers {
       status: 'idle',
       activity: 'standing by',
       model: this.#leadSpec(team).tier,
+      modelId: this.#leadSpec(team).id,
       taskId: null,
       tokensUsed: 0,
       updatedAt: now(),
@@ -2389,9 +2411,9 @@ export class Orchestrator implements CommandHandlers {
     this.#models = overrides;
     this.#onModelsChange(overrides);
     for (const team of this.#registry.all()) {
-      this.#patchAgent(`${team.id}-lead`, { model: this.#leadSpec(team).tier });
+      this.#patchAgent(`${team.id}-lead`, { model: this.#leadSpec(team).tier, modelId: this.#leadSpec(team).id });
     }
-    this.#patchAgent('master', { model: this.#masterModel().tier });
+    this.#patchAgent('master', { model: this.#masterModel().tier, modelId: this.#masterModel().id });
     const choices = [
       overrides.master,
       overrides.checks,

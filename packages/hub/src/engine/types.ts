@@ -18,6 +18,9 @@ export interface WorkerRunCallbacks {
 export interface WorkerRunResult {
   synopsis: string;
   tokens: number;
+  // The engine's conversation id (Claude session / Codex thread), so the
+  // same conversation can be continued later.
+  sessionId?: string;
 }
 
 export interface OrchestratorEngine {
@@ -38,5 +41,7 @@ export interface OrchestratorEngine {
     maxSubagents?: number;
     callbacks: WorkerRunCallbacks;
     signal?: AbortSignal;
+    // The task's title (engines may label their conversation with it).
+    title?: string;
   }): Promise<WorkerRunResult>;
 }

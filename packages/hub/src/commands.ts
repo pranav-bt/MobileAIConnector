@@ -1,4 +1,4 @@
-import type { ClientCommand, ModelOverrides } from '@agent-hq/shared';
+import type { ClientCommand, ModelOverrides, ModelTier } from '@agent-hq/shared';
 
 // The server parses wire frames into ClientCommands and hands them here.
 // The demo driver and the orchestrator each provide an implementation.
@@ -13,14 +13,14 @@ export interface CommandHandlers {
     charter: string;
     allowedTools: string[];
     blockedTools: string[];
-    workerModel?: 'opus' | 'sonnet' | 'haiku';
+    workerModel?: ModelTier;
     quotaSharePct?: number;
     mcpServers?: Record<string, unknown>;
   }): void;
   updateTeam(input: {
     teamId: string;
     maxConcurrentWorkers?: number;
-    workerModel?: 'opus' | 'sonnet' | 'haiku';
+    workerModel?: ModelTier;
     quotaSharePct?: number;
     charter?: string;
     mcpServers?: Record<string, unknown>;

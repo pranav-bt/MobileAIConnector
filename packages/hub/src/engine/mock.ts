@@ -191,6 +191,7 @@ export class MockEngine implements OrchestratorEngine {
     // background-context section (project history can mention "install").
     const taskText = (args.prompt.split('\n---\n')[0] ?? args.prompt).toLowerCase();
     callbacks.onActivity(`mock: model ${args.model.id} · effort ${args.model.effort ?? 'default'}`);
+    callbacks.onActivity(`mock: engine ${args.model.engine}`);
     // Makes the worker's file scope observable, so the smoke can prove a
     // worker is handed its own project workspace and nothing else.
     callbacks.onActivity(`mock: workspace ${args.cwd} · extra [${(args.extraDirs ?? []).join('|')}]`);
@@ -210,6 +211,12 @@ export class MockEngine implements OrchestratorEngine {
     // and goes through, so the recovered task completes.
     const recovered = taskText.includes('this continues a stuck task');
     if (taskText.includes('crash-test') && !recovered) throw new Error('mock crash: the build tool is missing');
+    // "denystuck-test": asks to install something, and if the owner says no,
+    // reports it could not finish (stuck by the owner's own decision).
+    if (taskText.includes('denystuck-test')) {
+      const decision = await callbacks.onPermission({ toolName: 'Bash', command: 'npm install denystuck-pkg', reason: 'needs the package' });
+      if (decision === 'deny') return { synopsis: 'Could not finish: the install was denied.', tokens: 20 };
+    }
     // "rerun-stuck" stays blocked even after a recovery (no second pass).
     if (taskText.includes('blocked-test') && (!recovered || taskText.includes('rerun-stuck'))) {
       return { synopsis: 'Could not finish: blocked-test needs a Roblox Studio connection this team lacks.', tokens: 30 };

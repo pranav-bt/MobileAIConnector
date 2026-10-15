@@ -127,7 +127,7 @@ export function startDemo(bus: HubBus, options: DemoOptions = {}): {
       weeklyPct: 41,
       weeklyResetsAt: now() + 4 * 24 * 60 * 60 * 1000,
       tokensToday: 3_800_000,
-      modelMixPct: { opus: 18, sonnet: 63, haiku: 19 },
+      modelMixPct: { opus: 18, sonnet: 63, haiku: 19, codex: 0 },
       overageEnabled: false,
     },
   });

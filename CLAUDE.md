@@ -213,6 +213,32 @@ npm run typecheck      # tsc across workspaces
   — after an Agent SDK update re-run `test/probe-models.ts --live` and
   `test/probe-effort-defaults.ts` (packages/hub) and refresh ids/defaults.
   Opus 5.5 needs Agent SDK >= 0.3.280.
+- Two engines, any seat: catalog entries carry `engine` ('claude' | 'codex'),
+  `resolveModel` returns it in the `ModelSpec`, and `EngineRouter`
+  (engine/router.ts) sends each call to `ClaudeEngine` or `CodexEngine`
+  (mock mode: `MockEngine` stands in for both and logs `mock: engine <id>`).
+  Codex = OpenAI models on the owner's ChatGPT plan, driven through the VS
+  Code extension's bundled CLI as `codex app-server` (JSON-RPC over stdio,
+  engine/codex-rpc.ts; binary found by `findCodexBinary`, override
+  `AGENT_HQ_CODEX`); started lazily, one process, `--disable apps`. Workers:
+  approvalPolicy "untrusted" so EVERY command and file edit asks — commands
+  are unwrapped from Codex's PowerShell wrapper (`unwrapShellCommand`) and go
+  through the same `onPermission` → `evaluatePermission` as Claude's tools;
+  file edits through the same `refusedWrite` lock (+ data/ lock); sandbox
+  workspace-write with writable roots = project + extraDirs; MCP = exactly the
+  team's grants (every PC-configured server disabled per thread unless
+  granted); charter/rules as developerInstructions; threads labelled
+  "Agent HQ · <task>" and archived after the run (resumable; id returned as
+  `sessionId`). One-shot calls (`complete`) are read-only ephemeral threads.
+  Codex workers do NOT run in Agent HQ's own project yet (owner's decision):
+  that seat falls back to the team's Claude model with an activity line.
+  Codex plan limits are read (free) while Codex runs → `Usage.codex`;
+  `ModelTier` gains 'codex' for meters/chips; agents carry `modelId`.
+  Effort 'ultra' exists only on some Codex models. Tests: `codex-engine.smoke`
+  (fake app-server, in `npm run smoke`), `codex-spike.live`,
+  `probe-codex-models.ts --live` (refresh the catalog after a Codex update),
+  `mixed-seats.live` (master Fable, lead Opus 5.5, workers GPT-6.1-Sol), and
+  the decision tests take `--model gpt-6.1-sol`.
 - Image generation (`tools/generate-image.mjs`) is LOCAL FIRST: on-demand
   ComfyUI at D:\AI\comfyui (boots per job, watchdog kills it after ~2 min
   idle — zero background footprint; models: FLUX schnell fp8 default, SDXL

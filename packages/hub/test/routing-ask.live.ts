@@ -12,14 +12,21 @@ import { ClaudeEngine } from '../src/engine/claude.js';
 import { routeTask, type RoutingDecision, type RoutingThread } from '../src/orchestrator/master.js';
 import { ProjectRegistry } from '../src/orchestrator/projects.js';
 import { loadHubConfig } from '../src/config.js';
+import { CodexEngine } from '../src/engine/codex.js';
+import { EngineRouter } from '../src/engine/router.js';
+
+// --model <id> runs these decisions on any catalog model (Claude or Codex).
+const modelArgIndex = process.argv.indexOf('--model');
+const pickedModel = modelArgIndex > 0 ? process.argv[modelArgIndex + 1] : undefined;
+const codexEngine = new CodexEngine();
 
 // Reads the real roster/projects/roots, but from a COPY: the registry saves
 // on init, and a test must never write the owner's data.
 const realData = 'D:\\PersonalWork\\MobileAIConnector\\data';
 const dataDir = mkdtempSync(join(tmpdir(), 'agent-hq-routing-live-'));
 for (const file of ['teams.json', 'projects.json', 'config.json']) copyFileSync(join(realData, file), join(dataDir, file));
-const engine = new ClaudeEngine();
-const model = resolveModel('opus');
+const engine = new EngineRouter({ claude: new ClaudeEngine(), codex: codexEngine });
+const model = resolveModel('opus', pickedModel ? { model: pickedModel } : undefined);
 const teams = JSON.parse(readFileSync(join(dataDir, 'teams.json'), 'utf8')) as Team[];
 const config = loadHubConfig(dataDir) as { workspaceRoots: { key: string; path: string; label: string }[] };
 const registry = new ProjectRegistry(dataDir, config.workspaceRoots);
@@ -129,4 +136,5 @@ for (const testCase of cases) {
   console.log(`[${ok ? 'ok' : 'FAIL'}] ${testCase.label}\n     want: ${testCase.want}\n     got:  ${got}${decision.question ? `\n     why:  ${decision.question.reason}` : ''}`);
 }
 console.log(pass ? '\nROUTING-ASK LIVE PASS' : '\nROUTING-ASK LIVE FAIL');
+codexEngine.close();
 process.exit(pass ? 0 : 1);

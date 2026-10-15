@@ -1,15 +1,18 @@
 import type { HubState } from '@agent-hq/shared';
 import { formatResetDay, formatResetTime, formatTokens, usageColor } from '../status';
 
-// Categorical hues for the model mix — validated for the dark surface
-// (lightness band, CVD separation, contrast) during the design phase.
-const TIER_COLORS = { sonnet: '#14A38B', opus: '#7B66E8', haiku: '#BE8A2D' } as const;
+// Categorical hues for the model mix, in bar order — validated for the dark
+// surface (lightness band, CVD + normal-vision separation of adjacent
+// segments, contrast); Codex added 2026-10-15 (dataviz validate_palette.js).
+const TIER_COLORS = { sonnet: '#14A38B', opus: '#7B66E8', haiku: '#BE8A2D', codex: '#D1556E' } as const;
 
 export function ResourcesPage(props: { state: HubState }): JSX.Element {
   const { usage, tasks, teams, projects } = props.state;
   const projectList = Object.values(projects).sort((a, b) => b.usedTokens - a.usedTokens);
   const mix = usage.modelMixPct;
-  const hasMix = mix.opus + mix.sonnet + mix.haiku > 0;
+  const codexMix = mix.codex ?? 0;
+  const hasMix = mix.opus + mix.sonnet + mix.haiku + codexMix > 0;
+  const codex = usage.codex;
 
   const teamTokens = Object.values(teams)
     .map((team) => ({
@@ -72,6 +75,29 @@ export function ResourcesPage(props: { state: HubState }): JSX.Element {
         )}
       </div>
 
+      {codex && (
+        <div className="tcard" style={{ padding: 16 }}>
+          <div className="sect">Codex · ChatGPT plan{codex.plan ? ` (${codex.plan.replace(/_/g, ' ')})` : ''}</div>
+          {[
+            { label: 'short window', pct: codex.windowPct, resets: codex.windowResetsAt, format: formatResetTime },
+            { label: 'weekly', pct: codex.weeklyPct, resets: codex.weeklyResetsAt, format: formatResetDay },
+          ]
+            .filter((window) => window.pct !== null)
+            .map((window) => (
+              <div key={window.label} style={{ marginTop: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                  <span className="mono" style={{ fontSize: 20, fontWeight: 600 }}>{Math.round(window.pct ?? 0)}%</span>
+                  <span className="act">{window.label} used{window.resets ? ` · resets ${window.format(window.resets)}` : ''}</span>
+                </div>
+                <div className="track" style={{ marginTop: 6 }}>
+                  <div className="fill" style={{ width: `${window.pct ?? 0}%`, background: usageColor(window.pct ?? 0) }} />
+                </div>
+              </div>
+            ))}
+          <div className="act" style={{ marginTop: 8, color: 'var(--faint)' }}>read while Codex is running · separate from the Claude limits</div>
+        </div>
+      )}
+
       <div className="tcard" style={{ padding: 16 }}>
         <div className="sect">Tokens by HQ agents</div>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 8 }}>
@@ -118,6 +144,7 @@ export function ResourcesPage(props: { state: HubState }): JSX.Element {
               {mix.sonnet > 0 && <div style={{ width: `${mix.sonnet}%`, background: TIER_COLORS.sonnet }} />}
               {mix.opus > 0 && <div style={{ width: `${mix.opus}%`, background: TIER_COLORS.opus }} />}
               {mix.haiku > 0 && <div style={{ width: `${mix.haiku}%`, background: TIER_COLORS.haiku }} />}
+              {codexMix > 0 && <div style={{ width: `${codexMix}%`, background: TIER_COLORS.codex }} />}
             </div>
             <div style={{ display: 'flex', gap: 14, marginTop: 10, flexWrap: 'wrap' }}>
               <span className="act" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
@@ -132,6 +159,12 @@ export function ResourcesPage(props: { state: HubState }): JSX.Element {
                 <span style={{ width: 8, height: 8, borderRadius: 2, background: TIER_COLORS.haiku, display: 'inline-block' }} />
                 Haiku {mix.haiku}% · chores
               </span>
+              {codexMix > 0 && (
+                <span className="act" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 2, background: TIER_COLORS.codex, display: 'inline-block' }} />
+                  Codex {codexMix}% · ChatGPT plan
+                </span>
+              )}
             </div>
           </>
         ) : (

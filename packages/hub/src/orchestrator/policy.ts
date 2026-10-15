@@ -70,7 +70,9 @@ const SHELL_WRITE_FLAGS =
   /\b(?:sed|perl|ruby|gawk|awk)\b[^;|&]*\s-i\b|\b(?:curl|Invoke-WebRequest|iwr)\b[^;|&]*\s(?:-o|-O|--output|-OutFile)\b|\bwget\b[^;|&]*\s(?:-O|-P|--output-document|--directory-prefix)\b|\bgit\s+clone\b|\bgit\s+(?:init|worktree\s+add)\b/i;
 // Output redirection. `2>&1`, `>&2`, `>$null`, `>/dev/null` and `>NUL`
 // discard rather than write, so they are not targets.
-const SHELL_REDIRECT = />>?\s*(?!&|\$null\b|\/dev\/null\b|NUL\b)/i;
+// `=>` (JS arrow) and `->` are not redirects: `node -e "x=>…"` must not read
+// as a write (it false-flagged Codex's wrapped commands as "writes outside").
+const SHELL_REDIRECT = /(?<![=-])>>?\s*(?!&|\$null\b|\/dev\/null\b|NUL\b)/i;
 
 // git's global options name the repo a command acts on, so `git -C <path>`
 // and `git --git-dir=<path>` are how a worker reaches another project's repo

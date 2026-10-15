@@ -1,7 +1,9 @@
-import { resolve as resolvePath } from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { ModelSpec } from '@agent-hq/shared';
-import { realPath, writableBy, type LockedDir } from '../orchestrator/util.js';
+import type { LockedDir } from '../orchestrator/util.js';
+import { DEFAULT_MAX_SUBAGENTS, refusalMessage, refusedWrite, workerInstructions } from './instructions.js';
+
+export { refusedWrite };
 import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './types.js';
 
 // Tools whose use flows through the policy (which instantly allows the
@@ -14,8 +16,6 @@ const GATED_TOOLS = new Set(['Bash', 'Write', 'Edit', 'NotebookEdit', 'WebFetch'
 // second lock, so a mis-scoped grant can't silently cross into a sibling
 // project the way one once wrote into a project it was never routed to.
 const WRITING_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit']);
-// Sub-agent fan-out per worker, unless the orchestrator says otherwise.
-const DEFAULT_MAX_SUBAGENTS = 3;
 const SUBAGENT_TOOLS = ['Agent', 'Task']; // current name + legacy alias
 
 function summarizeToolCall(toolName: string, input: Record<string, unknown>): string {
@@ -27,26 +27,6 @@ function summarizeToolCall(toolName: string, input: Record<string, unknown>): st
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
-}
-
-// The write target, if it falls outside every directory this worker may
-// touch (its project workspace plus the hub's phone inbox/outbox). Returns
-// null when the write is in bounds or carries no path we can read.
-// The path a Write/Edit would refuse to touch, or null. realPath on both
-// sides (inside writableBy): a junction planted in the workspace must not
-// read as "inside" while pointing at a sibling project.
-export function refusedWrite(
-  input: Record<string, unknown>,
-  cwd: string,
-  extraDirs: string[],
-  locked?: LockedDir,
-): { path: string; config: boolean } | null {
-  const target = input['file_path'] ?? input['notebook_path'];
-  if (typeof target !== 'string' || !target.trim()) return null;
-  const full = realPath(resolvePath(cwd, target));
-  if (writableBy(full, [cwd, ...extraDirs], locked)) return null;
-  // Inside the roots but refused: it is Agent HQ's own data.
-  return { path: full, config: writableBy(full, [cwd, ...extraDirs]) };
 }
 
 // Reads SDK stream messages structurally so minor shape evolution between
@@ -75,7 +55,7 @@ export class ClaudeEngine implements OrchestratorEngine {
       prompt: args.prompt,
       options: {
         model: args.model.id,
-        ...(args.model.effort ? { effort: args.model.effort } : {}),
+        ...(args.model.effort && args.model.effort !== 'ultra' ? { effort: args.model.effort } : {}),
         maxTurns: 1,
         allowedTools: [],
       },
@@ -131,7 +111,7 @@ export class ClaudeEngine implements OrchestratorEngine {
       options: {
         abortController,
         model: args.model.id,
-        ...(args.model.effort ? { effort: args.model.effort } : {}),
+        ...(args.model.effort && args.model.effort !== 'ultra' ? { effort: args.model.effort } : {}),
         cwd: args.cwd,
         additionalDirectories: args.extraDirs ?? [],
         ...(mcpServers ? { mcpServers } : {}),
@@ -143,35 +123,13 @@ export class ClaudeEngine implements OrchestratorEngine {
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',
-          append:
-            `You are a worker agent on a team with this charter: ${args.team.charter}. Stay within that charter for HOW you work. ` +
-            'A task the master routed to your team is always in scope, whatever its topic — including personal or everyday requests from the owner. ' +
-            'Never refuse a task over its topic; if it seems like a mismatch for your team, do it anyway and note the mismatch in your report.' +
-            (maxSubagents > 0
-              ? ' Only when your task has substantial independent pieces (separate modules, separate searches or investigations), ' +
-                `run them concurrently in parallel subagents — at most ${maxSubagents} at a time, and none for small or sequential work — ` +
-                'then integrate and verify their results yourself. Subagents never spawn subagents of their own.'
-              : ''),
+          append: workerInstructions(args.team.charter, maxSubagents),
         },
         canUseTool: async (toolName, input) => {
           const stray = WRITING_TOOLS.has(toolName) ? refusedWrite(input, args.cwd, args.extraDirs ?? [], args.locked) : null;
-          if (stray?.config) {
-            callbacks.onActivity(`blocked: write into Agent HQ's own data — ${stray.path}`);
-            return {
-              behavior: 'deny',
-              message:
-                `Refused: ${stray.path} is Agent HQ's own configuration (rules, keys, settings), which agents never edit. ` +
-                'If it needs changing, say so in your report and the owner will change it.',
-            };
-          }
           if (stray) {
-            callbacks.onActivity(`blocked: write outside this project — ${stray.path}`);
-            return {
-              behavior: 'deny',
-              message:
-                `Refused: ${stray.path} is outside this task's project workspace (${args.cwd}). ` +
-                'Work only inside your own workspace; if the task needs another folder, say so in your report and ask the owner to register it as a project.',
-            };
+            callbacks.onActivity(stray.config ? `blocked: write into Agent HQ's own data — ${stray.path}` : `blocked: write outside this project — ${stray.path}`);
+            return { behavior: 'deny', message: refusalMessage(stray, args.cwd) };
           }
           if (!GATED_TOOLS.has(toolName)) {
             return { behavior: 'allow', updatedInput: input };

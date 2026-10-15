@@ -11,8 +11,14 @@ const EFFORT_LABELS: Record<EffortLevel, string> = {
   high: 'High',
   xhigh: 'Extra high',
   max: 'Max',
+  ultra: 'Ultra',
 };
 const ALL_EFFORTS = Object.keys(EFFORT_LABELS) as EffortLevel[];
+// Both engines in one list; a seat runs on whichever engine its model is from.
+const ENGINE_GROUPS = [
+  { engine: 'claude', label: 'Claude' },
+  { engine: 'codex', label: 'Codex · ChatGPT plan' },
+] as const;
 const modelLabel = (id: string): string => catalogModel(id)?.label ?? id;
 
 type Role = 'master' | 'checks' | 'lead' | 'worker';
@@ -39,10 +45,14 @@ function ModelSelect(props: { value?: string; defaultLabel: string; onChange: (v
       style={selectStyle(props.value !== undefined, 150)}
     >
       <option value="">Default · {props.defaultLabel}</option>
-      {MODEL_CATALOG.map((model) => (
-        <option key={model.id} value={model.id} title={model.description}>
-          {model.label}
-        </option>
+      {ENGINE_GROUPS.map((group) => (
+        <optgroup key={group.engine} label={group.label}>
+          {MODEL_CATALOG.filter((model) => model.engine === group.engine).map((model) => (
+            <option key={model.id} value={model.id} title={model.description}>
+              {model.label}
+            </option>
+          ))}
+        </optgroup>
       ))}
     </select>
   );
@@ -237,7 +247,9 @@ export function ModelsCard(props: { state: HubState; send: (command: ClientComma
       <div className="act" style={{ marginTop: 6, color: 'var(--faint)' }}>
         Model and effort are set independently. A Default model keeps the built-in choice; a Default effort is the
         level that model runs at when none is set. Custom picks are highlighted and apply to work that starts from
-        now (running tasks finish on what they started with).
+        now (running tasks finish on what they started with). Any seat can be a Claude or a Codex model; Codex runs
+        on your ChatGPT plan (its limits are on the Resources page). Codex workers don't run in Agent HQ's own
+        project yet — there they use the team's Claude model.
       </div>
 
       <div style={{ marginTop: 4 }}>

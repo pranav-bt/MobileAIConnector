@@ -21,6 +21,8 @@ import { startLimitsPoller } from './usage/limits.js';
 import { loadHubConfig, saveModelOverrides, savePaEnabled, savePermissionMode, type PermissionMode, type WorkspaceRoot } from './config.js';
 import type { CommandHandlers } from './commands.js';
 import { readMcpCatalog } from './engine/mcp-catalog.js';
+import { CodexEngine } from './engine/codex.js';
+import { EngineRouter } from './engine/router.js';
 
 export interface HubOptions {
   port?: number;
@@ -95,6 +97,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   let stopDemo: (() => void) | null = null;
   let stopSnapshots: (() => void) | null = null;
   let stopRules: (() => void) | null = null;
+  let codexEngine: CodexEngine | null = null;
   let masterRules = (): string => '';
   let mcpCatalog = (): string[] => [];
   let workerCwds: () => string[] = () => [];
@@ -103,7 +106,11 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     options.engine === 'claude' || options.engine === 'mock' ? options.engine : 'demo';
 
   if (mode === 'claude' || mode === 'mock') {
-    const engine = mode === 'claude' ? new ClaudeEngine() : new MockEngine();
+    // Any seat, any model: the router sends each call to Claude or Codex by
+    // the model's engine. The mock engine stands in for both offline.
+    const mock = mode === 'mock' ? new MockEngine() : null;
+    codexEngine = mode === 'claude' ? new CodexEngine() : null;
+    const engine = new EngineRouter(mock ? { claude: mock, codex: mock } : { claude: new ClaudeEngine(), codex: codexEngine! });
     const registry = new TeamRegistry(dataDir);
     registry.init();
     const projects = new ProjectRegistry(dataDir, workspaceRoots);
@@ -177,6 +184,15 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   // Real subscription meters (5h window / weekly, incl. chat usage) — only
   // when running real agents; demo seeds fake meters and mock stays offline.
   const stopLimits = mode === 'claude' ? startLimitsPoller(bus) : null;
+  // The Codex plan's limits — read (free) only while Codex is actually running.
+  const codexLimits = codexEngine
+    ? setInterval(() => {
+        void codexEngine?.rateLimits().then((codex) => {
+          if (codex) bus.publish({ type: 'usage.updated', usage: { ...bus.state.usage, codex } });
+        });
+      }, 60_000)
+    : null;
+  codexLimits?.unref();
 
   // Terminal Claude Code sessions on this machine show up as Freelancers —
   // and can be messaged (the hub resumes their conversation headlessly).
@@ -204,6 +220,8 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     close: async () => {
       stopDemo?.();
       stopLimits?.();
+      if (codexLimits) clearInterval(codexLimits);
+      codexEngine?.close();
       stopSnapshots?.();
       stopRules?.();
       freelancers.stop();

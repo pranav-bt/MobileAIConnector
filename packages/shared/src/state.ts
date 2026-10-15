@@ -49,7 +49,7 @@ export function emptyUsage(): Usage {
     weeklyPct: 0,
     weeklyResetsAt: 0,
     tokensToday: 0,
-    modelMixPct: { opus: 0, sonnet: 0, haiku: 0 },
+    modelMixPct: { opus: 0, sonnet: 0, haiku: 0, codex: 0 },
     overageEnabled: false,
   };
 }

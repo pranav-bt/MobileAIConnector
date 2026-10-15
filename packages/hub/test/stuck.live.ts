@@ -6,10 +6,17 @@
 import { resolveModel, type Team } from '@agent-hq/shared';
 import { ClaudeEngine } from '../src/engine/claude.js';
 import { planRecovery, reviewWorkerReport, type StuckContext } from '../src/orchestrator/master.js';
+import { CodexEngine } from '../src/engine/codex.js';
+import { EngineRouter } from '../src/engine/router.js';
 
-const engine = new ClaudeEngine();
-const quick = resolveModel('haiku');
-const lead = resolveModel('sonnet');
+// --model <id> runs these decisions on any catalog model (Claude or Codex).
+const modelArgIndex = process.argv.indexOf('--model');
+const pickedModel = modelArgIndex > 0 ? process.argv[modelArgIndex + 1] : undefined;
+const codexEngine = new CodexEngine();
+
+const engine = new EngineRouter({ claude: new ClaudeEngine(), codex: codexEngine });
+const quick = resolveModel('haiku', pickedModel ? { model: pickedModel } : undefined);
+const lead = resolveModel('sonnet', pickedModel ? { model: pickedModel } : undefined);
 
 const team = (id: string, name: string, charter: string, rules = ''): Team => ({
   id,
@@ -98,4 +105,5 @@ const allowed = await planRecovery(
 check('owner rule allows acting alone → auto', allowed.plan?.action === 'handover' && allowed.plan.auto === true, JSON.stringify(allowed.plan));
 
 console.log(pass ? '\nSTUCK LIVE PASS' : '\nSTUCK LIVE FAIL');
+codexEngine.close();
 process.exit(pass ? 0 : 1);
