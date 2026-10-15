@@ -39,6 +39,8 @@ npm run desktop        # office UI on http://localhost:5173
                        # source tools/launcher/AgentHqLauncher.cs, rebuild: tools\launcher\build.ps1
 npm run smoke          # e2e smokes: demo hub + orchestrator (mock engine, no usage)
 npx tsx test/engine.live.ts   # (from packages/hub) LIVE Claude-engine validation — spends usage
+npx tsx test/codex-spike.live.ts  # (packages/hub) LIVE Codex app-server checks (approvals, sandbox,
+                       # steer/interrupt/resume, strict JSON, MCP isolation) — spends a little Codex usage
 npm run build          # build all packages (shared first)
 npm run typecheck      # tsc across workspaces
 ```
