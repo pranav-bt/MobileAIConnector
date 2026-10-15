@@ -88,6 +88,7 @@ export class ClaudeEngine implements OrchestratorEngine {
     signal?: AbortSignal;
     resumeSessionId?: string;
     inbox?: WorkerInbox;
+    readOnly?: boolean;
   }): Promise<WorkerRunResult> {
     const { callbacks } = args;
     const maxSubagents = args.maxSubagents ?? DEFAULT_MAX_SUBAGENTS;
@@ -155,13 +156,19 @@ export class ClaudeEngine implements OrchestratorEngine {
         // PC's user-scope servers (verified: test/probe-mcp-scope.ts).
         strictMcpConfig: true,
         // No sub-agents at all: the tool is removed, not just discouraged.
-        ...(maxSubagents === 0 ? { disallowedTools: SUBAGENT_TOOLS } : {}),
+        // A reviewer can't write at all: the file tools are removed outright.
+        ...(maxSubagents === 0 || args.readOnly
+          ? { disallowedTools: [...(maxSubagents === 0 ? SUBAGENT_TOOLS : []), ...(args.readOnly ? [...WRITING_TOOLS] : [])] }
+          : {}),
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',
           append: workerInstructions(args.team.charter, maxSubagents),
         },
         canUseTool: async (toolName, input) => {
+          if (args.readOnly && (WRITING_TOOLS.has(toolName) || (toolName === 'Bash' && typeof input['command'] === 'string' && shellWrites(input['command'])))) {
+            return { behavior: 'deny', message: 'You are reviewing — read and run checks only; never change files.' };
+          }
           const stray = WRITING_TOOLS.has(toolName) ? refusedWrite(input, args.cwd, args.extraDirs ?? [], args.locked) : null;
           if (stray) {
             callbacks.onActivity(stray.config ? `blocked: write into Agent HQ's own data — ${stray.path}` : `blocked: write outside this project — ${stray.path}`);

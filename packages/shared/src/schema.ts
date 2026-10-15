@@ -17,6 +17,13 @@ export const MODEL_IDS: Record<ModelTier, string> = {
   codex: 'gpt-6.1-sol',
 };
 
+// Pair mode's default reviewer, by the AUTHOR's engine: the other engine's
+// flagship (the owner's reviewer choices layer over this).
+export const PAIR_REVIEWER_DEFAULT: Record<'claude' | 'codex', string> = {
+  claude: 'gpt-6.1-sol',
+  codex: 'claude-opus-5-5',
+};
+
 // Which engine runs a model. The event vocabulary is the same for both.
 export const EngineIdSchema = z.enum(['claude', 'codex']);
 export type EngineId = z.infer<typeof EngineIdSchema>;
@@ -121,6 +128,34 @@ export const TaskSchema = z.object({
   // The worker's conversation (Claude session / Codex thread), so the task
   // can be continued from its console with full memory — even after a restart.
   session: z.object({ engine: EngineIdSchema, id: z.string() }).nullable().optional(),
+  // Pair mode: two workers on two engines. 'review' = second opinion — the
+  // author does the work, the reviewer (read-only) checks the actual result,
+  // rounds repeat until the reviewer agrees (or the round cap asks the owner).
+  pair: z
+    .object({
+      mode: z.literal('review'),
+      maxRounds: z.number().int().min(1),
+      round: z.number().int().min(0),
+      state: z.enum(['working', 'reviewing', 'agreed', 'disagreed']).optional(),
+      rounds: z
+        .array(
+          z.object({
+            round: z.number().int(),
+            author: z.string(), // the author's report, capped
+            agree: z.boolean(),
+            blocking: z.array(z.string()),
+            minor: z.array(z.string()),
+            summary: z.string(),
+            version: z.string().optional(), // the reviewed state of the work
+          }),
+        )
+        .default([]),
+      reviewerSession: z.object({ engine: EngineIdSchema, id: z.string() }).nullable().optional(),
+      reviewerModel: z.string().optional(), // catalog id of the reviewer seat
+      authorModel: z.string().optional(), // catalog id of the author (worker) seat
+    })
+    .nullable()
+    .optional(),
 });
 export type Task = z.infer<typeof TaskSchema>;
 
@@ -319,8 +354,19 @@ export const ModelOverridesSchema = z.object({
   checks: ModelChoiceSchema.optional(), // master's quick checks: handovers + QA verdicts
   lead: ModelChoiceSchema.optional(), // every team lead's review
   worker: ModelChoiceSchema.optional(), // every team's workers
+  // Pair mode's second worker (the reviewer). Default: the other engine
+  // from the worker's (Claude worker → GPT-6.1-Sol, Codex worker → Opus 5.5).
+  reviewer: ModelChoiceSchema.optional(),
   teams: z
-    .record(z.string(), z.object({ lead: ModelChoiceSchema.optional(), worker: ModelChoiceSchema.optional() }))
+    .record(
+      z.string(),
+      z.object({
+        lead: ModelChoiceSchema.optional(),
+        worker: ModelChoiceSchema.optional(),
+        reviewer: ModelChoiceSchema.optional(),
+        pairByDefault: z.boolean().optional(), // this team's tasks run in pair mode unless /solo
+      }),
+    )
     .default({}),
 });
 export type ModelOverrides = z.infer<typeof ModelOverridesSchema>;

@@ -297,6 +297,7 @@ export class CodexEngine implements OrchestratorEngine {
     title?: string;
     resumeSessionId?: string;
     inbox?: WorkerInbox;
+    readOnly?: boolean;
   }): Promise<WorkerRunResult> {
     const { callbacks } = args;
     const client = await this.#ready();
@@ -304,7 +305,7 @@ export class CodexEngine implements OrchestratorEngine {
     const threadSettings = {
       cwd: args.cwd,
       approvalPolicy: 'untrusted',
-      sandbox: 'workspace-write',
+      sandbox: args.readOnly ? 'read-only' : 'workspace-write',
       config: this.#mcpConfig(args.team.mcpServers),
       developerInstructions: workerInstructions(args.team.charter, args.maxSubagents ?? DEFAULT_MAX_SUBAGENTS),
     };
@@ -354,6 +355,7 @@ export class CodexEngine implements OrchestratorEngine {
       onRequest: async (method: string, request: JsonObject) => {
         if (method === 'item/commandExecution/requestApproval') {
           const command = unwrapShellCommand(String(request['command'] ?? ''));
+          if (args.readOnly && shellWrites(command)) return { decision: 'decline' }; // reviewing: never change files
           const decision = await callbacks.onPermission({
             toolName: 'Bash',
             command,
@@ -362,6 +364,7 @@ export class CodexEngine implements OrchestratorEngine {
           return { decision: decision === 'approve' ? 'accept' : 'decline' };
         }
         if (method === 'item/fileChange/requestApproval') {
+          if (args.readOnly) return { decision: 'decline' };
           const paths = ((request['changes'] as { path: string }[] | undefined) ?? []).map((change) => change.path);
           if (paths.length === 0) return { decision: 'decline' };
           for (const path of paths) {
@@ -398,13 +401,15 @@ export class CodexEngine implements OrchestratorEngine {
           {
             input: [{ type: 'text', text: input, text_elements: [] }],
             ...(args.model.effort ? { effort: args.model.effort } : {}),
-            sandboxPolicy: {
-              type: 'workspaceWrite',
-              writableRoots: [args.cwd, ...extraDirs],
-              networkAccess: true, // every command still asks the policy (sending data out raises a card)
-              excludeTmpdirEnvVar: true,
-              excludeSlashTmp: true,
-            },
+            sandboxPolicy: args.readOnly
+              ? { type: 'readOnly', networkAccess: true }
+              : {
+                  type: 'workspaceWrite',
+                  writableRoots: [args.cwd, ...extraDirs],
+                  networkAccess: true, // every command still asks the policy (sending data out raises a card)
+                  excludeTmpdirEnvVar: true,
+                  excludeSlashTmp: true,
+                },
           },
           hooks,
         );

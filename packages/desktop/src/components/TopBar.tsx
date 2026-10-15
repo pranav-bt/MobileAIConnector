@@ -3,7 +3,7 @@ import type { ClientCommand, HubState, WorkspaceRoot } from '@agent-hq/shared';
 import { isActive } from '../status';
 
 const HELP =
-  '/project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /rule <team>[/<section>]: <rule> · /rule master/stuck: <rule> · /permissions auto|strict · /todo <text> · /note <text> · /remind <when> <text> · /event <when> <title> · /pa on|off · /tasks pause|resume|killall';
+  '/pair <task> · /solo <task> · /project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /rule <team>[/<section>]: <rule> · /rule master/stuck: <rule> · /permissions auto|strict · /todo <text> · /note <text> · /remind <when> <text> · /event <when> <title> · /pa on|off · /tasks pause|resume|killall';
 
 export const WHEN_HELP = '<when>: "in 20m|2h|3d", "17:30", "tomorrow 09:00", or "2026-09-14 18:00"';
 
@@ -55,6 +55,14 @@ function parseSlashCommand(
   roots: WorkspaceRoot[],
 ): { command: ClientCommand; note: string } | { hint: string } | null {
   if (!text.startsWith('/')) return null;
+  // "/pair <task>": both engines — the worker does it, a second model reviews
+  // it until they agree. "/solo <task>": one worker even if the team pairs by
+  // default. (The hub strips the prefix; it reads the same from any client.)
+  const pairMatch = text.match(/^\/(pair|solo)\s+([\s\S]+)$/i);
+  if (pairMatch && pairMatch[1] && pairMatch[2]) {
+    const pair = pairMatch[1].toLowerCase() === 'pair';
+    return { command: { type: 'task.submit', text: pairMatch[2].trim(), pair }, note: pair ? 'sent in pair mode' : 'sent solo' };
+  }
   // "/project new BeatBox personal" creates the folder under the right root.
   const projNew = text.match(/^\/project new (\S+)(?:\s+(\S+))?$/i);
   if (projNew && projNew[1]) {
@@ -157,6 +165,8 @@ export function TopBar(props: {
   send: (command: ClientCommand) => void;
 }): JSX.Element {
   const [text, setText] = useState('');
+  // One-shot: the next task runs in pair mode (a second model reviews it).
+  const [pair, setPair] = useState(false);
   const [hint, setHint] = useState<string | null>(null);
   const hintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeCount = Object.values(props.state.agents).filter(isActive).length;
@@ -183,8 +193,9 @@ export function TopBar(props: {
       }
       return;
     }
-    props.send({ type: 'task.submit', text: trimmed });
+    props.send({ type: 'task.submit', text: trimmed, ...(pair ? { pair: true } : {}) });
     setText('');
+    setPair(false);
   };
 
   return (
@@ -199,6 +210,15 @@ export function TopBar(props: {
             if (event.key === 'Enter') submit();
           }}
         />
+        <button
+          type="button"
+          className={`pair-toggle${pair ? ' on' : ''}`}
+          aria-pressed={pair}
+          title="Pair mode for the next task: the worker does it, a second model (the other engine) reviews the actual result until they agree"
+          onClick={() => setPair((on) => !on)}
+        >
+          Pair
+        </button>
       </div>
       {hint ? (
         <span className="act" style={{ color: 'var(--amber)', maxWidth: 520, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>

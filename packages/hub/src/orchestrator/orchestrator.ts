@@ -1,10 +1,12 @@
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { MODEL_DEFAULTS, catalogModel, isInternalTask, resolveModel, rulesFor, toolName, type Agent, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
+import { promisify } from 'node:util';
+import { MODEL_DEFAULTS, PAIR_REVIEWER_DEFAULT, catalogModel, isInternalTask, parseVerdict, resolveModel, rulesFor, toolName, type Agent, type PairVerdict, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
-import type { OrchestratorEngine } from '../engine/types.js';
+import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from '../engine/types.js';
 import {
   coordinateFollowUp,
   evaluateQaReport,
@@ -40,6 +42,7 @@ import { MessageInbox } from '../engine/inbox.js';
 // change is a bus event, so the office renders it live.
 
 const now = () => Date.now();
+const execFileAsync = promisify(execFile);
 const MAX_LOUNGE_IDLE = 3;
 // Upper bound on parallel parts per split, whatever the team's worker cap.
 const MAX_PARALLEL_PARTS = 4;
@@ -57,6 +60,37 @@ export function splitWorthChecking(title: string, detail: string): boolean {
   if (UNSPLITTABLE_TITLE.test(title)) return false;
   const words = detail.split(/\s+/).filter(Boolean).length;
   return words >= 8 && (words >= 60 || BUILD_WORDS.test(detail));
+}
+
+// Pair mode: review rounds before the owner is asked (also the fresh budget
+// a continued pair task gets).
+export const PAIR_ROUNDS = 3;
+
+// A short fingerprint of the work under review, so "agreed" names the exact
+// version: the git working-tree diff (tracked + untracked files) in a repo,
+// else the author's report.
+async function workVersion(cwd: string, report: string): Promise<string> {
+  const hash = createHash('sha256');
+  try {
+    const git = (...args: string[]) =>
+      execFileAsync('git', ['-C', cwd, ...args], { timeout: 15_000, maxBuffer: 64 * 1024 * 1024, windowsHide: true }).then((out) => out.stdout);
+    hash.update(await git('rev-parse', 'HEAD').catch(() => ''));
+    hash.update(await git('diff', 'HEAD', '--no-ext-diff'));
+    const untracked = (await git('ls-files', '--others', '--exclude-standard')).split('\n').filter(Boolean).slice(0, 200);
+    for (const file of untracked) {
+      hash.update(file);
+      try {
+        // Big files count by size + mtime (no multi-MB reads per round).
+        const stats = statSync(join(cwd, file));
+        hash.update(stats.size > 2 * 1024 * 1024 ? `${stats.size}:${stats.mtimeMs}` : readFileSync(join(cwd, file)));
+      } catch {
+        // unreadable: the name alone counts
+      }
+    }
+  } catch {
+    hash.update(report);
+  }
+  return hash.digest('hex').slice(0, 8);
 }
 
 interface RunOptions {
@@ -169,6 +203,8 @@ export class Orchestrator implements CommandHandlers {
   #transcripts: TranscriptStore | null = null;
   #inboxes = new Map<string, MessageInbox>();
   #followUps = new Map<string, string[]>();
+  // Pair tasks whose chair is reading an owner's message right now.
+  #chairing = new Set<string>();
   #cardsSeen = new Set<string>();
 
   #projects: ProjectRegistry;
@@ -502,6 +538,14 @@ export class Orchestrator implements CommandHandlers {
       this.#row(taskId, { role: 'system', kind: 'status', text: 'sent to the worker — it reads it at its next step' });
       return;
     }
+    // A finished pair task answers through its chair (the team lead): a
+    // question gets an answer, a change goes to the author and is re-reviewed.
+    const pairTeam = task.pair && task.teamId ? this.#registry.get(task.teamId) : undefined;
+    if (pairTeam && ['done', 'failed', 'paused'].includes(task.status) && !this.#chairing.has(taskId)) {
+      this.#chairing.add(taskId);
+      void this.#chairReply(taskId, pairTeam, message).finally(() => this.#chairing.delete(taskId));
+      return;
+    }
     const waiting = this.#followUps.get(taskId) ?? [];
     waiting.push(message);
     this.#followUps.set(taskId, waiting);
@@ -568,8 +612,8 @@ export class Orchestrator implements CommandHandlers {
 
   // --- commands ----------------------------------------------------------
 
-  submitTask(text: string): void {
-    void this.#intake(text);
+  submitTask(text: string, _projectId?: string | null, pair?: boolean): void {
+    void this.#intake(text, pair);
   }
 
   activeWorkerCwds(): string[] {
@@ -698,9 +742,16 @@ export class Orchestrator implements CommandHandlers {
     }
   }
 
-  async #intake(rawText: string): Promise<void> {
-    // "@<project> do something" pins the task to a project explicitly.
+  async #intake(rawText: string, pairChoice?: boolean): Promise<void> {
     let text = rawText.trim();
+    // "/pair …" / "/solo …" turn pair mode on/off for this task (the
+    // composer's toggle sends the same as a flag; neither = the team's default).
+    const modeMatch = text.match(/^\/(pair|solo)\s+([\s\S]+)$/i);
+    if (modeMatch && modeMatch[1] && modeMatch[2]) {
+      pairChoice = modeMatch[1].toLowerCase() === 'pair';
+      text = modeMatch[2].trim();
+    }
+    // "@<project> do something" pins the task to a project explicitly.
     let forcedProjectId: string | null = null;
     const atMatch = text.match(/^@(\S+)\s+([\s\S]+)$/);
     let unknownPin: string | null = null;
@@ -873,16 +924,17 @@ export class Orchestrator implements CommandHandlers {
 
     if (decision.steps) {
       this.#activity('master', taskId, `project: ${project.name} (${basis})`);
-      void this.#runChain(taskId, decision.steps, project.id, decision.title);
+      void this.#runChain(taskId, decision.steps, project.id, decision.title, 0, pairChoice);
       this.#masterStatus();
       return;
     }
 
-    this.#patchTask(taskId, { teamId: team.id, projectId: project.id, title: decision.title, status: 'queued' });
+    const pair = this.#pairFor(team, pairChoice);
+    this.#patchTask(taskId, { teamId: team.id, projectId: project.id, title: decision.title, status: 'queued', pair });
     this.#activity(
       'master',
       taskId,
-      `routed "${decision.title}" → ${team.name} · ${project.name} (${basis})${decision.fallback ? ' (keyword fallback)' : ''}`,
+      `routed "${decision.title}" → ${team.name} · ${project.name} (${basis})${decision.fallback ? ' (keyword fallback)' : ''}${pair ? ' · pair mode' : ''}`,
     );
 
     this.#startOrQueue(taskId, team, true);
@@ -891,7 +943,14 @@ export class Orchestrator implements CommandHandlers {
 
   // Sequenced multi-team plan: each step runs after the previous one and
   // receives its synopsis as a handover; QA follows only the final step.
-  async #runChain(firstTaskId: string, steps: PlanStep[], projectId: string, overallTitle: string, recoveryRound = 0): Promise<void> {
+  async #runChain(
+    firstTaskId: string,
+    steps: PlanStep[],
+    projectId: string,
+    overallTitle: string,
+    recoveryRound = 0,
+    pairChoice?: boolean,
+  ): Promise<void> {
     this.#activity(
       'master',
       firstTaskId,
@@ -922,6 +981,7 @@ export class Orchestrator implements CommandHandlers {
         agentIds: [],
         synopsis: null,
         tokensUsed: 0,
+        pair: this.#pairFor(team, pairChoice),
         createdAt: this.#bus.state.tasks[taskId]?.createdAt ?? now(),
         updatedAt: now(),
       };
@@ -1074,7 +1134,9 @@ export class Orchestrator implements CommandHandlers {
     // Must stay synchronous up to the slot increment below (callers check the
     // cap, then call) — the split pass takes over the slot the same way.
     // (A follow-up from the console continues the work as it is — never re-split.)
-    if (!opts.noSplit && !this.#followUps.has(taskId) && this.#shouldPlanSplit(task, team)) return this.#planAndRun(taskId, team, autoQa);
+    if (!opts.noSplit && !task.pair && !this.#followUps.has(taskId) && this.#shouldPlanSplit(task, team)) {
+      return this.#planAndRun(taskId, team, autoQa);
+    }
     let outcome: string | null = null;
     const project = (task.projectId ? this.#projects.get(task.projectId) : undefined) ?? this.#projects.defaultProject();
     // An internal split piece: no lead review, no sub-agents, and its tokens
@@ -1114,7 +1176,9 @@ export class Orchestrator implements CommandHandlers {
     const followUps = this.#followUps.get(taskId) ?? [];
     this.#followUps.delete(taskId);
     const continuing = followUps.length > 0 && (!!task.session || task.synopsis !== null);
-    const inbox = new MessageInbox();
+    // One inbox per author run (an engine closes it when its run ends); a pair
+    // task's fix rounds get a fresh one.
+    let inbox = new MessageInbox();
     this.#inboxes.set(taskId, inbox);
 
     const controller = new AbortController();
@@ -1152,53 +1216,77 @@ export class Orchestrator implements CommandHandlers {
             ? `${this.#buildWorkerPrompt(current)}\n\nThe owner added while this was waiting:\n${followText}`
             : this.#buildWorkerPrompt(current);
       if (resumeSessionId) this.#activity(workerId, taskId, `resuming the conversation (${workerSpec.engine})`);
-      const result = await this.#engine.runWorker({
-        prompt,
-        title: task.title,
-        team,
-        model: workerSpec,
-        cwd: scope.cwd,
-        extraDirs: scope.extraDirs,
-        locked: scope.locked,
-        ...(piece ? { maxSubagents: 0 } : {}),
-        ...(resumeSessionId ? { resumeSessionId } : {}),
-        inbox,
-        signal: controller.signal,
-        callbacks: {
-          onSession: (sessionId) => this.#patchTask(taskId, { session: { engine: workerSpec.engine, id: sessionId } }),
-          onTranscript: (row) => this.#row(taskId, { ...row, role: 'worker', agentId: workerId }),
-          onActivity: (message) => {
-            this.#patchAgent(workerId, { status: 'working', activity: message.slice(0, 90) });
-            this.#activity(workerId, taskId, message);
-            const current = this.#bus.state.tasks[taskId];
-            if (current && current.status === 'in_flight' && current.progressPct < 90) {
-              this.#patchTask(taskId, { progressPct: current.progressPct + 5 });
-            }
-          },
-          onTokens: (totalTokens) => {
-            const previous = this.#bus.state.agents[workerId]?.tokensUsed ?? 0;
-            this.#patchAgent(workerId, { tokensUsed: totalTokens });
-            this.#patchTask(taskId, { tokensUsed: baseTokens + totalTokens });
-            const parent = task.parentTaskId ? this.#bus.state.tasks[task.parentTaskId] : undefined;
-            if (parent) this.#patchTask(parent.id, { tokensUsed: parent.tokensUsed + totalTokens - previous });
-            this.#recordTokens(workerSpec.tier, totalTokens - previous);
-            const ledger = this.#projects.addTokens(project.id, totalTokens - previous);
-            if (ledger) {
-              this.#bus.publish({ type: 'project.updated', project: ledger.project });
-              if (ledger.crossed75) {
-                this.#activity('master', taskId, `project "${ledger.project.name}" crossed 75% of its token quota`);
-              }
-            }
-          },
-          onPermission: ({ toolName, command, reason }) => {
-            // The shell is not confined by the SDK's directory grants, so the
-            // policy gets the worker's scope and gates writes that leave it.
-            const verdict = evaluatePermission(toolName, command, this.#policy.mode, scope);
-            if (verdict.decision === 'allow') return Promise.resolve('approve' as const);
-            return this.#raisePermission(taskId, workerId, team, toolName, command, reason, verdict.flags);
-          },
+      // The author's runs (one, or one per pair round) share these callbacks;
+      // each engine run counts tokens from zero, so earlier runs are carried.
+      let tokenBase = baseTokens; // the task's tokens before the current run
+      let agentBase = 0; // this worker's tokens before the current run
+      let runTotal = 0;
+      const authorCallbacks: WorkerRunCallbacks = {
+        onSession: (sessionId) => this.#patchTask(taskId, { session: { engine: workerSpec.engine, id: sessionId } }),
+        onTranscript: (row) => this.#row(taskId, { ...row, role: 'worker', agentId: workerId }),
+        onActivity: (message) => {
+          this.#patchAgent(workerId, { status: 'working', activity: message.slice(0, 90) });
+          this.#activity(workerId, taskId, message);
+          const current = this.#bus.state.tasks[taskId];
+          if (current && current.status === 'in_flight' && current.progressPct < 90) {
+            this.#patchTask(taskId, { progressPct: current.progressPct + 5 });
+          }
         },
-      });
+        onTokens: (totalTokens) => {
+          runTotal = totalTokens;
+          const previous = this.#bus.state.agents[workerId]?.tokensUsed ?? 0;
+          const total = agentBase + totalTokens;
+          this.#patchAgent(workerId, { tokensUsed: total });
+          this.#patchTask(taskId, { tokensUsed: tokenBase + totalTokens });
+          const parent = task.parentTaskId ? this.#bus.state.tasks[task.parentTaskId] : undefined;
+          if (parent) this.#patchTask(parent.id, { tokensUsed: parent.tokensUsed + total - previous });
+          this.#recordTokens(workerSpec.tier, total - previous);
+          const ledger = this.#projects.addTokens(project.id, total - previous);
+          if (ledger) {
+            this.#bus.publish({ type: 'project.updated', project: ledger.project });
+            if (ledger.crossed75) {
+              this.#activity('master', taskId, `project "${ledger.project.name}" crossed 75% of its token quota`);
+            }
+          }
+        },
+        onPermission: ({ toolName, command, reason }) => {
+          // The shell is not confined by the SDK's directory grants, so the
+          // policy gets the worker's scope and gates writes that leave it.
+          const verdict = evaluatePermission(toolName, command, this.#policy.mode, scope);
+          if (verdict.decision === 'allow') return Promise.resolve('approve' as const);
+          return this.#raisePermission(taskId, workerId, team, toolName, command, reason, verdict.flags);
+        },
+      };
+      const runAuthor = async (authorPrompt: string, resumeId?: string) => {
+        if (inbox.closed) {
+          inbox = new MessageInbox();
+          this.#inboxes.set(taskId, inbox);
+        }
+        // Carried from the task's current total: a pair reviewer's tokens
+        // land on the task between the author's runs.
+        tokenBase = this.#bus.state.tasks[taskId]?.tokensUsed ?? tokenBase;
+        runTotal = 0;
+        const run = await this.#engine.runWorker({
+          prompt: authorPrompt,
+          title: task.title,
+          team,
+          model: workerSpec,
+          cwd: scope.cwd,
+          extraDirs: scope.extraDirs,
+          locked: scope.locked,
+          ...(piece ? { maxSubagents: 0 } : {}),
+          ...(resumeId ? { resumeSessionId: resumeId } : {}),
+          inbox,
+          signal: controller.signal,
+          callbacks: authorCallbacks,
+        });
+        agentBase += runTotal;
+        runTotal = 0;
+        return run;
+      };
+      const result = await runAuthor(prompt, resumeSessionId);
+      let report = result.synopsis;
+      let filesChanged = !!result.filesChanged;
 
       if (this.#stopping.has(taskId)) {
         this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' });
@@ -1215,6 +1303,31 @@ export class Orchestrator implements CommandHandlers {
         return report;
       }
 
+      let pairNote = '';
+      // Pair mode (second opinion): a reviewer on the other engine checks the
+      // actual result; the author fixes what it flags; rounds repeat until
+      // it agrees — or the round cap hands the call to the owner.
+      if (this.#bus.state.tasks[taskId]?.pair) {
+        const paired = await this.#pairRounds({ taskId, team, project, scope, workerSpec, workerId, controller, report, runAuthor });
+        if (paired.outcome === 'stopped' || this.#stopping.has(taskId)) {
+          this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' });
+          this.#patchAgent(workerId, { status: 'idle', activity: 'task stopped', taskId: null });
+          return null;
+        }
+        if (paired.outcome === 'left') {
+          this.#patchTask(taskId, {
+            status: 'paused',
+            stoppedBy: 'owner',
+            synopsis: `Left for you: the author and the reviewer still disagree.\n${paired.note}`,
+          });
+          this.#activity('master', taskId, 'pair stopped at your call — send a message to tell them how to settle it');
+          return null;
+        }
+        report = paired.report;
+        filesChanged = filesChanged || paired.filesChanged;
+        pairNote = paired.note;
+      }
+
       // Lead review: the worker's report becomes the synopsis the owner reads.
       this.#patchTask(taskId, { status: 'review', progressPct: 95 });
       this.#patchAgent(workerId, { status: 'reporting', activity: 'reporting to lead' });
@@ -1223,7 +1336,8 @@ export class Orchestrator implements CommandHandlers {
         this.#engine,
         team,
         task.title,
-        result.synopsis,
+        // The chair folds both sides into one synopsis.
+        pairNote ? `${report}\n\n${pairNote}` : report,
         leadSpec,
         parseRules(this.#registry.readRules(team.id)).rules,
       );
@@ -1240,8 +1354,8 @@ export class Orchestrator implements CommandHandlers {
         const synopsis = `Stuck — ${review.stuck}\n${review.synopsis || ''}`.trim();
         this.#patchTask(taskId, { status: 'failed', progressPct: 100, synopsis });
         this.#activity(`${team.id}-lead`, taskId, `stuck: ${review.stuck.slice(0, 80)}`);
-        if (!team.allowedTools.includes('bash') && result.synopsis.trim().length > 300) {
-          this.#deliverReport(task, team, result.synopsis, synopsis);
+        if (!team.allowedTools.includes('bash') && report.trim().length > 300) {
+          this.#deliverReport(task, team, report, synopsis);
         }
         void this.#recoverStuck(taskId, team, 'blocked', review.stuck);
         return null;
@@ -1253,12 +1367,12 @@ export class Orchestrator implements CommandHandlers {
 
       // Text work (research, briefs, docs): the full report is the product —
       // save it permanently and push a copy to the phone via the outbox.
-      if (!team.allowedTools.includes('bash') && result.synopsis.trim().length > 300) {
-        this.#deliverReport(task, team, result.synopsis, review.synopsis);
+      if (!team.allowedTools.includes('bash') && report.trim().length > 300) {
+        this.#deliverReport(task, team, report, review.synopsis);
       }
 
       // A console follow-up that changed no files needs no new QA pass.
-      if (autoQa && (!continuing || result.filesChanged)) this.#enqueueQa(taskId, team, review.synopsis);
+      if (autoQa && (!continuing || filesChanged)) this.#enqueueQa(taskId, team, review.synopsis);
       // A finished QA task gets a verdict: pass, or a remediation round.
       // Everything else gets the master's coordination pass: does the report
       // hand work to a different team?
@@ -1709,6 +1823,297 @@ export class Orchestrator implements CommandHandlers {
       this.#link(taskId, followId, `handed over to ${target.name}: ${item.title.slice(0, 50)}`);
       this.#startOrQueue(followId, target, true);
     }
+  }
+
+  // --- pair mode: second opinion ----------------------------------------
+  // The author (the team's worker seat) does the work; a reviewer on the
+  // other engine (read-only) checks the ACTUAL result and returns a verdict;
+  // blocking issues go back to the author's same conversation; rounds repeat
+  // until the reviewer agrees on a specific version of the work, or the round
+  // cap puts the call to the owner. The lead chairs: its review folds both
+  // sides into one synopsis, and the owner's later messages go through it.
+
+  async #pairRounds(ctx: {
+    taskId: string;
+    team: Team;
+    project: Project;
+    scope: { cwd: string; extraDirs: string[]; locked: LockedDir };
+    workerSpec: ModelSpec;
+    workerId: string;
+    controller: AbortController;
+    report: string;
+    runAuthor: (prompt: string, resumeId?: string) => Promise<WorkerRunResult>;
+  }): Promise<{ outcome: 'agreed' | 'accepted' | 'left' | 'stopped'; report: string; filesChanged: boolean; note: string }> {
+    const { taskId, team } = ctx;
+    let report = ctx.report;
+    let filesChanged = false;
+    const reviewerSpec = this.#reviewerSpec(team, ctx.workerSpec);
+    // A continued pair task (the owner's follow-up) gets a fresh round budget.
+    const start = this.#bus.state.tasks[taskId]?.pair;
+    if (start) {
+      const maxRounds = start.round > 0 ? Math.max(start.maxRounds, start.round + PAIR_ROUNDS) : start.maxRounds;
+      this.#patchTask(taskId, { pair: { ...start, maxRounds, state: 'working', reviewerModel: reviewerSpec.id, authorModel: ctx.workerSpec.id } });
+    }
+    const authorLabel = catalogModel(ctx.workerSpec.id)?.label ?? ctx.workerSpec.id;
+    const reviewerLabel = catalogModel(reviewerSpec.id)?.label ?? reviewerSpec.id;
+    for (;;) {
+      if (this.#stopping.has(taskId)) return { outcome: 'stopped', report, filesChanged, note: '' };
+      const pair = this.#bus.state.tasks[taskId]?.pair;
+      if (!pair) return { outcome: 'agreed', report, filesChanged, note: '' };
+      const round = pair.round + 1;
+      this.#patchTask(taskId, { pair: { ...pair, round, state: 'reviewing' } });
+      const version = await workVersion(ctx.scope.cwd, report);
+      this.#activity('master', taskId, `round ${round}: ${reviewerLabel} reviews ${authorLabel}'s work`);
+      this.#patchAgent(ctx.workerId, { status: 'working', activity: `waiting for ${reviewerLabel}'s review (round ${round})` });
+      const verdict = await this.#reviewRound(ctx, reviewerSpec, report, round);
+      if (this.#stopping.has(taskId)) return { outcome: 'stopped', report, filesChanged, note: '' };
+      const latest = this.#bus.state.tasks[taskId]?.pair ?? pair;
+      const rounds = [...latest.rounds, { round, author: report.slice(0, 1500), ...verdict, version }].slice(-12);
+      this.#patchTask(taskId, { pair: { ...latest, round, rounds, state: verdict.agree ? 'agreed' : 'working' } });
+      if (verdict.agree) {
+        this.#activity('master', taskId, `round ${round}: ${reviewerLabel} agrees (version ${version}) — ${verdict.summary}`);
+        const note =
+          `Second opinion: ${reviewerLabel} checked the actual result and agreed after ${round} round${round === 1 ? '' : 's'} (version ${version}): ${verdict.summary}` +
+          (verdict.minor.length ? `\nMinor notes it left: ${verdict.minor.slice(0, 4).join('; ')}` : '');
+        return { outcome: 'agreed', report, filesChanged, note };
+      }
+      const issues = verdict.blocking.slice(0, 5);
+      this.#activity('master', taskId, `round ${round}: ${reviewerLabel} found ${issues.length} blocking issue${issues.length === 1 ? '' : 's'} — ${issues.join('; ').slice(0, 220)}`);
+      if (round >= latest.maxRounds || verdict.unreadable) {
+        const choice = await this.#askPairDecision(taskId, team, authorLabel, reviewerLabel, issues, round, !!verdict.unreadable);
+        if (choice === 'stopped') return { outcome: 'stopped', report, filesChanged, note: '' };
+        if (choice === 'accept') {
+          this.#patchTask(taskId, { pair: { ...(this.#bus.state.tasks[taskId]?.pair ?? latest), state: 'disagreed' } });
+          this.#activity('master', taskId, 'going with the current version at your call');
+          return {
+            outcome: 'accepted',
+            report,
+            filesChanged,
+            note: `Second opinion: ${reviewerLabel} still had open points after ${round} rounds; the owner chose to go with this version. Open points: ${issues.join('; ')}`,
+          };
+        }
+        if (choice === 'leave') return { outcome: 'left', report, filesChanged, note: `Open points: ${issues.join('; ')}` };
+        const current = this.#bus.state.tasks[taskId]?.pair ?? latest;
+        this.#patchTask(taskId, { pair: { ...current, maxRounds: current.maxRounds + 2 } });
+        this.#activity('master', taskId, 'two more rounds, at your call');
+        // Nothing for the author to fix when the review itself was unreadable.
+        if (verdict.unreadable) continue;
+      }
+      // The author fixes in its own conversation (with anything the owner
+      // sent while the reviewer was looking).
+      this.#patchTask(taskId, { status: 'in_flight' });
+      const session = this.#bus.state.tasks[taskId]?.session;
+      const owner = this.#followUps.get(taskId) ?? [];
+      this.#followUps.delete(taskId);
+      const fix = await ctx.runAuthor(
+        `A reviewer (${reviewerLabel}, another model) checked your work and found blocking issues:\n` +
+          `${issues.map((issue) => `- ${issue}`).join('\n')}\n` +
+          (verdict.minor.length ? `Minor notes (optional): ${verdict.minor.slice(0, 5).join('; ')}\n` : '') +
+          (owner.length ? `The owner also said: ${owner.join('\n')}\n` : '') +
+          'Fix the blocking issues (or, if one is wrong, explain exactly why), then report what you changed.',
+        session && session.engine === ctx.workerSpec.engine ? session.id : undefined,
+      );
+      report = fix.synopsis;
+      filesChanged = filesChanged || !!fix.filesChanged;
+    }
+  }
+
+  // One review: a read-only worker on the reviewer's engine, its own
+  // conversation across rounds, visible in the office as "Reviewer X-n".
+  async #reviewRound(
+    ctx: {
+      taskId: string;
+      team: Team;
+      project: Project;
+      scope: { cwd: string; extraDirs: string[]; locked: LockedDir };
+      controller: AbortController;
+    },
+    reviewerSpec: ModelSpec,
+    report: string,
+    round: number,
+  ): Promise<PairVerdict & { unreadable?: boolean }> {
+    const { taskId, team } = ctx;
+    const task = this.#bus.state.tasks[taskId];
+    const number = (this.#workerCounters.get(`${team.id}-review`) ?? 0) + 1;
+    this.#workerCounters.set(`${team.id}-review`, number);
+    const reviewerId = `${team.id}-r${number}`;
+    this.#publishAgent({
+      id: reviewerId,
+      name: `Reviewer ${(team.name[0] ?? 'X').toUpperCase()}-${number}`,
+      role: 'worker',
+      teamId: team.id,
+      status: 'working',
+      activity: `reviewing round ${round}`,
+      model: reviewerSpec.tier,
+      modelId: reviewerSpec.id,
+      taskId,
+      tokensUsed: 0,
+      updatedAt: now(),
+    });
+    const previous = task?.pair?.reviewerSession;
+    const resume = previous && previous.engine === reviewerSpec.engine ? previous.id : undefined;
+    const verdictFormat =
+      'Reply with ONLY JSON: {"agree": true|false, "blocking": ["<issue that must be fixed>"], "minor": ["<optional suggestion>"], "summary": "<one sentence>"}. ' +
+      '"agree" is true only when no blocking issue remains. Blocking = wrong, broken, missing what was asked, or unsafe — not style.';
+    // Text work (no shell team): the report IS the product, so it's reviewed
+    // in full against the ask; anything else is checked in the project itself.
+    const textWork = !team.allowedTools.includes('bash');
+    const shown = report.slice(0, textWork ? 12_000 : 4000);
+    const prompt = resume
+      ? `The author revised the work. Their new report:\n${shown}\n\n` +
+        (textWork ? 'Check the revised work against the ask again. ' : "Check the ACTUAL current state of the project again (don't trust the report). ") +
+        verdictFormat
+      : `${task?.detail ?? ''}\n\n---\nYou are the reviewer (a second opinion from a different model). Another AI worker did the task above. ` +
+        (textWork
+          ? `Their work:\n${shown}\n\nCheck it against what was asked: accuracy, completeness, anything missing or wrong. `
+          : `Their report:\n${shown}\n\nInspect the ACTUAL result in the project (git diff/status, the files, run read-only checks) — don't trust the report. `) +
+        `You may read and run checks but must not change anything. ${verdictFormat}`;
+    let lastTotal = 0;
+    let reviewerTokens = 0;
+    const review = (text: string, resumeId?: string) => {
+      lastTotal = 0; // each engine run counts from zero
+      return this.#engine.runWorker({
+        prompt: text,
+        title: `review: ${task?.title ?? taskId}`,
+        team,
+        model: reviewerSpec,
+        cwd: ctx.scope.cwd,
+        extraDirs: ctx.scope.extraDirs,
+        locked: ctx.scope.locked,
+        maxSubagents: 0,
+        readOnly: true,
+        ...(resumeId ? { resumeSessionId: resumeId } : {}),
+        signal: ctx.controller.signal,
+        callbacks: {
+          onSession: (id) => {
+            const pair = this.#bus.state.tasks[taskId]?.pair;
+            if (pair) this.#patchTask(taskId, { pair: { ...pair, reviewerSession: { engine: reviewerSpec.engine, id } } });
+          },
+          onTranscript: (row) => this.#row(taskId, { ...row, role: 'worker', agentId: reviewerId }),
+          onActivity: (message) => {
+            this.#patchAgent(reviewerId, { status: 'working', activity: message.slice(0, 90) });
+            this.#activity(reviewerId, taskId, message);
+          },
+          onTokens: (total) => {
+            const delta = total - lastTotal;
+            lastTotal = total;
+            reviewerTokens += delta;
+            this.#patchAgent(reviewerId, { tokensUsed: reviewerTokens });
+            const current = this.#bus.state.tasks[taskId];
+            if (current) this.#patchTask(taskId, { tokensUsed: current.tokensUsed + delta });
+            this.#recordTokens(reviewerSpec.tier, delta);
+            const ledger = this.#projects.addTokens(ctx.project.id, delta);
+            if (ledger) this.#bus.publish({ type: 'project.updated', project: ledger.project });
+          },
+          onPermission: ({ toolName, command, reason }) => {
+            const verdict = evaluatePermission(toolName, command, this.#policy.mode, ctx.scope);
+            if (verdict.decision === 'allow') return Promise.resolve('approve' as const);
+            return this.#raisePermission(taskId, reviewerId, team, toolName, command, reason, verdict.flags);
+          },
+        },
+      });
+    };
+    try {
+      let verdict = parseVerdict((await review(prompt, resume)).synopsis);
+      // No readable verdict: ask once more (same conversation when possible).
+      if (!verdict && !ctx.controller.signal.aborted) {
+        const session = this.#bus.state.tasks[taskId]?.pair?.reviewerSession;
+        const again = session && session.engine === reviewerSpec.engine ? session.id : undefined;
+        verdict = parseVerdict((await review(again ? `Your reply had no readable verdict. ${verdictFormat}` : prompt, again)).synopsis);
+      }
+      return verdict ?? { agree: false, blocking: ['The reviewer gave no readable verdict.'], minor: [], summary: 'no readable verdict', unreadable: true };
+    } finally {
+      this.#retireWorker(reviewerId);
+    }
+  }
+
+  // The round cap: the owner decides — go with it, two more rounds, or stop.
+  async #askPairDecision(
+    taskId: string,
+    team: Team,
+    authorLabel: string,
+    reviewerLabel: string,
+    issues: string[],
+    round: number,
+    unreadable = false,
+  ): Promise<'accept' | 'more' | 'leave' | 'stopped'> {
+    const requestId = `pair-${taskId}-${round}`;
+    const title = this.#bus.state.tasks[taskId]?.title ?? 'this task';
+    this.#bus.publish({
+      type: 'permission.updated',
+      request: {
+        id: requestId,
+        taskId,
+        agentId: 'master',
+        teamId: team.id,
+        command: issues.map((issue) => `- ${issue}`).join('\n') || '(no details)',
+        summary: unreadable
+          ? `${reviewerLabel} gave no readable verdict on "${title.slice(0, 60)}" (asked twice). ` +
+            `Go with ${authorLabel}'s version as it is, give the review two more rounds, or stop and decide yourself (None)?`
+          : `${authorLabel} and ${reviewerLabel} still disagree after ${round} round${round === 1 ? '' : 's'} on "${title.slice(0, 60)}": ` +
+            `${issues.slice(0, 3).join('; ').slice(0, 220)}. Go with the current version, give them two more rounds, or stop and decide yourself (None)?`,
+        options: ['Go with it as it is', 'Two more rounds'],
+        flags: [unreadable ? 'no readable review' : 'pair disagreement'],
+        reason: unreadable ? 'The reviewer never gave a readable verdict.' : `Reviewer's open points after ${round} round${round === 1 ? '' : 's'}.`,
+        status: 'pending',
+        scope: 'once',
+        requestedAt: now(),
+        resolvedAt: null,
+      },
+    });
+    this.#patchTask(taskId, { status: 'awaiting_permission' });
+    const { decision, choice } = await new Promise<{ decision: 'approve' | 'deny'; choice?: number }>((resolve) =>
+      this.#pendingResolvers.set(requestId, (decision, choice) => resolve({ decision, choice })),
+    );
+    if (this.#bus.state.permissions[requestId]?.status === 'expired') return 'stopped';
+    if (this.#bus.state.tasks[taskId]?.status === 'awaiting_permission') this.#patchTask(taskId, { status: 'in_flight' });
+    if (decision !== 'approve') return 'leave';
+    return choice === 1 ? 'more' : 'accept';
+  }
+
+  // The owner talks to a finished pair task through its chair (the lead):
+  // a question is answered from both sides' work; a change request goes to
+  // the author, and the reviewer checks again.
+  async #chairReply(taskId: string, team: Team, message: string): Promise<void> {
+    const task = this.#bus.state.tasks[taskId];
+    if (!task?.pair) return;
+    const spec = this.#leadSpec(team);
+    this.#patchAgent(`${team.id}-lead`, { status: 'working', activity: 'reading your message', taskId });
+    const rounds = task.pair.rounds
+      .map((r) => `Round ${r.round}: author reported "${r.author.slice(0, 600)}" — reviewer: ${r.agree ? 'AGREED' : `blocking: ${r.blocking.join('; ')}`} (${r.summary})`)
+      .join('\n');
+    const prompt = [
+      `You chair a pair task on the ${team.name}: one AI worker did the work, a second model reviewed it. You speak for both to the owner.`,
+      `Task: ${task.title}`,
+      `What was asked: ${task.detail.slice(0, 1500)}`,
+      `The rounds so far:\n${rounds || '(none)'}`,
+      `Current report to the owner: ${(task.synopsis ?? '').slice(0, 1500)}`,
+      '',
+      `The owner now says: "${message.slice(0, 2000)}"`,
+      '',
+      'If this is a question you can answer from the above, answer it (plain, short). If the owner wants something changed or done, hand it to the author.',
+      'Reply with ONLY JSON: {"action": "answer", "reply": "<your answer>"} or {"action": "work", "instruction": "<what the author must do, in the owner\'s terms>"}',
+    ].join('\n');
+    let action: { action?: string; reply?: string; instruction?: string } = {};
+    try {
+      const { text, tokens } = await this.#engine.complete({ prompt, model: spec });
+      this.#recordTokens(spec.tier, tokens);
+      action = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? '{}') as typeof action;
+    } catch {
+      action = {};
+    }
+    this.#patchAgent(`${team.id}-lead`, { status: 'idle', activity: 'standing by', taskId: null });
+    if (action.action === 'answer' && action.reply) {
+      this.#row(taskId, { role: 'lead', agentId: `${team.id}-lead`, kind: 'message', text: action.reply });
+      return;
+    }
+    // A change request (or an unclear one): the author works, the reviewer re-checks.
+    const instruction = action.instruction?.trim() || message;
+    const pair = task.pair;
+    this.#patchTask(taskId, { pair: { ...pair, maxRounds: pair.round + 3, state: 'working' } });
+    this.#followUps.set(taskId, [instruction]);
+    this.#activity(`${team.id}-lead`, taskId, `handing it to the author: ${instruction.slice(0, 80)}`);
+    this.#continueTask(taskId);
   }
 
   // --- stuck tasks ------------------------------------------------------
@@ -2250,8 +2655,9 @@ export class Orchestrator implements CommandHandlers {
     });
     // Master cards — the project question and project switch (intake waits
     // and sets the task's status and project itself), rule conflicts (the
-    // run records the answer and restores the task's status), stuck tasks.
-    if (['route-', 'project-', 'rules-', 'stuck-'].some((prefix) => requestId.startsWith(prefix))) {
+    // run records the answer and restores the task's status), stuck tasks,
+    // pair disagreements.
+    if (['route-', 'project-', 'rules-', 'stuck-', 'pair-'].some((prefix) => requestId.startsWith(prefix))) {
       const resolve = this.#pendingResolvers.get(requestId);
       this.#pendingResolvers.delete(requestId);
       resolve?.(decision, request.options ? choice : undefined);
@@ -2560,6 +2966,22 @@ export class Orchestrator implements CommandHandlers {
 
   #workerSpec(team: Team): ModelSpec {
     return resolveModel(team.workerModel, this.#models.teams[team.id]?.worker, this.#models.worker);
+  }
+
+  // A new task's pair state: the owner's explicit choice, else the team's
+  // "pair by default" setting.
+  #pairFor(team: Team, pairChoice?: boolean): NonNullable<Task['pair']> | null {
+    const on = pairChoice ?? !!this.#models.teams[team.id]?.pairByDefault;
+    return on ? { mode: 'review', maxRounds: PAIR_ROUNDS, round: 0, state: 'working', rounds: [] } : null;
+  }
+
+  // Pair mode's reviewer: the owner's choice (per team > all reviewers), else
+  // the other engine's flagship — a second opinion from another model family.
+  // Read-only, so Codex may review even in Agent HQ's own project.
+  #reviewerSpec(team: Team, workerSpec: ModelSpec): ModelSpec {
+    return resolveModel(workerSpec.engine === 'codex' ? 'opus' : 'codex', this.#models.teams[team.id]?.reviewer, this.#models.reviewer, {
+      model: PAIR_REVIEWER_DEFAULT[workerSpec.engine],
+    });
   }
 
   setModels(overrides: ModelOverrides): void {

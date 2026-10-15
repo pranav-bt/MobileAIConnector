@@ -1008,6 +1008,7 @@ private fun TasksTab(snapshot: Snapshot, connected: Boolean, onSubmitTask: (Stri
         .sortedByDescending { it.updatedAt }
     val parked = snapshot.tasks.filter { (it.status == "paused" || it.status == "failed") && it.parentTaskId == null }.sortedByDescending { it.updatedAt }.take(5)
     var composer by remember { mutableStateOf("") }
+    var pair by remember { mutableStateOf(false) }
 
     val context = androidx.compose.ui.platform.LocalContext.current
     val hub = dev.neureal.agenthq.net.HubHolder.get(context.applicationContext)
@@ -1051,18 +1052,28 @@ private fun TasksTab(snapshot: Snapshot, connected: Boolean, onSubmitTask: (Stri
                 ),
             )
             Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = {
-                    if (composer.isNotBlank()) {
-                        onSubmitTask(composer.trim())
-                        composer = ""
-                    }
-                },
-                enabled = connected && composer.isNotBlank(),
-                modifier = Modifier.fillMaxWidth().height(46.dp),
-                shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = HQ.accentSolid, contentColor = HQ.accentInk),
-            ) { Text("Send to master", fontSize = 13.5.sp, fontWeight = FontWeight.Bold) }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                // One-shot pair mode: the hub reads the "/pair " prefix.
+                OutlinedButton(
+                    onClick = { pair = !pair },
+                    modifier = Modifier.height(46.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, if (pair) HQ.accent else HQ.line),
+                ) { Text(if (pair) "Pair ✓" else "Pair", color = if (pair) HQ.accent else HQ.muted, fontSize = 12.sp) }
+                Button(
+                    onClick = {
+                        if (composer.isNotBlank()) {
+                            onSubmitTask(if (pair) "/pair ${composer.trim()}" else composer.trim())
+                            composer = ""
+                            pair = false
+                        }
+                    },
+                    enabled = connected && composer.isNotBlank(),
+                    modifier = Modifier.weight(1f).height(46.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = HQ.accentSolid, contentColor = HQ.accentInk),
+                ) { Text("Send to master", fontSize = 13.5.sp, fontWeight = FontWeight.Bold) }
+            }
         }
 
         item { SectionLabel(if (active.isEmpty()) "Nothing in flight" else "In flight · ${active.size}") }

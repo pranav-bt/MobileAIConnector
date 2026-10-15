@@ -30,6 +30,9 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     type: z.literal('task.submit'),
     text: z.string().min(1),
     projectId: z.string().nullable().optional(),
+    // Pair mode for this task (true) or solo (false); omitted = the team's
+    // default. "/pair " and "/solo " prefixes on the text do the same.
+    pair: z.boolean().optional(),
   }),
   z.object({
     type: z.literal('task.stop'),

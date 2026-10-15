@@ -5,7 +5,8 @@ import type { ClientCommand, ModelOverrides, ModelTier } from '@agent-hq/shared'
 // Security commands (pairing.*, device.revoke, connection.kill) never reach
 // these handlers — the server routes them to the SecurityController.
 export interface CommandHandlers {
-  submitTask(text: string, projectId: string | null): void;
+  // pair: true/false forces pair mode on/off; omitted = the team's default.
+  submitTask(text: string, projectId: string | null, pair?: boolean): void;
   stopTask(taskId: string): void;
   // Task console: talk to a task (the demo hub has no consoles).
   messageTask?(taskId: string, text: string): void;
@@ -53,7 +54,7 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
     case 'hello':
       return; // connection bookkeeping happens in the server
     case 'task.submit':
-      return handlers.submitTask(command.text, command.projectId ?? null);
+      return handlers.submitTask(command.text, command.projectId ?? null, command.pair);
     case 'task.stop':
       return handlers.stopTask(command.taskId);
     case 'task.message':

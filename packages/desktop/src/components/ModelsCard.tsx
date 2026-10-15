@@ -1,5 +1,5 @@
-import type { ClientCommand, EffortLevel, HubState, ModelChoice, ModelOverrides, ModelTier } from '@agent-hq/shared';
-import { MODEL_CATALOG, MODEL_DEFAULTS, MODEL_IDS, catalogModel } from '@agent-hq/shared';
+import type { ClientCommand, EffortLevel, HubState, ModelChoice, ModelOverrides, Team } from '@agent-hq/shared';
+import { MODEL_CATALOG, MODEL_DEFAULTS, MODEL_IDS, PAIR_REVIEWER_DEFAULT, catalogModel } from '@agent-hq/shared';
 
 // Owner's model + effort choices. Every dropdown has a "Default" option that
 // clears just that one choice; "Reset all" clears them all. The hub keeps
@@ -21,8 +21,9 @@ const ENGINE_GROUPS = [
 ] as const;
 const modelLabel = (id: string): string => catalogModel(id)?.label ?? id;
 
-type Role = 'master' | 'checks' | 'lead' | 'worker';
-type Seat = 'lead' | 'worker';
+type Role = 'master' | 'checks' | 'lead' | 'worker' | 'reviewer';
+type Seat = 'lead' | 'worker' | 'reviewer';
+const ALL_NAMES: Record<Seat, string> = { lead: 'all leads', worker: 'all workers', reviewer: 'all reviewers' };
 
 const selectStyle = (custom: boolean, minWidth: number, disabled = false): React.CSSProperties => ({
   background: 'var(--panel-2)',
@@ -111,12 +112,16 @@ export function ModelsCard(props: { state: HubState; send: (command: ClientComma
     overrides.checks,
     overrides.lead,
     overrides.worker,
-    ...Object.values(overrides.teams).flatMap((choice) => [choice.lead, choice.worker]),
+    overrides.reviewer,
+    ...Object.values(overrides.teams).flatMap((choice) => [choice.lead, choice.worker, choice.reviewer]),
   ];
-  const customCount = allChoices.reduce((sum, c) => sum + (c?.model ? 1 : 0) + (c?.effort ? 1 : 0), 0);
+  const pairDefaults = Object.values(overrides.teams).filter((choice) => choice.pairByDefault).length;
+  const customCount = allChoices.reduce((sum, c) => sum + (c?.model ? 1 : 0) + (c?.effort ? 1 : 0), 0) + pairDefaults;
 
   const apply = (next: ModelOverrides): void => {
-    const cleanTeams = Object.fromEntries(Object.entries(next.teams).filter(([, choice]) => choice.lead || choice.worker));
+    const cleanTeams = Object.fromEntries(
+      Object.entries(next.teams).filter(([, choice]) => choice.lead || choice.worker || choice.reviewer || choice.pairByDefault),
+    );
     props.send({ type: 'models.set', overrides: { ...next, teams: cleanTeams } });
   };
 
@@ -134,6 +139,23 @@ export function ModelsCard(props: { state: HubState; send: (command: ClientComma
     if (choice) entry[seat] = choice;
     else delete entry[seat];
     apply({ ...overrides, teams: { ...overrides.teams, [teamId]: entry } });
+  };
+
+  const setPairDefault = (teamId: string, on: boolean): void => {
+    const entry = { ...(overrides.teams[teamId] ?? {}) };
+    if (on) entry.pairByDefault = true;
+    else delete entry.pairByDefault;
+    apply({ ...overrides, teams: { ...overrides.teams, [teamId]: entry } });
+  };
+
+  // What a team's seat runs on when nothing is picked for it: the team's own
+  // tier for lead/worker; for the pair reviewer, the other engine's flagship
+  // from whatever the worker resolves to.
+  const seatFallback = (team: Team, seat: Seat): string => {
+    if (seat === 'lead') return MODEL_IDS[team.leadModel];
+    if (seat === 'worker') return MODEL_IDS[team.workerModel];
+    const workerId = overrides.teams[team.id]?.worker?.model ?? overrides.worker?.model ?? MODEL_IDS[team.workerModel];
+    return PAIR_REVIEWER_DEFAULT[catalogModel(workerId)?.engine ?? 'claude'];
   };
 
   // Master / quick checks: fixed built-in default model.
@@ -156,12 +178,12 @@ export function ModelsCard(props: { state: HubState; send: (command: ClientComma
   };
 
   // All leads / all workers: defaults vary per team.
-  const allRoleControls = (role: 'lead' | 'worker'): JSX.Element => {
+  const allRoleControls = (role: Seat): JSX.Element => {
     const choice = overrides[role];
     const entry = choice?.model ? catalogModel(choice.model) : undefined;
     return (
       <div style={{ display: 'flex', gap: 6 }}>
-        <ModelSelect value={choice?.model} defaultLabel="per team" onChange={(v) => setRole(role, 'model', v)} />
+        <ModelSelect value={choice?.model} defaultLabel={role === 'reviewer' ? 'the other engine' : 'per team'} onChange={(v) => setRole(role, 'model', v)} />
         <EffortSelect
           value={choice?.effort}
           efforts={entry?.efforts ?? ALL_EFFORTS}
@@ -174,11 +196,12 @@ export function ModelsCard(props: { state: HubState; send: (command: ClientComma
   };
 
   // One per-team seat: "Default" shows what it resolves to right now.
-  const seatControls = (teamId: string, seat: Seat, teamDefault: ModelTier): JSX.Element[] => {
+  const seatControls = (team: Team, seat: Seat): JSX.Element[] => {
+    const teamId = team.id;
     const choice = overrides.teams[teamId]?.[seat];
     const all = overrides[seat];
-    const allName = seat === 'lead' ? 'all leads' : 'all workers';
-    const inheritedId = all?.model ?? MODEL_IDS[teamDefault];
+    const allName = ALL_NAMES[seat];
+    const inheritedId = all?.model ?? seatFallback(team, seat);
     const entry = catalogModel(choice?.model ?? inheritedId);
     const effortDefault =
       all?.effort && entry?.efforts.includes(all.effort)
@@ -213,6 +236,15 @@ export function ModelsCard(props: { state: HubState; send: (command: ClientComma
       {controls}
     </div>
   );
+
+  const gridStyle: React.CSSProperties = {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(150px, 1fr) auto auto auto auto',
+    columnGap: 8,
+    rowGap: 7,
+    marginTop: 8,
+    alignItems: 'center',
+  };
 
   const header = (text: string): JSX.Element => (
     <span className="act" style={{ color: 'var(--faint)' }}>{text}</span>
@@ -249,7 +281,9 @@ export function ModelsCard(props: { state: HubState; send: (command: ClientComma
         level that model runs at when none is set. Custom picks are highlighted and apply to work that starts from
         now (running tasks finish on what they started with). Any seat can be a Claude or a Codex model; Codex runs
         on your ChatGPT plan (its limits are on the Resources page). Codex workers don't run in Agent HQ's own
-        project yet — there they use the team's Claude model.
+        project yet — there they use the team's Claude model. Pair mode (the Pair button, /pair, or a team's Pair
+        box below): the worker does the task, a reviewer on the other engine checks the actual result read-only, and
+        they go round until it agrees — the team lead chairs and answers you for both.
       </div>
 
       <div style={{ marginTop: 4 }}>
@@ -257,19 +291,11 @@ export function ModelsCard(props: { state: HubState; send: (command: ClientComma
         {roleRow('Master: quick checks', 'handovers between teams, QA pass/fail verdicts, whether a big build splits, and the plain-English explanation on every approval card', fixedRoleControls('checks'))}
         {roleRow('All team leads', 'review every finished report into the synopsis (not the parallel parts of a split)', allRoleControls('lead'))}
         {roleRow('All workers', 'do the actual work', allRoleControls('worker'))}
+        {roleRow('All pair reviewers', 'pair mode: check the worker\'s actual result (read-only) until they agree — default is the other engine from the worker', allRoleControls('reviewer'))}
       </div>
 
       <div className="sect" style={{ marginTop: 18 }}>Per team (overrides All team leads / All workers)</div>
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'minmax(150px, 1fr) auto auto auto auto',
-          columnGap: 8,
-          rowGap: 7,
-          marginTop: 8,
-          alignItems: 'center',
-        }}
-      >
+      <div style={gridStyle}>
         {header('team')}
         {header('lead model')}
         {header('lead effort')}
@@ -277,8 +303,30 @@ export function ModelsCard(props: { state: HubState; send: (command: ClientComma
         {header('worker effort')}
         {teams.map((team) => [
           <span key={`${team.id}-name`} style={{ fontSize: 12.5, color: 'var(--text-2)' }}>{team.name}</span>,
-          ...seatControls(team.id, 'lead', team.leadModel),
-          ...seatControls(team.id, 'worker', team.workerModel),
+          ...seatControls(team, 'lead'),
+          ...seatControls(team, 'worker'),
+        ])}
+      </div>
+
+      <div className="sect" style={{ marginTop: 18 }}>Pair mode per team (overrides All pair reviewers)</div>
+      <div style={{ ...gridStyle, gridTemplateColumns: 'minmax(150px, 1fr) auto auto auto' }}>
+        {header('team')}
+        {header('reviewer model')}
+        {header('reviewer effort')}
+        {header('pair by default')}
+        {teams.map((team) => [
+          <span key={`${team.id}-pname`} style={{ fontSize: 12.5, color: 'var(--text-2)' }}>{team.name}</span>,
+          ...seatControls(team, 'reviewer'),
+          <label key={`${team.id}-pair`} className="act" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', color: 'var(--text-2)' }}>
+            <input
+              type="checkbox"
+              checked={!!overrides.teams[team.id]?.pairByDefault}
+              title={`Pair by default: every ${team.name} task gets a second-opinion reviewer (/solo skips it for one task)`}
+              aria-label={`${team.name}: pair by default`}
+              onChange={(event) => setPairDefault(team.id, event.target.checked)}
+            />
+            {overrides.teams[team.id]?.pairByDefault ? 'on' : 'off'}
+          </label>,
         ])}
       </div>
     </div>

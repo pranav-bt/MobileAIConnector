@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { catalogModel, type ClientCommand, type HubState, type TranscriptEntry } from '@agent-hq/shared';
+import { catalogModel, parseVerdict, type ClientCommand, type HubState, type Task, type TranscriptEntry } from '@agent-hq/shared';
 import { useTranscript } from '../hub';
 import { TASK_STATUS_LABELS, formatTokens } from '../status';
 import { ApprovalCard } from './TodayPanel';
@@ -17,9 +17,67 @@ const roleLabel = (state: HubState, entry: TranscriptEntry): string => {
   if (entry.role === 'owner') return 'You';
   if (entry.role === 'lead') return state.agents[entry.agentId ?? '']?.name ?? 'Lead';
   if (entry.role === 'master') return 'Master';
-  if (entry.role === 'worker') return state.agents[entry.agentId ?? '']?.name ?? 'Worker';
+  if (entry.role === 'worker') return state.agents[entry.agentId ?? '']?.name ?? (isReviewer(entry) ? 'Reviewer' : 'Worker');
   return 'Agent HQ';
 };
+
+// Pair mode's reviewer seat ("<team>-r<n>").
+const isReviewer = (entry: TranscriptEntry): boolean => /-r\d+$/.test(entry.agentId ?? '');
+
+const PAIR_STATE: Record<string, { label: string; color: string }> = {
+  working: { label: 'author working', color: 'var(--amber)' },
+  reviewing: { label: 'reviewer checking', color: 'var(--amber)' },
+  agreed: { label: 'agreed', color: 'var(--green)' },
+  disagreed: { label: 'went with it — still disagreed', color: 'var(--amber)' },
+};
+
+// "Pair · round 2/3 · Opus 5.5 ⇄ GPT-6.1-Sol · agreed on a1b2c3d4"
+function PairLine(props: { task: Task; authorModel: string | null }): JSX.Element | null {
+  const pair = props.task.pair;
+  if (!pair) return null;
+  const state = PAIR_STATE[pair.state ?? 'working'] ?? PAIR_STATE.working!;
+  const reviewer = pair.reviewerModel ? catalogModel(pair.reviewerModel)?.label ?? pair.reviewerModel : 'the other engine';
+  const author = pair.authorModel ? catalogModel(pair.authorModel)?.label ?? pair.authorModel : props.authorModel ?? 'author';
+  const agreedOn = pair.state === 'agreed' ? pair.rounds.at(-1)?.version : undefined;
+  return (
+    <div className="act" style={{ marginTop: 2 }} title="Pair mode: the author does the work, the reviewer checks the actual result (read-only) until it agrees; the lead chairs">
+      <span style={{ color: 'var(--accent)' }}>Pair</span> · round {pair.round}/{pair.maxRounds} · {author} ⇄ {reviewer} ·{' '}
+      <span style={{ color: state.color }}>{state.label}</span>
+      {agreedOn ? <span className="mono"> on {agreedOn}</span> : null}
+    </div>
+  );
+}
+
+// A reviewer's reply, shown as its verdict (the raw text stays one click away).
+function VerdictBody(props: { text: string }): JSX.Element {
+  const verdict = parseVerdict(props.text);
+  const [raw, setRaw] = useState(false);
+  if (!verdict || raw) {
+    return <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--text)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{props.text}</div>;
+  }
+  return (
+    <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--text)' }}>
+      <div>
+        <span style={{ color: verdict.agree ? 'var(--green)' : 'var(--amber)', fontWeight: 600 }}>{verdict.agree ? '✓ Agrees' : '✗ Not yet'}</span> — {verdict.summary}
+      </div>
+      {verdict.blocking.length > 0 && (
+        <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+          {verdict.blocking.map((issue, index) => (
+            <li key={index}>{issue}</li>
+          ))}
+        </ul>
+      )}
+      {verdict.minor.length > 0 && (
+        <div className="act" style={{ marginTop: 4, color: 'var(--faint)' }}>
+          minor: {verdict.minor.join(' · ')}
+        </div>
+      )}
+      <div className="act" style={{ marginTop: 4, color: 'var(--ghost)', cursor: 'pointer' }} onClick={() => setRaw(true)}>
+        show reply
+      </div>
+    </div>
+  );
+}
 
 const stateMark = (entry: TranscriptEntry) =>
   entry.state === 'running' ? { mark: '●', color: 'var(--amber)' } : entry.state === 'error' ? { mark: '✗', color: 'var(--red)' } : { mark: '✓', color: 'var(--green)' };
@@ -111,7 +169,11 @@ function Row(props: { state: HubState; entry: TranscriptEntry; send: (command: C
           {roleLabel(state, entry)}
           {entry.role === 'lead' ? ' · review' : ''} · {time}
         </div>
-        <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--text)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{entry.text}</div>
+        {isReviewer(entry) ? (
+          <VerdictBody text={entry.text} />
+        ) : (
+          <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--text)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{entry.text}</div>
+        )}
       </div>
     </div>
   );
@@ -164,7 +226,8 @@ export function TaskConsole(props: {
   const status = TASK_STATUS_LABELS[task.status] ?? { label: task.status, color: 'var(--muted)' };
   const team = task.teamId ? state.teams[task.teamId]?.name ?? task.teamId : 'unrouted';
   const project = task.projectId ? state.projects[task.projectId]?.name ?? task.projectId : null;
-  const worker = Object.values(state.agents).find((agent) => agent.taskId === taskId && agent.role === 'worker');
+  const workers = Object.values(state.agents).filter((agent) => agent.taskId === taskId && agent.role === 'worker');
+  const worker = workers.find((agent) => !/-r\d+$/.test(agent.id)) ?? workers[0];
   const model = worker?.modelId ? catalogModel(worker.modelId)?.label ?? worker.modelId : task.session ? (task.session.engine === 'codex' ? 'Codex' : 'Claude') : null;
   const running = RUNNING.includes(task.status);
   const canSend = !!task.teamId;
@@ -173,7 +236,9 @@ export function TaskConsole(props: {
     : running
       ? 'Message the worker — it reads it at its next step'
       : ['done', 'failed', 'paused'].includes(task.status)
-        ? task.session
+        ? task.pair
+          ? 'Ask the chair (the lead) — a question gets an answer; a change goes back to the pair'
+          : task.session
           ? 'Continue this task — same conversation, it remembers'
           : 'Continue this task (starts a new run with its history)'
         : 'Add to the brief — the worker gets it when it starts';
@@ -195,6 +260,7 @@ export function TaskConsole(props: {
             {project ? ` · ${project}` : ''}
             {model ? ` · ${model}` : ''} · {formatTokens(task.tokensUsed)} tokens
           </div>
+          <PairLine task={task} authorModel={model} />
         </div>
         {STOPPABLE.includes(task.status) && (
           <button className="console-btn danger" onClick={() => send({ type: 'task.stop', taskId })} title="Stop — the conversation is kept; send a message to pick it up again">
@@ -235,11 +301,14 @@ export function TaskConsole(props: {
         {view.entries.map((entry) => (
           <Row key={entry.id} state={state} entry={entry} send={send} onOpenTask={props.onOpenTask} />
         ))}
-        {running && worker && (
-          <div className="act" style={{ margin: '8px 0', color: 'var(--accent)' }}>
-            {worker.name} · {worker.activity}
-          </div>
-        )}
+        {running &&
+          workers
+            .filter((agent) => agent.status === 'working' || workers.length === 1)
+            .map((agent) => (
+              <div key={agent.id} className="act" style={{ margin: '8px 0', color: 'var(--accent)' }}>
+                {agent.name} · {agent.activity}
+              </div>
+            ))}
       </div>
 
       <div className="console-compose">

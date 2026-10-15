@@ -43,6 +43,20 @@ class ConsoleProtocolTest {
         assertEquals("thread-9", task.session?.id)
         val old = json.decodeFromString<Task>("""{"id":"t-0","title":"y","status":"done"}""")
         assertEquals(null, old.session)
+        assertEquals(null, old.pair)
+    }
+
+    @Test
+    fun parsesTaskPair() {
+        val task = json.decodeFromString<Task>(
+            """{"id":"t-3","title":"z","status":"in_flight","pair":{"mode":"review","maxRounds":5,"round":2,"state":"reviewing",""" +
+                """"rounds":[{"round":1,"author":"a","agree":false,"blocking":["b"],"minor":[],"summary":"s","version":"abcd1234"}],""" +
+                """"reviewerSession":{"engine":"codex","id":"th"},"reviewerModel":"gpt-6.1-sol"}}""",
+        )
+        assertEquals(2, task.pair?.round)
+        assertEquals(5, task.pair?.maxRounds)
+        assertEquals("reviewing", task.pair?.state)
+        assertEquals("gpt-6.1-sol", task.pair?.reviewerModel)
     }
 
     @Test

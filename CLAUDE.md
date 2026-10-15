@@ -196,7 +196,8 @@ npm run typecheck      # tsc across workspaces
   workspace: `LockedDir` (util.ts) — Write/Edit refused by the engine
   (`refusedWrite`), shell writes raise a card ("writes Agent HQ's own data").
   Open: `data/art`, inbox/outbox, and `data/pa` for the PA team.
-- Composer slash-commands (parsed client-side, deterministic): /team add
+- Composer slash-commands (parsed client-side, deterministic): /pair <task> ·
+  /solo <task> (also read by the hub, so the phone just prefixes) · /team add
   <name>: <charter> · /team workers <team> <n> · /team remove <team> ·
   /rule <team>[/<section>]: <rule> (team "master" = the master's rules) ·
   /project add <name> <path> [description] · /project remove <project>.
@@ -261,6 +262,27 @@ npm run typecheck      # tsc across workspaces
   `probe-codex-models.ts --live` (refresh the catalog after a Codex update),
   `mixed-seats.live` (master Fable, lead Opus 5.5, workers GPT-6.1-Sol), and
   the decision tests take `--model gpt-6.1-sol`.
+- Pair mode v1 (second opinion), OFF by default: per task via the composer's
+  Pair button / `task.submit` `pair` flag / `/pair <task>` (`/solo` forces
+  one worker), or per team via `pairByDefault` in `modelOverrides.teams`.
+  The worker seat is the AUTHOR; a REVIEWER seat (`reviewer` in model
+  overrides, all + per team; default = the other engine's flagship from the
+  author's: Claude author → GPT-6.1-Sol, Codex author → Opus 5.5) runs
+  read-only (`runWorker({ readOnly })`: Claude loses the write tools and shell
+  writes are denied; Codex gets a read-only sandbox and declines edits) and
+  replies with a JSON verdict (`parseVerdict` in shared: the last object with
+  a boolean `agree`; agree + blocking ≠ agreement). Blocking issues go back
+  to the author's SAME conversation; the reviewer keeps its own
+  (`pair.reviewerSession`). Agreement names a version (`workVersion`: git
+  diff + untracked files hash). After `PAIR_ROUNDS` (3) a `pair-<task>-<n>`
+  pick-one card asks: Go with it / Two more rounds / None (= left for you,
+  paused, out of the thread). An unreadable verdict is asked again once, then
+  goes straight to the card. The lead CHAIRS: its review gets the second
+  opinion folded in, and a message to a finished pair task goes through
+  `#chairReply` — a question is answered, a change goes to the author and is
+  re-reviewed (fresh 3-round budget). Pair tasks never split. Codex may
+  review in Agent HQ's own project (read-only). Tests: `pair.smoke` (in
+  `npm run smoke`), `pair.live.ts` (Claude⇄Codex both ways, code + doc).
 - Image generation (`tools/generate-image.mjs`) is LOCAL FIRST: on-demand
   ComfyUI at D:\AI\comfyui (boots per job, watchdog kills it after ~2 min
   idle — zero background footprint; models: FLUX schnell fp8 default, SDXL

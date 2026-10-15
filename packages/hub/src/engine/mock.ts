@@ -7,6 +7,15 @@ import type { LockedDir } from '../orchestrator/util.js';
 // keyword, "installs" trigger a permission request, everything resolves fast.
 export class MockEngine implements OrchestratorEngine {
   async complete(args: { prompt: string; model: ModelSpec }): Promise<{ text: string; tokens: number }> {
+    // A pair task's chair: a question ("…?") is answered, anything else is
+    // handed to the author as work.
+    if (args.prompt.includes('You chair a pair task')) {
+      const said = args.prompt.match(/The owner now says: "([\s\S]*?)"\n/)?.[1] ?? '';
+      const reply = said.trim().endsWith('?')
+        ? { action: 'answer', reply: `Mock chair: both models looked at it — answering "${said.slice(0, 60)}".` }
+        : { action: 'work', instruction: `Mock chair relays: ${said}` };
+      return { text: JSON.stringify(reply), tokens: 4 };
+    }
     // Stuck-task recovery: "split-me" in the task proposes a 2-step split,
     // anything else a handover to the design team; "MOCK-AUTO" in the
     // owner's master rules lets the master act without asking.
@@ -164,7 +173,9 @@ export class MockEngine implements OrchestratorEngine {
             ? 'ISSUES: the qa-stuck-test bug is still there.'
             : args.prompt.includes('handoff-test') && !args.prompt.includes('[QA]')
               ? 'Done, but the icon set still needs the design team (handoff-test).'
-              : 'Mock lead review: work checked, looks complete.';
+              : args.prompt.includes('Second opinion:')
+                ? 'Mock lead review: work checked, looks complete (with the second opinion).'
+                : 'Mock lead review: work checked, looks complete.';
       // A worker report that says it could not finish reviews as stuck.
       const stuck = args.prompt.includes('Could not finish') ? 'the worker has no Roblox Studio connection' : null;
       return {
@@ -193,6 +204,7 @@ export class MockEngine implements OrchestratorEngine {
     title?: string;
     resumeSessionId?: string;
     inbox?: WorkerInbox;
+    readOnly?: boolean;
   }): Promise<WorkerRunResult> {
     const { callbacks } = args;
     const sessionId =
@@ -203,6 +215,31 @@ export class MockEngine implements OrchestratorEngine {
     if (args.resumeSessionId) callbacks.onActivity(`mock: resumed ${sessionId}`);
     const taskText = (args.prompt.split('\n---\n')[0] ?? args.prompt).toLowerCase();
     const firstLine = (args.prompt.split('\n')[0] ?? '').slice(0, 200);
+    // A pair-mode reviewer: answers with a verdict. "pair-never-agree" never
+    // agrees, "pair-disagree-once" agrees from its second review on,
+    // "pair-garbled" never gives a readable verdict. The mode is remembered
+    // by the reviewer's conversation (later rounds don't repeat the task).
+    if (args.readOnly) {
+      callbacks.onActivity(`mock: read-only review · engine ${args.model.engine}${args.resumeSessionId ? ' · resumed' : ''}`);
+      const reviewsBefore = memory.filter((line) => line === 'REVIEW').length;
+      memory.push('REVIEW');
+      const lower = args.prompt.toLowerCase();
+      const known = memory.find((line) => line.startsWith('MODE:'))?.slice(5);
+      const mode =
+        known ??
+        (lower.includes('pair-never-agree') ? 'never' : lower.includes('pair-disagree-once') ? 'once' : lower.includes('pair-garbled') ? 'garbled' : 'agree');
+      if (!known) memory.push(`MODE:${mode}`);
+      const agree = mode === 'agree' || (mode === 'once' && reviewsBefore >= 1);
+      const verdict = {
+        agree,
+        blocking: agree ? [] : ['the loader has no tests yet'],
+        minor: ['a name or two could be clearer'],
+        summary: agree ? 'Checked the actual change — it does what was asked.' : 'Not yet: the change has no tests.',
+      };
+      const text = mode === 'garbled' ? 'I looked it over and it seems mostly fine.' : `Looked at the diff. ${JSON.stringify(verdict)}`;
+      callbacks.onTranscript?.({ id: `mock-review-${sessionId}-${reviewsBefore}`, kind: 'message', text });
+      return { synopsis: text, tokens: 15, sessionId, filesChanged: false };
+    }
     const rowId = `mock-${sessionId}-${memory.length}`;
     callbacks.onTranscript?.({ id: `${rowId}-hello`, kind: 'message', text: `Mock worker on it: ${firstLine}` });
     callbacks.onTranscript?.({ id: `${rowId}-tool`, kind: 'tool', tool: 'Bash', text: 'echo mock', state: 'running' });

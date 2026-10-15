@@ -80,5 +80,8 @@ export interface OrchestratorEngine {
     // `prompt` is then the owner's follow-up.
     resumeSessionId?: string;
     inbox?: WorkerInbox;
+    // A reviewer: may read and run read-only commands, never write (file
+    // tools removed, shell writes refused, Codex sandbox read-only).
+    readOnly?: boolean;
   }): Promise<WorkerRunResult>;
 }

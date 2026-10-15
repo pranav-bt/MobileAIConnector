@@ -94,6 +94,18 @@ fun TaskConsoleScreen(snapshot: Snapshot, taskId: String, onRespond: (Permission
                     listOfNotNull(task?.status?.replace('_', ' '), task?.teamId, task?.projectId).joinToString(" · "),
                     color = HQ.muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
                 )
+                task?.pair?.let { pair ->
+                    val state = when (pair.state) {
+                        "reviewing" -> "reviewer checking"
+                        "agreed" -> "agreed"
+                        "disagreed" -> "went with it — still disagreed"
+                        else -> "author working"
+                    }
+                    Text(
+                        "Pair · round ${pair.round}/${pair.maxRounds} · ${pair.reviewerModel ?: "other engine"} reviews · $state",
+                        color = if (pair.state == "agreed") HQ.green else HQ.accent, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                    )
+                }
             }
             if (task != null && task.status in STOPPABLE) {
                 OutlinedButton(onClick = { hub.sendCommand(dev.neureal.agenthq.model.Commands.stopTask(taskId)) }, shape = RoundedCornerShape(8.dp)) {

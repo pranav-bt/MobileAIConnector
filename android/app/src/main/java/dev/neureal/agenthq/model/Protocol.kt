@@ -56,10 +56,20 @@ data class Task(
     val parentTaskId: String? = null,
     // The worker's saved conversation — the console can continue it.
     val session: TaskSession? = null,
+    // Pair mode: a second model reviews the worker's result until it agrees.
+    val pair: TaskPair? = null,
 )
 
 @Serializable
 data class TaskSession(val engine: String, val id: String)
+
+@Serializable
+data class TaskPair(
+    val maxRounds: Int = 3,
+    val round: Int = 0,
+    val state: String? = null, // working | reviewing | agreed | disagreed
+    val reviewerModel: String? = null,
+)
 
 // One row of a task's console (rows with the same id replace each other).
 @Serializable

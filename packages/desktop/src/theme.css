@@ -172,6 +172,24 @@ button {
   font-size: 13px;
 }
 .composer input::placeholder { color: var(--faint); }
+.pair-toggle {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--line-chip);
+  border-radius: 6px;
+  color: var(--faint);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+.pair-toggle:hover { color: var(--text-2); }
+.pair-toggle.on {
+  border-color: rgba(79, 216, 196, 0.55);
+  color: var(--accent);
+  background: rgba(79, 216, 196, 0.08);
+}
 
 /* Floor plan */
 .floor {
