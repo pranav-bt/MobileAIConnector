@@ -127,7 +127,7 @@ private fun AgentChip(agent: Agent) {
 }
 
 @Composable
-private fun ApprovalCard(request: PermissionRequest, snapshot: Snapshot, onRespond: (PermissionRequest, String, Int?) -> Unit) {
+internal fun ApprovalCard(request: PermissionRequest, snapshot: Snapshot, onRespond: (PermissionRequest, String, Int?) -> Unit) {
     val agentName = snapshot.agents.firstOrNull { it.id == request.agentId }?.name ?: request.agentId
     val teamName = snapshot.teams.firstOrNull { it.id == request.teamId }?.name ?: (request.teamId ?: "")
     Column(
@@ -198,6 +198,12 @@ private fun ApprovalCard(request: PermissionRequest, snapshot: Snapshot, onRespo
 
 @Composable
 private fun TaskCard(task: Task, showProgress: Boolean) {
+    // Tap a task to open its console.
+    Box(Modifier.clickable { ConsoleNav.open.value = task.id }) { TaskCardBody(task, showProgress) }
+}
+
+@Composable
+private fun TaskCardBody(task: Task, showProgress: Boolean) {
     Card {
         Text(task.title, color = HQ.text, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
         Text(
@@ -238,6 +244,11 @@ fun MainScreen(
 ) {
     var tab by rememberSaveable { mutableStateOf(0) }
     val pending = snapshot.permissions.filter { it.status == "pending" }.sortedBy { it.requestedAt }
+    val consoleTask by ConsoleNav.open.collectAsState()
+    consoleTask?.let { taskId ->
+        TaskConsoleScreen(snapshot, taskId, onRespond, onClose = { ConsoleNav.open.value = null })
+        return
+    }
 
     Scaffold(
         containerColor = HQ.bg,

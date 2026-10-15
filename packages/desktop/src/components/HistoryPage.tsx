@@ -8,7 +8,7 @@ function duration(task: Task): string {
   return `${(ms / 3_600_000).toFixed(1)}h`;
 }
 
-export function HistoryPage(props: { state: HubState }): JSX.Element {
+export function HistoryPage(props: { state: HubState; onOpenConsole: (taskId: string) => void }): JSX.Element {
   const finished = Object.values(props.state.tasks)
     .filter((task) => ['done', 'failed', 'paused'].includes(task.status) && !isInternalTask(task))
     .sort((a, b) => b.updatedAt - a.updatedAt);
@@ -26,7 +26,7 @@ export function HistoryPage(props: { state: HubState }): JSX.Element {
           const projectName = task.projectId ? props.state.projects[task.projectId]?.name ?? task.projectId : null;
           const team = projectName ? `${teamName} · ${projectName}` : teamName;
           return (
-            <div key={task.id} className="tcard">
+            <div key={task.id} className="tcard" style={{ cursor: 'pointer' }} title="Open this task's console" onClick={() => props.onOpenConsole(task.id)}>
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
                 <span style={{ fontSize: 13, fontWeight: 600, flexGrow: 1 }}>{task.title}</span>
                 <span className="act" style={{ color: status.color }}>{status.label}</span>

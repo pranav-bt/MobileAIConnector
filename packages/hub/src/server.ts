@@ -11,6 +11,7 @@ import type { HubBus } from './bus.js';
 import { dispatchCommand, type CommandHandlers } from './commands.js';
 import type { SecurityController } from './security/controller.js';
 import type { FrameCrypto } from './security/session.js';
+import type { TranscriptStore } from './transcripts.js';
 
 export interface HubServer {
   port: number;
@@ -44,6 +45,7 @@ export function startServer(
   handlers: CommandHandlers,
   security: SecurityController,
   port: number,
+  transcripts: TranscriptStore | null = null,
 ): Promise<HubServer> {
   return new Promise((resolve, reject) => {
     const wss = new WebSocketServer({ port, host: '0.0.0.0' });
@@ -63,6 +65,21 @@ export function startServer(
         },
       };
       const hooks = { close: (code: number, reason: string) => socket.close(code, reason) };
+      // Task consoles this connection has open: rows go to it alone.
+      const watching = new Map<string, () => void>();
+      socket.on('close', () => {
+        for (const unwatch of watching.values()) unwatch();
+        watching.clear();
+      });
+      const watch = (taskId: string, before?: number): void => {
+        if (!transcripts) return;
+        if (!watching.has(taskId)) {
+          watching.set(taskId, transcripts.watch(taskId, (entries) => client.send(encodeEvent({ type: 'task.transcript', taskId, entries }))));
+        }
+        void transcripts.read(taskId, before).then(({ entries, more }) =>
+          client.send(encodeEvent({ type: 'task.transcript', taskId, entries, backfill: true, more })),
+        );
+      };
 
       const handleCommand = (command: ClientCommand): void => {
         switch (command.type) {
@@ -97,6 +114,13 @@ export function startServer(
               return;
             }
             break;
+          case 'task.watch':
+            watch(command.taskId, command.before);
+            return;
+          case 'task.unwatch':
+            watching.get(command.taskId)?.();
+            watching.delete(command.taskId);
+            return;
           default:
             break;
         }

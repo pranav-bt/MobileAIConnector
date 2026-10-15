@@ -54,6 +54,28 @@ data class Task(
     val updatedAt: Double = 0.0,
     // Set on internal split pieces; finished lists hide them (the parent reports).
     val parentTaskId: String? = null,
+    // The worker's saved conversation — the console can continue it.
+    val session: TaskSession? = null,
+)
+
+@Serializable
+data class TaskSession(val engine: String, val id: String)
+
+// One row of a task's console (rows with the same id replace each other).
+@Serializable
+data class TranscriptEntry(
+    val id: String,
+    val taskId: String,
+    val at: Double = 0.0,
+    val role: String,
+    val agentId: String? = null,
+    val kind: String,
+    val text: String,
+    val detail: String? = null,
+    val tool: String? = null,
+    val state: String? = null,
+    val requestId: String? = null,
+    val linkTaskId: String? = null,
 )
 
 @Serializable
@@ -165,6 +187,7 @@ sealed interface HubEvent {
     data class UsageUpdated(val usage: Usage) : HubEvent
     data class PaUpdated(val pa: PaState) : HubEvent
     data class FileShared(val file: SharedFile) : HubEvent
+    data class TaskTranscript(val taskId: String, val entries: List<TranscriptEntry>, val backfill: Boolean, val more: Boolean) : HubEvent
     data object Ignored : HubEvent
 }
 
@@ -185,6 +208,12 @@ fun decodeEnvelope(raw: String): HubEvent? {
             "usage.updated" -> HubEvent.UsageUpdated(json.decodeFromJsonElement(event["usage"]!!))
             "pa.updated" -> HubEvent.PaUpdated(json.decodeFromJsonElement(event["pa"]!!))
             "file.shared" -> HubEvent.FileShared(json.decodeFromJsonElement(event["file"]!!))
+            "task.transcript" -> HubEvent.TaskTranscript(
+                event["taskId"]!!.jsonPrimitive.content,
+                json.decodeFromJsonElement(event["entries"]!!),
+                event["backfill"]?.jsonPrimitive?.content == "true",
+                event["more"]?.jsonPrimitive?.content == "true",
+            )
             else -> HubEvent.Ignored
         }
     } catch (error: Exception) {
@@ -240,6 +269,29 @@ object Commands {
         put("type", "pa.remove")
         put("kind", kind)
         put("id", id)
+    }
+
+    // Task console: open/close a task's transcript, talk to the task, stop it.
+    fun watchTask(taskId: String, before: Double? = null): JsonObject = buildJsonObject {
+        put("type", "task.watch")
+        put("taskId", taskId)
+        if (before != null) put("before", before)
+    }
+
+    fun unwatchTask(taskId: String): JsonObject = buildJsonObject {
+        put("type", "task.unwatch")
+        put("taskId", taskId)
+    }
+
+    fun messageTask(taskId: String, text: String): JsonObject = buildJsonObject {
+        put("type", "task.message")
+        put("taskId", taskId)
+        put("text", text)
+    }
+
+    fun stopTask(taskId: String): JsonObject = buildJsonObject {
+        put("type", "task.stop")
+        put("taskId", taskId)
     }
 
     fun tasksControl(action: String): JsonObject = buildJsonObject {

@@ -35,6 +35,12 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     type: z.literal('task.stop'),
     taskId: z.string(),
   }),
+  // Task console: open (backfill + live rows to this client only; `before` =
+  // an older page ending before that time), close, and talk to the task —
+  // into the running conversation, or continuing it after it finished.
+  z.object({ type: z.literal('task.watch'), taskId: z.string(), before: z.number().optional() }),
+  z.object({ type: z.literal('task.unwatch'), taskId: z.string() }),
+  z.object({ type: z.literal('task.message'), taskId: z.string(), text: z.string().min(1).max(20000) }),
   z.object({
     type: z.literal('permission.respond'),
     requestId: z.string(),

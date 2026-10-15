@@ -118,8 +118,32 @@ export const TaskSchema = z.object({
   // Why a paused task stopped. Only 'owner' (stopping that one task) drops an
   // ask from the thread; KILL ALL and a hub restart keep the conversation.
   stoppedBy: z.enum(['owner', 'killall', 'restart']).nullable().optional(),
+  // The worker's conversation (Claude session / Codex thread), so the task
+  // can be continued from its console with full memory — even after a restart.
+  session: z.object({ engine: EngineIdSchema, id: z.string() }).nullable().optional(),
 });
 export type Task = z.infer<typeof TaskSchema>;
+
+// One row of a task's console transcript — the same shape whichever engine
+// ran it. Rows are upserted by id (a tool row starts 'running' and is
+// replaced with its output when done). Stored per task under
+// data/transcripts/, never in the global event log; only clients watching
+// that task receive them.
+export const TranscriptEntrySchema = z.object({
+  id: z.string(),
+  taskId: z.string(),
+  at: z.number(),
+  role: z.enum(['owner', 'worker', 'lead', 'master', 'system']),
+  agentId: z.string().nullable().optional(),
+  kind: z.enum(['message', 'thinking', 'tool', 'diff', 'card', 'status']),
+  text: z.string(),
+  detail: z.string().optional(), // tool output / diff body (capped)
+  tool: z.string().optional(),
+  state: z.enum(['running', 'ok', 'error']).optional(),
+  requestId: z.string().optional(), // a card row: the PermissionRequest it shows
+  linkTaskId: z.string().optional(), // a status row about another task (QA, fix, handover)
+});
+export type TranscriptEntry = z.infer<typeof TranscriptEntrySchema>;
 
 export function isInternalTask(task: Pick<Task, 'parentTaskId'>): boolean {
   return !!task.parentTaskId;
@@ -402,5 +426,15 @@ export const HubEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('hub.updated'), info: HubInfoSchema }),
   z.object({ type: z.literal('activity'), entry: ActivityEntrySchema }),
   z.object({ type: z.literal('file.shared'), file: SharedFileSchema }),
+  // A task console's rows — sent only to clients watching that task
+  // (task.watch), never logged. `backfill` = history on open (or an older
+  // page); `more` = there are older rows to page in.
+  z.object({
+    type: z.literal('task.transcript'),
+    taskId: z.string(),
+    entries: z.array(TranscriptEntrySchema),
+    backfill: z.boolean().optional(),
+    more: z.boolean().optional(),
+  }),
 ]);
 export type HubEvent = z.infer<typeof HubEventSchema>;

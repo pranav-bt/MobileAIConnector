@@ -60,6 +60,47 @@ class HubClient(private val store: KV, private val deviceName: String) {
     // storage unless the user explicitly saves.
     val filesFlow = MutableStateFlow<List<SharedFile>>(emptyList())
 
+    // Task consoles: rows per open task (upserted by id, each keeping its
+    // first time so it stays in place) and whether older rows exist.
+    val transcripts = MutableStateFlow<Map<String, List<dev.neureal.agenthq.model.TranscriptEntry>>>(emptyMap())
+    val transcriptMore = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    private val watched = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    fun watchTask(taskId: String) {
+        watched.add(taskId)
+        sendCommand(dev.neureal.agenthq.model.Commands.watchTask(taskId))
+    }
+
+    fun unwatchTask(taskId: String) {
+        watched.remove(taskId)
+        sendCommand(dev.neureal.agenthq.model.Commands.unwatchTask(taskId))
+        transcripts.value = transcripts.value - taskId
+        transcriptMore.value = transcriptMore.value - taskId
+    }
+
+    fun loadEarlier(taskId: String) {
+        val first = transcripts.value[taskId]?.firstOrNull() ?: return
+        sendCommand(dev.neureal.agenthq.model.Commands.watchTask(taskId, first.at))
+    }
+
+    fun messageTask(taskId: String, text: String) {
+        sendCommand(dev.neureal.agenthq.model.Commands.messageTask(taskId, text))
+    }
+
+    private fun mergeTranscript(event: HubEvent.TaskTranscript) {
+        if (event.taskId !in watched) return
+        val rows = LinkedHashMap<String, dev.neureal.agenthq.model.TranscriptEntry>()
+        for (row in transcripts.value[event.taskId].orEmpty()) rows[row.id] = row
+        val firstAt = rows.values.minOfOrNull { it.at }
+        for (row in event.entries) {
+            val previous = rows[row.id]
+            rows[row.id] = if (previous != null) row.copy(at = previous.at) else row
+        }
+        transcripts.value = transcripts.value + (event.taskId to rows.values.sortedBy { it.at })
+        val olderPage = firstAt != null && event.entries.isNotEmpty() && event.entries.first().at < firstAt
+        if (event.backfill && (firstAt == null || olderPage)) transcriptMore.value = transcriptMore.value + (event.taskId to event.more)
+    }
+
     fun dismissFile(id: String) {
         filesFlow.value = filesFlow.value.filter { it.id != id }
     }
@@ -174,7 +215,12 @@ class HubClient(private val store: KV, private val deviceName: String) {
                     frame["c"]?.jsonPrimitive?.content ?: return,
                 ) ?: return
                 when (val event = decodeEnvelope(opened)) {
-                    is HubEvent.SnapshotEvent -> stateFlow.value = event.snapshot
+                    is HubEvent.SnapshotEvent -> {
+                        stateFlow.value = event.snapshot
+                        // A new session: reopen the consoles that were open.
+                        for (taskId in watched) sendCommand(dev.neureal.agenthq.model.Commands.watchTask(taskId))
+                    }
+                    is HubEvent.TaskTranscript -> mergeTranscript(event)
                     is HubEvent.AgentUpdated -> stateFlow.value = stateFlow.value.let { s ->
                         s.copy(agents = s.agents.filter { it.id != event.agent.id } + event.agent)
                     }

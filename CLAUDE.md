@@ -213,6 +213,28 @@ npm run typecheck      # tsc across workspaces
   — after an Agent SDK update re-run `test/probe-models.ts --live` and
   `test/probe-effort-defaults.ts` (packages/hub) and refresh ids/defaults.
   Opus 5.5 needs Agent SDK >= 0.3.280.
+- Task Console (desktop drawer / pop-out window, phone full screen): a task's
+  whole story + a message box. Engines report `EngineRow`s (messages,
+  thinking, tool rows that go running → ok/error with output, edits as diff
+  rows) via `onTranscript`; the orchestrator adds the owner's ask, non-worker
+  activity as status rows, every card (live buttons, by `requestId`), the
+  lead's review, and link rows to QA/fix/handover/recovery tasks. Rows live
+  in `data/transcripts/<taskId>.jsonl` (`TranscriptStore`: append-only, rows
+  upserted by id, output capped) — NEVER in the global event log; only
+  clients that sent `task.watch` get `task.transcript` frames (per
+  connection in server.ts; backfill pages via `before`). Every task keeps
+  its worker's conversation (`Task.session`, reported early via
+  `onSession`). `task.message`: running → the run's `MessageInbox` (Claude:
+  streaming input, a mid-turn message folds into the turn — verified by
+  `test/probe-claude-steer.ts`; Codex: `turn/steer`, or one more turn if it
+  just ended); waiting → added to the brief; finished/failed/stopped →
+  `#continueTask` resumes the SAME session (same engine; otherwise a fresh
+  run with the history), the lead re-reviews, and QA re-runs only if the run
+  reported `filesChanged`. Stop keeps the session. Tests: `console.smoke`
+  (in `npm run smoke`), `console.live.ts [--model gpt-6.1-sol]`, the phone
+  path in `pairing.smoke`, UI driver `tools/drive-console.mjs` (with
+  `test/ui-mock-hub.ts`). The Tauri shell's permissions live in
+  `src-tauri/capabilities/default.json` (console windows are `console-*`).
 - Two engines, any seat: catalog entries carry `engine` ('claude' | 'codex'),
   `resolveModel` returns it in the `ModelSpec`, and `EngineRouter`
   (engine/router.ts) sends each call to `ClaudeEngine` or `CodexEngine`

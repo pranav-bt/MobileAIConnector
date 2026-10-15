@@ -32,6 +32,8 @@ import { delay, isInside, type LockedDir } from './util.js';
 import type { PermissionMode } from '../config.js';
 import { parseRules, type ParsedRules, type TeamRegistry } from './teams.js';
 import { slugify, type ProjectRegistry } from './projects.js';
+import type { TranscriptRow, TranscriptStore } from '../transcripts.js';
+import { MessageInbox } from '../engine/inbox.js';
 
 // The real thing: master intake -> team lead -> worker -> lead review ->
 // synopsis. Per-team concurrency respected; overflow queues. Every state
@@ -162,6 +164,12 @@ export class Orchestrator implements CommandHandlers {
   #recoveryRound = new Map<string, number>();
   // Tasks where the owner denied an approval: getting stuck there is their call.
   #ownerDenied = new Set<string>();
+  // Task console: per-task transcripts, the inbox of each running worker, and
+  // owner messages waiting for a task to start or continue.
+  #transcripts: TranscriptStore | null = null;
+  #inboxes = new Map<string, MessageInbox>();
+  #followUps = new Map<string, string[]>();
+  #cardsSeen = new Set<string>();
 
   #projects: ProjectRegistry;
   #policy: { mode: PermissionMode };
@@ -423,6 +431,87 @@ export class Orchestrator implements CommandHandlers {
 
   #activity(agentId: string, taskId: string | null, message: string): void {
     this.#bus.publish({ type: 'activity', entry: { agentId, taskId, message, at: now() } });
+    // The task's console tells the same story: the master's, leads' and the
+    // hub's lines become status rows. A worker's own steps come from its
+    // engine as richer rows, so only its "blocked:"/"asked" lines are kept.
+    if (!taskId || !this.#transcripts || message.startsWith('mock:')) return;
+    const worker = /-w\d+$/.test(agentId) || agentId.startsWith('fl-');
+    if (worker && !/^(blocked:|asked|Codex isn't used)/.test(message)) return;
+    this.#row(taskId, {
+      role: agentId === 'master' ? 'master' : agentId.endsWith('-lead') ? 'lead' : worker ? 'worker' : 'system',
+      agentId,
+      kind: 'status',
+      text: message,
+    });
+  }
+
+  // --- task console ------------------------------------------------------
+
+  attachTranscripts(store: TranscriptStore): void {
+    this.#transcripts = store;
+    // Every card about a task shows up in its console, live (the console
+    // renders the card's buttons from the shared state by requestId).
+    this.#bus.onEvent((event) => {
+      if (event.type !== 'permission.updated') return;
+      const request = event.request;
+      const id = `card-${request.id}`;
+      const resolved = request.status !== 'pending';
+      if (!resolved && this.#cardsSeen.has(request.id)) return; // summary refresh: same row
+      if (!resolved) this.#cardsSeen.add(request.id);
+      else if (!this.#cardsSeen.has(request.id)) return;
+      else this.#cardsSeen.delete(request.id);
+      this.#row(request.taskId, {
+        id,
+        role: request.agentId === 'master' ? 'master' : 'worker',
+        agentId: request.agentId,
+        kind: 'card',
+        text: request.summary ?? request.command,
+        requestId: request.id,
+        ...(resolved ? { state: request.status === 'approved' ? 'ok' : 'error' } : { state: 'running' }),
+      });
+    });
+  }
+
+  #row(taskId: string, row: Omit<TranscriptRow, 'id'> & { id?: string }): void {
+    if (!this.#transcripts) return;
+    this.#transcripts.append(taskId, { ...row, id: row.id ?? this.#transcripts.nextId() });
+  }
+
+  // A status row on one task that points at another (QA, fix, handover…).
+  #link(fromTaskId: string, toTaskId: string, text: string): void {
+    this.#row(fromTaskId, { role: 'master', agentId: 'master', kind: 'status', text, linkTaskId: toTaskId });
+  }
+
+  // The owner talks to a task from its console. Running: straight into the
+  // worker's live conversation. Waiting to start: added to its brief.
+  // Finished, failed or stopped: the same conversation continues (resumed
+  // session), then the lead reviews again — QA only if files changed.
+  messageTask(taskId: string, text: string): void {
+    const task = this.#bus.state.tasks[taskId];
+    if (!task) return;
+    const message = text.trim();
+    if (!message) return;
+    this.#row(taskId, { role: 'owner', kind: 'message', text: message });
+    // A freelancer's task continues its own terminal session.
+    if (task.title.startsWith('[FL ') && task.agentIds[0]) {
+      this.freelancerSend(task.agentIds[0], message);
+      return;
+    }
+    const inbox = this.#inboxes.get(taskId);
+    if (inbox && inbox.push(message)) {
+      this.#row(taskId, { role: 'system', kind: 'status', text: 'sent to the worker — it reads it at its next step' });
+      return;
+    }
+    const waiting = this.#followUps.get(taskId) ?? [];
+    waiting.push(message);
+    this.#followUps.set(taskId, waiting);
+    if (['intake', 'routing', 'queued', 'awaiting_permission', 'in_flight', 'review'].includes(task.status)) {
+      // Not started yet, or finishing up: it goes in when the worker starts
+      // (or right after this run, continuing the same conversation).
+      this.#row(taskId, { role: 'system', kind: 'status', text: 'noted — the worker gets it next' });
+      return;
+    }
+    this.#continueTask(taskId);
   }
 
   #recordTokens(model: ModelTier, tokens: number): void {
@@ -491,6 +580,7 @@ export class Orchestrator implements CommandHandlers {
     const task = this.#bus.state.tasks[taskId];
     if (!task || ['done', 'failed', 'paused'].includes(task.status)) return;
     this.#stopping.add(taskId);
+    this.#followUps.delete(taskId); // a stopped task drops messages it hadn't read yet
     this.#patchTask(taskId, { stoppedBy: by }); // decides whether the ask stays in the thread
 
     // Unblock a worker parked on a permission (as a denial), expire the card.
@@ -684,6 +774,7 @@ export class Orchestrator implements CommandHandlers {
       createdAt: now(),
       updatedAt: now(),
     });
+    this.#row(taskId, { id: 'ask', role: 'owner', kind: 'message', text: rawText.trim() });
 
     this.#routingCount += 1;
     this.#patchAgent('master', { status: 'working', activity: `routing: ${text.slice(0, 50)}` });
@@ -982,7 +1073,8 @@ export class Orchestrator implements CommandHandlers {
     }
     // Must stay synchronous up to the slot increment below (callers check the
     // cap, then call) — the split pass takes over the slot the same way.
-    if (!opts.noSplit && this.#shouldPlanSplit(task, team)) return this.#planAndRun(taskId, team, autoQa);
+    // (A follow-up from the console continues the work as it is — never re-split.)
+    if (!opts.noSplit && !this.#followUps.has(taskId) && this.#shouldPlanSplit(task, team)) return this.#planAndRun(taskId, team, autoQa);
     let outcome: string | null = null;
     const project = (task.projectId ? this.#projects.get(task.projectId) : undefined) ?? this.#projects.defaultProject();
     // An internal split piece: no lead review, no sub-agents, and its tokens
@@ -1017,6 +1109,14 @@ export class Orchestrator implements CommandHandlers {
     this.#patchTask(taskId, { status: 'in_flight', agentIds: [`${team.id}-lead`, workerId], progressPct: opts.startPct ?? 5 });
     this.#patchAgent(`${team.id}-lead`, { status: 'working', activity: `briefing ${workerName}`, taskId });
 
+    // Console follow-ups waiting for this run (see messageTask): a task that
+    // already ran (it has a session or a report) is being continued.
+    const followUps = this.#followUps.get(taskId) ?? [];
+    this.#followUps.delete(taskId);
+    const continuing = followUps.length > 0 && (!!task.session || task.synopsis !== null);
+    const inbox = new MessageInbox();
+    this.#inboxes.set(taskId, inbox);
+
     const controller = new AbortController();
     this.#controllers.set(taskId, controller);
     // Everything this worker may touch, decided once: the file tools are
@@ -1037,8 +1137,23 @@ export class Orchestrator implements CommandHandlers {
       // carries the answers).
       await this.#settleRuleConflicts(taskId, team, project, workerId);
       if (this.#stopping.has(taskId)) throw new Error('stopped while settling rules');
+      // The owner's messages from the console: a follow-up on finished work
+      // continues the same conversation (resumed session, same engine);
+      // messages sent before the worker started join its brief.
+      const current = this.#bus.state.tasks[taskId] ?? task;
+      const followText = followUps.join('\n\n');
+      const resumeSessionId = continuing && current.session?.engine === workerSpec.engine ? current.session.id : undefined;
+      const prompt = resumeSessionId
+        ? `The owner follows up on this task:\n${followText}`
+        : continuing
+          ? `${followText}\n\n(The owner's follow-up on earlier work — the original ask and what was reported are below.)\n\n` +
+            `${this.#buildWorkerPrompt(current)}\nEarlier report: ${(current.synopsis ?? '(none)').slice(0, 1500)}`
+          : followUps.length > 0
+            ? `${this.#buildWorkerPrompt(current)}\n\nThe owner added while this was waiting:\n${followText}`
+            : this.#buildWorkerPrompt(current);
+      if (resumeSessionId) this.#activity(workerId, taskId, `resuming the conversation (${workerSpec.engine})`);
       const result = await this.#engine.runWorker({
-        prompt: this.#buildWorkerPrompt(this.#bus.state.tasks[taskId] ?? task),
+        prompt,
         title: task.title,
         team,
         model: workerSpec,
@@ -1046,8 +1161,12 @@ export class Orchestrator implements CommandHandlers {
         extraDirs: scope.extraDirs,
         locked: scope.locked,
         ...(piece ? { maxSubagents: 0 } : {}),
+        ...(resumeSessionId ? { resumeSessionId } : {}),
+        inbox,
         signal: controller.signal,
         callbacks: {
+          onSession: (sessionId) => this.#patchTask(taskId, { session: { engine: workerSpec.engine, id: sessionId } }),
+          onTranscript: (row) => this.#row(taskId, { ...row, role: 'worker', agentId: workerId }),
           onActivity: (message) => {
             this.#patchAgent(workerId, { status: 'working', activity: message.slice(0, 90) });
             this.#activity(workerId, taskId, message);
@@ -1109,6 +1228,7 @@ export class Orchestrator implements CommandHandlers {
         parseRules(this.#registry.readRules(team.id)).rules,
       );
       this.#recordTokens(leadSpec.tier, review.tokens);
+      if (review.synopsis) this.#row(taskId, { role: 'lead', agentId: `${team.id}-lead`, kind: 'message', text: review.synopsis });
       if (review.memoryNote) {
         this.#registry.appendMemory(team.id, review.memoryNote);
         this.#activity(`${team.id}-lead`, taskId, `noted for the team: ${review.memoryNote.slice(0, 80)}`);
@@ -1137,7 +1257,8 @@ export class Orchestrator implements CommandHandlers {
         this.#deliverReport(task, team, result.synopsis, review.synopsis);
       }
 
-      if (autoQa) this.#enqueueQa(taskId, team, review.synopsis);
+      // A console follow-up that changed no files needs no new QA pass.
+      if (autoQa && (!continuing || result.filesChanged)) this.#enqueueQa(taskId, team, review.synopsis);
       // A finished QA task gets a verdict: pass, or a remediation round.
       // Everything else gets the master's coordination pass: does the report
       // hand work to a different team?
@@ -1151,10 +1272,20 @@ export class Orchestrator implements CommandHandlers {
         const message = error instanceof Error ? error.message : String(error);
         this.#patchTask(taskId, { status: 'failed', synopsis: `Failed: ${message}` });
         this.#patchAgent(workerId, { status: 'blocked', activity: message.slice(0, 90) });
+        this.#row(taskId, { role: 'system', kind: 'status', text: `failed: ${message.slice(0, 300)}` });
         // A split piece's failure is its parent's to handle.
         if (!piece) void this.#recoverStuck(taskId, team, 'failed', message);
       }
     } finally {
+      // Messages that arrived as the run ended continue the conversation.
+      const leftovers = inbox.close();
+      this.#inboxes.delete(taskId);
+      if (leftovers.length > 0) this.#followUps.set(taskId, [...leftovers, ...(this.#followUps.get(taskId) ?? [])]);
+      const stoppedByOwner = this.#stopping.has(taskId);
+      if (stoppedByOwner) {
+        this.#followUps.delete(taskId);
+        this.#row(taskId, { role: 'system', kind: 'status', text: 'stopped — send a message to pick up where it left off' });
+      }
       this.#controllers.delete(taskId);
       this.#runningCwds.delete(taskId);
       this.#stopping.delete(taskId);
@@ -1163,8 +1294,27 @@ export class Orchestrator implements CommandHandlers {
       if (!opts.keepSlot) this.#freeSlot(team.id, false);
       this.#masterStatus();
       if (!opts.keepSlot) this.#drainQueue(team.id);
+      // (After the status settles: early returns above still reach here.)
+      if ((this.#followUps.get(taskId)?.length ?? 0) > 0) queueMicrotask(() => this.#continueTask(taskId));
     }
     return outcome;
+  }
+
+  // Run a task again with the owner's waiting follow-ups (same conversation
+  // when it has a saved session).
+  #continueTask(taskId: string): void {
+    const task = this.#bus.state.tasks[taskId];
+    if (!task || !(this.#followUps.get(taskId)?.length ?? 0)) return;
+    if (this.#inboxes.has(taskId) || ['queued', 'in_flight', 'review'].includes(task.status)) return; // already running / lined up
+    const team = task.teamId ? this.#registry.get(task.teamId) : undefined;
+    if (!team) {
+      this.#followUps.delete(taskId);
+      this.#row(taskId, { role: 'system', kind: 'status', text: "can't continue: this task has no team (it never got routed) — send it as a new task" });
+      return;
+    }
+    this.#patchTask(taskId, { status: 'queued', stoppedBy: null, progressPct: 5 });
+    this.#activity('master', taskId, task.session ? 'continuing the same conversation with your follow-up' : 'starting a new run with your follow-up (no saved conversation)');
+    this.#startOrQueue(taskId, team, true);
   }
 
   // --- lead split pass ---------------------------------------------------
@@ -1465,6 +1615,7 @@ export class Orchestrator implements CommandHandlers {
       updatedAt: now(),
     });
     this.#activity('master', taskId, `QA follow-up queued for: ${source.title.slice(0, 45)}`);
+    this.#link(sourceTaskId, taskId, `QA follow-up: ${source.title.slice(0, 50)}`);
 
     this.#qaSource.set(taskId, sourceTaskId);
     this.#taskDepth.set(taskId, (this.#taskDepth.get(sourceTaskId) ?? 0) + 1);
@@ -1555,6 +1706,7 @@ export class Orchestrator implements CommandHandlers {
         updatedAt: now(),
       });
       this.#activity('master', followId, `follow-up dispatched to ${target.name}: ${item.title.slice(0, 45)}`);
+      this.#link(taskId, followId, `handed over to ${target.name}: ${item.title.slice(0, 50)}`);
       this.#startOrQueue(followId, target, true);
     }
   }
@@ -1697,6 +1849,7 @@ export class Orchestrator implements CommandHandlers {
       updatedAt: now(),
     });
     this.#activity('master', followId, `${plan.action === 'retry' ? 'retrying' : 'handed over'} on ${target.name}: ${baseTitle.slice(0, 45)}`);
+    this.#link(taskId, followId, `${plan.action === 'retry' ? 'retry' : 'handover'} on ${target.name}: ${baseTitle.slice(0, 50)}`);
     this.#startOrQueue(followId, target, true);
   }
 
@@ -1776,6 +1929,8 @@ export class Orchestrator implements CommandHandlers {
       updatedAt: now(),
     });
     this.#activity('master', fixId, `remediation assigned to ${sourceTeam.name}: ${fixTitle.slice(0, 45)}`);
+    this.#link(source.id, fixId, `QA found issues — fix round: ${fixTitle.slice(0, 50)}`);
+    this.#link(qaTaskId, fixId, `fix round: ${fixTitle.slice(0, 50)}`);
     this.#taskDepth.set(fixId, (this.#taskDepth.get(qaTaskId) ?? 1) + 1);
     this.#carryRecovery(qaTaskId, fixId);
     this.#startOrQueue(fixId, sourceTeam, true);

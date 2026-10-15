@@ -6,10 +6,15 @@ function teamName(state: HubState, teamId: string | null): string {
   return (teamId && state.teams[teamId]?.name) || 'Unassigned';
 }
 
-function TaskCard(props: { state: HubState; task: Task; showProgress?: boolean }): JSX.Element {
+function TaskCard(props: { state: HubState; task: Task; showProgress?: boolean; onOpen: (taskId: string) => void }): JSX.Element {
   const { task } = props;
   return (
-    <div className="tcard" style={task.status === 'queued' || task.status === 'routing' ? { opacity: 0.8 } : undefined}>
+    <div
+      className="tcard"
+      title="Open this task's console"
+      onClick={() => props.onOpen(task.id)}
+      style={{ cursor: 'pointer', ...(task.status === 'queued' || task.status === 'routing' ? { opacity: 0.8 } : {}) }}
+    >
       <div style={{ fontSize: 12.5, fontWeight: 600 }}>{task.title}</div>
       <div className="act" style={{ marginTop: 3 }}>
         {teamName(props.state, task.teamId)} · {task.agentIds.length > 0 ? `${task.agentIds.length} agent${task.agentIds.length > 1 ? 's' : ''}` : task.status}
@@ -29,7 +34,7 @@ function TaskCard(props: { state: HubState; task: Task; showProgress?: boolean }
 // Plain words first: what the agent wants to do and why it needs a yes.
 // The risk tags come from rules (never the model); the raw command is one
 // click away for when you want to check the exact action.
-function ApprovalCard(props: { state: HubState; request: PermissionRequest; send: (command: ClientCommand) => void }): JSX.Element {
+export function ApprovalCard(props: { state: HubState; request: PermissionRequest; send: (command: ClientCommand) => void }): JSX.Element {
   const { state, request, send } = props;
   const [showCommand, setShowCommand] = useState(false);
   const respond = (decision: 'approve' | 'deny', choice?: number) =>
@@ -99,6 +104,7 @@ function ApprovalCard(props: { state: HubState; request: PermissionRequest; send
 export function TodayPanel(props: {
   state: HubState;
   send: (command: ClientCommand) => void;
+  onOpenConsole: (taskId: string) => void;
 }): JSX.Element {
   const { state, send } = props;
   const tasks = Object.values(state.tasks).sort((a, b) => b.updatedAt - a.updatedAt);
@@ -130,7 +136,7 @@ export function TodayPanel(props: {
         <div className="sect">In flight · {inFlight.length}</div>
         {inFlight.length === 0 && <span className="empty-note">no tasks running</span>}
         {inFlight.map((task) => (
-          <TaskCard key={task.id} state={state} task={task} showProgress />
+          <TaskCard key={task.id} state={state} task={task} onOpen={props.onOpenConsole} showProgress />
         ))}
       </div>
 
@@ -138,7 +144,7 @@ export function TodayPanel(props: {
         <div>
           <div className="sect">Queued · {queued.length}</div>
           {queued.map((task) => (
-            <TaskCard key={task.id} state={state} task={task} />
+            <TaskCard key={task.id} state={state} task={task} onOpen={props.onOpenConsole} />
           ))}
         </div>
       )}
@@ -147,7 +153,7 @@ export function TodayPanel(props: {
         <div>
           <div className="sect" style={{ color: 'var(--red)' }}>Failed · {failed.length}</div>
           {failed.map((task) => (
-            <TaskCard key={task.id} state={state} task={task} />
+            <TaskCard key={task.id} state={state} task={task} onOpen={props.onOpenConsole} />
           ))}
         </div>
       )}
@@ -156,7 +162,7 @@ export function TodayPanel(props: {
         <div className="sect">Done today · {done.length}</div>
         {done.length === 0 && <span className="empty-note">nothing finished yet</span>}
         {done.map((task) => (
-          <TaskCard key={task.id} state={state} task={task} />
+          <TaskCard key={task.id} state={state} task={task} onOpen={props.onOpenConsole} />
         ))}
       </div>
 

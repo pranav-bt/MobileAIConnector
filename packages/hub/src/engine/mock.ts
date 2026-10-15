@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import type { ModelSpec, Team } from '@agent-hq/shared';
-import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './types.js';
+import type { OrchestratorEngine, WorkerInbox, WorkerRunCallbacks, WorkerRunResult } from './types.js';
 import type { LockedDir } from '../orchestrator/util.js';
 
 // Deterministic engine for tests and offline development: routes by team-id
@@ -175,7 +175,56 @@ export class MockEngine implements OrchestratorEngine {
     return { text: 'Mock lead review: work checked, looks complete.', tokens: 9 };
   }
 
+  // Conversations by session id — what each was told, so a resumed one can
+  // "remember" (console follow-ups are tested against this).
+  #sessions = new Map<string, string[]>();
+  #sessionCounter = 0;
+
   async runWorker(args: {
+    prompt: string;
+    team: Team;
+    model: ModelSpec;
+    cwd: string;
+    extraDirs?: string[];
+    locked?: LockedDir;
+    maxSubagents?: number;
+    callbacks: WorkerRunCallbacks;
+    signal?: AbortSignal;
+    title?: string;
+    resumeSessionId?: string;
+    inbox?: WorkerInbox;
+  }): Promise<WorkerRunResult> {
+    const { callbacks } = args;
+    const sessionId =
+      args.resumeSessionId && this.#sessions.has(args.resumeSessionId) ? args.resumeSessionId : `mock-session-${++this.#sessionCounter}`;
+    const memory = this.#sessions.get(sessionId) ?? [];
+    this.#sessions.set(sessionId, memory);
+    callbacks.onSession?.(sessionId);
+    if (args.resumeSessionId) callbacks.onActivity(`mock: resumed ${sessionId}`);
+    const taskText = (args.prompt.split('\n---\n')[0] ?? args.prompt).toLowerCase();
+    const firstLine = (args.prompt.split('\n')[0] ?? '').slice(0, 200);
+    const rowId = `mock-${sessionId}-${memory.length}`;
+    callbacks.onTranscript?.({ id: `${rowId}-hello`, kind: 'message', text: `Mock worker on it: ${firstLine}` });
+    callbacks.onTranscript?.({ id: `${rowId}-tool`, kind: 'tool', tool: 'Bash', text: 'echo mock', state: 'running' });
+    // "console-slow" stays busy until the owner sends a message (≤4 s).
+    const heard: string[] = [];
+    if (taskText.includes('console-slow') && args.inbox) {
+      const next = await Promise.race([args.inbox.next(), new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000))]);
+      if (next) heard.push(next);
+    }
+    // "recall-test" answers from what this conversation was told before.
+    const recall = taskText.includes('recall-test') ? memory.join(' | ') : '';
+    memory.push(firstLine);
+    const result = await this.#work(args);
+    callbacks.onTranscript?.({ id: `${rowId}-tool`, kind: 'tool', tool: 'Bash', text: 'echo mock', state: 'ok', detail: 'mock' });
+    const synopsis = [result.synopsis, heard.length ? `heard: ${heard.join(' / ')}` : '', recall ? `remembered: ${recall}` : '']
+      .filter(Boolean)
+      .join(' · ');
+    callbacks.onTranscript?.({ id: `${rowId}-done`, kind: 'message', text: synopsis });
+    return { ...result, synopsis, sessionId, filesChanged: /edit-test|writes-files|install/.test(taskText) };
+  }
+
+  async #work(args: {
     prompt: string;
     team: Team;
     model: ModelSpec;

@@ -1,10 +1,11 @@
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { ModelSpec } from '@agent-hq/shared';
 import type { LockedDir } from '../orchestrator/util.js';
 import { DEFAULT_MAX_SUBAGENTS, refusalMessage, refusedWrite, workerInstructions } from './instructions.js';
 
 export { refusedWrite };
-import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './types.js';
+import type { EngineRow, OrchestratorEngine, WorkerInbox, WorkerRunCallbacks, WorkerRunResult } from './types.js';
+import { shellWrites } from '../orchestrator/policy.js';
 
 // Tools whose use flows through the policy (which instantly allows the
 // routine and raises a card for the consequential). Read is included ONLY so
@@ -85,17 +86,26 @@ export class ClaudeEngine implements OrchestratorEngine {
     maxSubagents?: number;
     callbacks: WorkerRunCallbacks;
     signal?: AbortSignal;
+    resumeSessionId?: string;
+    inbox?: WorkerInbox;
   }): Promise<WorkerRunResult> {
     const { callbacks } = args;
     const maxSubagents = args.maxSubagents ?? DEFAULT_MAX_SUBAGENTS;
     let tokens = 0;
     let synopsis = '';
+    let sessionId: string | undefined;
+    let filesChanged = false;
+    const inbox = args.inbox;
 
     // Bridge the orchestrator's stop signal into the SDK's abort mechanism.
     const abortController = new AbortController();
+    const onAbort = () => {
+      abortController.abort();
+      inbox?.close();
+    };
     if (args.signal) {
-      if (args.signal.aborted) abortController.abort();
-      else args.signal.addEventListener('abort', () => abortController.abort(), { once: true });
+      if (args.signal.aborted) onAbort();
+      else args.signal.addEventListener('abort', onAbort, { once: true });
     }
 
     // The team's MCP grants (e.g. Roblox Studio for QA/Game Engine teams)
@@ -106,12 +116,38 @@ export class ClaudeEngine implements OrchestratorEngine {
         ? (args.team.mcpServers as QueryOptions['mcpServers'])
         : undefined;
 
+    // With an inbox the prompt is a stream: the first message, then whatever
+    // the owner sends from the task console while the worker is running
+    // (queued for the next step, 'next'). The stream ends when a turn
+    // finishes with nothing waiting — that ends the run.
+    const userMessage = (text: string, priority?: 'next'): SDKUserMessage => ({
+      type: 'user',
+      message: { role: 'user', content: text },
+      parent_tool_use_id: null,
+      ...(priority ? { priority } : {}),
+    });
+    async function* conversation(): AsyncGenerator<SDKUserMessage> {
+      yield userMessage(args.prompt);
+      if (!inbox) return;
+      for (;;) {
+        const next = await inbox.next();
+        if (next === null) return;
+        yield userMessage(next, 'next');
+      }
+    }
+
+    // Console rows: a tool row starts 'running' and is replaced with its
+    // output when the tool result comes back.
+    const toolRows = new Map<string, EngineRow>();
+    const emit = (row: EngineRow) => callbacks.onTranscript?.(row);
+
     const stream = query({
-      prompt: args.prompt,
+      prompt: inbox ? conversation() : args.prompt,
       options: {
         abortController,
         model: args.model.id,
         ...(args.model.effort && args.model.effort !== 'ultra' ? { effort: args.model.effort } : {}),
+        ...(args.resumeSessionId ? { resume: args.resumeSessionId } : {}),
         cwd: args.cwd,
         additionalDirectories: args.extraDirs ?? [],
         ...(mcpServers ? { mcpServers } : {}),
@@ -147,23 +183,96 @@ export class ClaudeEngine implements OrchestratorEngine {
       },
     });
 
-    for await (const message of stream) {
-      const m = message as unknown as Record<string, unknown>;
-      if (m['type'] === 'assistant') {
-        const activity = describeAssistantMessage(m);
-        if (activity) callbacks.onActivity(activity);
-      } else if (m['type'] === 'result') {
-        if (typeof m['result'] === 'string') synopsis = m['result'];
-        const usage = m['usage'];
-        if (isRecord(usage)) {
-          const inputTokens = typeof usage['input_tokens'] === 'number' ? usage['input_tokens'] : 0;
-          const outputTokens = typeof usage['output_tokens'] === 'number' ? usage['output_tokens'] : 0;
-          tokens = inputTokens + outputTokens;
-          callbacks.onTokens(tokens);
+    try {
+      for await (const message of stream) {
+        const m = message as unknown as Record<string, unknown>;
+        if (!sessionId && typeof m['session_id'] === 'string' && m['session_id']) {
+          sessionId = m['session_id'];
+          callbacks.onSession?.(sessionId);
+        }
+        if (m['type'] === 'assistant') {
+          const activity = describeAssistantMessage(m);
+          if (activity) callbacks.onActivity(activity);
+          const inner = m['message'];
+          const blocks = isRecord(inner) && Array.isArray(inner['content']) ? inner['content'] : [];
+          const messageId = isRecord(inner) && typeof inner['id'] === 'string' ? inner['id'] : `m${Date.now().toString(36)}`;
+          blocks.forEach((block: unknown, index: number) => {
+            if (!isRecord(block)) return;
+            if (block['type'] === 'text' && typeof block['text'] === 'string' && block['text'].trim()) {
+              emit({ id: `${messageId}-${index}`, kind: 'message', text: block['text'] });
+            } else if (block['type'] === 'thinking' && typeof block['thinking'] === 'string' && block['thinking'].trim()) {
+              emit({ id: `${messageId}-${index}`, kind: 'thinking', text: block['thinking'] });
+            } else if (block['type'] === 'tool_use' && typeof block['name'] === 'string' && typeof block['id'] === 'string') {
+              const input = isRecord(block['input']) ? block['input'] : {};
+              const name = block['name'];
+              if (WRITING_TOOLS.has(name) || (name === 'Bash' && typeof input['command'] === 'string' && shellWrites(input['command']))) {
+                filesChanged = true;
+              }
+              const row: EngineRow = WRITING_TOOLS.has(name)
+                ? { id: block['id'], kind: 'diff', tool: name, text: summarizeToolCall(name, input), detail: editPreview(name, input), state: 'running' }
+                : { id: block['id'], kind: 'tool', tool: name, text: summarizeToolCall(name, input), state: 'running' };
+              toolRows.set(block['id'], row);
+              emit(row);
+            }
+          });
+        } else if (m['type'] === 'user') {
+          // Tool results come back as user messages.
+          const inner = m['message'];
+          const blocks = isRecord(inner) && Array.isArray(inner['content']) ? inner['content'] : [];
+          for (const block of blocks) {
+            if (!isRecord(block) || block['type'] !== 'tool_result' || typeof block['tool_use_id'] !== 'string') continue;
+            const row = toolRows.get(block['tool_use_id']);
+            if (!row) continue;
+            const output = toolResultText(block['content']);
+            const done: EngineRow = {
+              ...row,
+              state: block['is_error'] === true ? 'error' : 'ok',
+              ...(row.kind === 'diff' ? {} : output ? { detail: output } : {}),
+            };
+            toolRows.set(row.id, done);
+            emit(done);
+          }
+        } else if (m['type'] === 'result') {
+          if (typeof m['result'] === 'string') synopsis = m['result'];
+          const usage = m['usage'];
+          if (isRecord(usage)) {
+            const inputTokens = typeof usage['input_tokens'] === 'number' ? usage['input_tokens'] : 0;
+            const outputTokens = typeof usage['output_tokens'] === 'number' ? usage['output_tokens'] : 0;
+            tokens += inputTokens + outputTokens;
+            callbacks.onTokens(tokens);
+          }
+          // A turn finished. Messages already streamed in mid-turn were folded
+          // into it (verified: test/probe-claude-steer.ts); with nothing
+          // still waiting the run is done — closing the inbox ends the input
+          // stream, then the query. Later messages continue the task instead.
+          if (inbox && inbox.pending() === 0) inbox.close();
         }
       }
+    } finally {
+      args.signal?.removeEventListener('abort', onAbort);
     }
 
-    return { synopsis, tokens };
+    return { synopsis, tokens, ...(sessionId ? { sessionId } : {}), filesChanged };
   }
+}
+
+// What a Write/Edit is about to change, for the console's diff row.
+function editPreview(tool: string, input: Record<string, unknown>): string | undefined {
+  if (tool === 'Write' && typeof input['content'] === 'string') return input['content'];
+  if (typeof input['old_string'] === 'string' && typeof input['new_string'] === 'string') {
+    const minus = input['old_string'].split('\n').map((line) => `- ${line}`);
+    const plus = input['new_string'].split('\n').map((line) => `+ ${line}`);
+    return [...minus, ...plus].join('\n');
+  }
+  return undefined;
+}
+
+// A tool_result's content as text (string, or text blocks).
+function toolResultText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part) => (isRecord(part) && typeof part['text'] === 'string' ? part['text'] : ''))
+    .filter(Boolean)
+    .join('\n');
 }

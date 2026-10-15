@@ -145,7 +145,9 @@ export function applyEvent(state: HubState, event: HubEvent): HubState {
     case 'activity':
       return { ...state, activityLog: [...state.activityLog, event.entry].slice(-ACTIVITY_LOG_CAP) };
     case 'file.shared':
-      // Transient payload — clients that care handle it outside of state.
+    case 'task.transcript':
+      // Transient payloads — clients that care handle them outside of state
+      // (a task's transcript lives in its console, not in the shared state).
       return state;
     default:
       return state;

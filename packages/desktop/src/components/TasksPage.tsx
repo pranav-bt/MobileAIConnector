@@ -11,6 +11,7 @@ function TaskRow(props: {
   expanded: boolean;
   onToggle: () => void;
   send: (command: ClientCommand) => void;
+  onOpenConsole: (taskId: string) => void;
 }): JSX.Element {
   const { state, task } = props;
   const status = TASK_STATUS_LABELS[task.status] ?? { label: task.status, color: 'var(--muted)' };
@@ -56,8 +57,12 @@ function TaskRow(props: {
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{entry.message}</span>
             </div>
           ))}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
+            <button className="console-btn" onClick={() => props.onOpenConsole(task.id)}>
+              Open console
+            </button>
           {STOPPABLE.includes(task.status) && (
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
               <button
                 className="btn deny"
                 style={{ flexGrow: 0, padding: '7px 16px', borderColor: 'rgba(229,104,92,0.5)', color: 'var(--red)' }}
@@ -67,6 +72,7 @@ function TaskRow(props: {
               </button>
             </div>
           )}
+          </div>
         </div>
       )}
     </div>
@@ -76,6 +82,7 @@ function TaskRow(props: {
 export function TasksPage(props: {
   state: HubState;
   send: (command: ClientCommand) => void;
+  onOpenConsole: (taskId: string) => void;
 }): JSX.Element {
   const [expanded, setExpanded] = useState<string | null>(null);
   const tasks = Object.values(props.state.tasks).sort((a, b) => b.updatedAt - a.updatedAt);
@@ -128,6 +135,7 @@ export function TasksPage(props: {
             expanded={expanded === task.id}
             onToggle={() => setExpanded(expanded === task.id ? null : task.id)}
             send={props.send}
+            onOpenConsole={props.onOpenConsole}
           />
         ))}
       </div>
@@ -143,6 +151,7 @@ export function TasksPage(props: {
             expanded={expanded === task.id}
             onToggle={() => setExpanded(expanded === task.id ? null : task.id)}
             send={props.send}
+            onOpenConsole={props.onOpenConsole}
           />
         ))}
       </div>

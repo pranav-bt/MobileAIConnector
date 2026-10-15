@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window and popped-out task consoles: core events (the tray/hotkey kill signal) and opening console windows.",
+  "windows": ["main", "console-*"],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-set-focus"
+  ]
+}

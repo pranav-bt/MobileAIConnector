@@ -10,6 +10,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveModel, type Team } from '@agent-hq/shared';
 import { CodexEngine, unwrapShellCommand } from '../src/engine/codex.js';
+import { MessageInbox } from '../src/engine/inbox.js';
+import type { EngineRow } from '../src/engine/types.js';
 import { evaluatePermission } from '../src/orchestrator/policy.js';
 
 function fail(message: string): never {
@@ -78,6 +80,8 @@ try {
   // 2. A worker: every action asks Agent HQ, and the locks hold.
   const permissions: { toolName: string; command: string }[] = [];
   const activity: string[] = [];
+  const rows = new Map<string, EngineRow>();
+  let sessionSeen = '';
   let tokens = 0;
   const result = await engine.runWorker({
     prompt: 'fake-work please',
@@ -89,6 +93,8 @@ try {
     title: 'Tidy the loader',
     callbacks: {
       onActivity: (line) => activity.push(line),
+      onTranscript: (row) => rows.set(row.id, row),
+      onSession: (id) => (sessionSeen = id),
       onTokens: (total) => (tokens = total),
       onPermission: async (request) => {
         permissions.push({ toolName: request.toolName, command: request.command });
@@ -118,6 +124,45 @@ try {
   if (!requests().some((r) => r.method === 'thread/name/set' && String(r.params['name']).includes('Tidy the loader'))) fail('thread not labelled');
   if (!requests().some((r) => r.method === 'thread/archive' && r.params['threadId'] === result.sessionId)) fail('thread not archived after the run');
   console.log('worker ok: commands + edits ask Agent HQ, outside/data edits blocked, tokens, labelled + archived thread');
+
+  // 2b. Console rows: the command row ends 'ok' with its output, edits are
+  // diff rows, the reply is a message row; files changed; session reported early.
+  const command = [...rows.values()].find((row) => row.kind === 'tool' && row.tool === 'shell');
+  if (!command || command.state !== 'ok' || command.text !== 'node -e "setTimeout(()=>console.log(42),10)"') fail(`command row wrong: ${JSON.stringify(command)}`);
+  if (![...rows.values()].some((row) => row.kind === 'diff' && row.text.includes('ok.txt'))) fail('no diff row for the edit');
+  if (![...rows.values()].some((row) => row.kind === 'message' && row.text.startsWith('fake work done'))) fail('no message row');
+  if (!result.filesChanged) fail('files changed not reported');
+  if (sessionSeen !== result.sessionId) fail('session not reported as it started');
+  console.log('rows ok: command/diff/message rows, files changed, session reported early');
+
+  // 2c. Continue the same conversation: unarchived + resumed, it remembers.
+  const resumed = await engine.runWorker({
+    prompt: 'what did I say before?',
+    team: team(),
+    model,
+    cwd: project,
+    resumeSessionId: result.sessionId,
+    callbacks: { onActivity: () => {}, onTokens: () => {}, onPermission: async () => 'approve' },
+  });
+  if (resumed.sessionId !== result.sessionId || !/fake-work please/.test(resumed.synopsis)) fail(`resume forgot: ${resumed.synopsis}`);
+  if (!requests().some((r) => r.method === 'thread/unarchive' && r.params['threadId'] === result.sessionId)) fail('archived thread not unarchived');
+  if (!requests().some((r) => r.method === 'thread/resume' && r.params['threadId'] === result.sessionId)) fail('thread not resumed');
+  console.log('resume ok: same thread unarchived + resumed, it remembered');
+
+  // 2d. A message while a turn runs is steered into it.
+  const inbox = new MessageInbox();
+  const steering = engine.runWorker({
+    prompt: 'fake-steer wait for me',
+    team: team(),
+    model,
+    cwd: project,
+    inbox,
+    callbacks: { onActivity: () => {}, onTokens: () => {}, onPermission: async () => 'approve' },
+  });
+  setTimeout(() => inbox.push('BANANA'), 300);
+  const steered = await steering;
+  if (!/steered: BANANA/.test(steered.synopsis)) fail(`steer not delivered: ${steered.synopsis}`);
+  console.log('steer ok: message delivered into the running turn');
 
   // 3. MCP grants: a granted server is kept and configured, not disabled.
   await engine.runWorker({

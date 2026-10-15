@@ -216,6 +216,20 @@ try {
   );
   console.log('signed approval accepted, task resumed');
 
+  // 4c. The task console works over the encrypted phone session: the phone
+  // opens a task's console and gets its rows sealed, like every frame.
+  phone.send(sealed.seal(encodeCommand({ type: 'task.watch', taskId: pending.request.taskId })));
+  let consoleRows: { taskId: string; entries: unknown[] } | null = null;
+  for (let attempt = 0; attempt < 200 && !consoleRows; attempt++) {
+    const frame = JSON.parse(await nextPhoneMessage(10000)) as Record<string, unknown>;
+    if (frame['t'] !== 'enc') fail('phone got an unsealed frame');
+    const openedFrame = sealed.open(frame);
+    const event = openedFrame ? decodeEvent(openedFrame) : null;
+    if (event?.type === 'task.transcript' && event.backfill) consoleRows = { taskId: event.taskId, entries: event.entries };
+  }
+  if (!consoleRows || consoleRows.taskId !== pending.request.taskId || consoleRows.entries.length === 0) fail('phone did not get the task console over the sealed session');
+  console.log(`phone console ok: ${consoleRows.entries.length} rows arrived sealed`);
+
   // 5. Kill switch: session drops, device unpinned, reconnect refused.
   local.send(encodeCommand({ type: 'device.revoke' }));
   await phoneClosed;

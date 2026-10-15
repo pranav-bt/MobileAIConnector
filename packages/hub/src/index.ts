@@ -23,6 +23,7 @@ import type { CommandHandlers } from './commands.js';
 import { readMcpCatalog } from './engine/mcp-catalog.js';
 import { CodexEngine } from './engine/codex.js';
 import { EngineRouter } from './engine/router.js';
+import { TranscriptStore } from './transcripts.js';
 
 export interface HubOptions {
   port?: number;
@@ -98,6 +99,8 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   let stopSnapshots: (() => void) | null = null;
   let stopRules: (() => void) | null = null;
   let codexEngine: CodexEngine | null = null;
+  // Task consoles' transcripts (data/transcripts/) — orchestrator modes only.
+  let transcripts: TranscriptStore | null = null;
   let masterRules = (): string => '';
   let mcpCatalog = (): string[] => [];
   let workerCwds: () => string[] = () => [];
@@ -139,6 +142,8 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     orchestrator.onInfoChange(() => bus.publish({ type: 'hub.updated', info: makeInfo() }));
     masterRules = () => orchestrator.masterRulesText();
     mcpCatalog = () => orchestrator.mcpCatalogNames();
+    transcripts = new TranscriptStore(dataDir);
+    orchestrator.attachTranscripts(transcripts);
     orchestrator.init();
     workerCwds = () => orchestrator.activeWorkerCwds();
     attachFreelancers = (manager) => orchestrator.attachFreelancers(manager);
@@ -207,7 +212,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   attachFreelancers(freelancers);
 
   const securityController = new SecurityController(bus, pairing, port);
-  const server: HubServer = await startServer(bus, handlers, securityController, port);
+  const server: HubServer = await startServer(bus, handlers, securityController, port, transcripts);
   securityController.publishState();
   console.log(`[hub] listening on ws://0.0.0.0:${port} (plaintext for loopback, encrypted sessions for the paired device)`);
   console.log(`[hub] pc key fingerprint: ${pairing.fingerprint}`);
@@ -229,6 +234,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
       outbox.stop();
       securityController.stop();
       stopLog();
+      await transcripts?.flush();
       await server.close();
     },
   };

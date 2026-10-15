@@ -18,6 +18,7 @@ const logFile = process.env.FAKE_CODEX_LOG;
 let nextServerRequest = 1000;
 const waiting = new Map(); // server request id -> resolve
 const slowTurns = new Map(); // turnId -> finish()
+const steerWaiters = new Map(); // turnId -> resolve(steered text)
 let threadCounter = 0;
 let turnCounter = 0;
 const threads = new Map(); // threadId -> start params
@@ -68,6 +69,19 @@ async function runTurn(threadId, turnId, text) {
     finish('failed', { message: "You've hit your usage limit. Try again later." });
     return;
   }
+  // "fake-steer": busy until a turn/steer arrives, then answers with it.
+  if (text.includes('fake-steer')) {
+    notify('item/started', { threadId, turnId, item: { type: 'commandExecution', id: `steer-cmd-${turnId}`, command: 'Start-Sleep 5', status: 'inProgress' }, startedAtMs: Date.now() });
+    const steered = await new Promise((resolve) => steerWaiters.set(turnId, resolve));
+    notify('item/completed', { threadId, turnId, item: { type: 'commandExecution', id: `steer-cmd-${turnId}`, command: 'Start-Sleep 5', status: 'completed', exitCode: 0, aggregatedOutput: 'slept' }, completedAtMs: Date.now() });
+    finish('completed', null, `steered: ${steered}`);
+    return;
+  }
+  // "what did I say": answers from this thread's earlier inputs (resume).
+  if (text.includes('what did I say')) {
+    finish('completed', null, `you said: ${(thread.inputs ?? []).join(' | ')}`);
+    return;
+  }
   if (text.includes('fake-slow')) {
     notify('item/started', { threadId, turnId, item: { type: 'commandExecution', id: `slow-${turnId}`, command: 'Start-Sleep 600', status: 'inProgress' }, startedAtMs: Date.now() });
     await new Promise((resolve) => slowTurns.set(turnId, resolve));
@@ -109,11 +123,24 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     }
     case 'thread/name/set':
     case 'thread/archive':
+    case 'thread/unarchive':
       return reply({});
+    case 'thread/resume':
+      if (!threads.has(params.threadId)) return send({ id: message.id, error: { message: 'no such thread' } });
+      return reply({ thread: { id: params.threadId } });
+    case 'turn/steer': {
+      const waiter = steerWaiters.get(params.expectedTurnId);
+      if (!waiter) return send({ id: message.id, error: { message: 'no active turn' } });
+      steerWaiters.delete(params.expectedTurnId);
+      waiter((params.input ?? []).map((input) => input.text ?? '').join(' '));
+      return reply({});
+    }
     case 'turn/start': {
       const turnId = `turn-${++turnCounter}`;
       reply({ turn: { id: turnId, status: 'inProgress', items: [] } });
       const text = (params.input ?? []).map((input) => input.text ?? '').join('\n');
+      const thread = threads.get(params.threadId);
+      if (thread) (thread.inputs ??= []).push(text.slice(0, 80));
       void runTurn(params.threadId, turnId, text);
       return;
     }

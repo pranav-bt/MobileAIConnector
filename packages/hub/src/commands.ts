@@ -7,6 +7,8 @@ import type { ClientCommand, ModelOverrides, ModelTier } from '@agent-hq/shared'
 export interface CommandHandlers {
   submitTask(text: string, projectId: string | null): void;
   stopTask(taskId: string): void;
+  // Task console: talk to a task (the demo hub has no consoles).
+  messageTask?(taskId: string, text: string): void;
   respondPermission(requestId: string, decision: 'approve' | 'deny', scope: 'once' | 'task', choice?: number): void;
   createTeam(input: {
     name: string;
@@ -54,6 +56,11 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
       return handlers.submitTask(command.text, command.projectId ?? null);
     case 'task.stop':
       return handlers.stopTask(command.taskId);
+    case 'task.message':
+      return handlers.messageTask?.(command.taskId, command.text);
+    case 'task.watch':
+    case 'task.unwatch':
+      return; // per-connection: handled by the server
     case 'permission.respond':
       return handlers.respondPermission(command.requestId, command.decision, command.scope, command.choice);
     case 'team.create':

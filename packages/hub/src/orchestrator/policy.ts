@@ -74,6 +74,12 @@ const SHELL_WRITE_FLAGS =
 // as a write (it false-flagged Codex's wrapped commands as "writes outside").
 const SHELL_REDIRECT = /(?<![=-])>>?\s*(?!&|\$null\b|\/dev\/null\b|NUL\b)/i;
 
+// Does this shell command write anything at all (anywhere)? Used to tell
+// whether a run changed files — a follow-up that only looked gets no QA.
+export function shellWrites(command: string): boolean {
+  return SHELL_WRITE_VERBS.test(command) || SHELL_WRITE_FLAGS.test(command) || SHELL_REDIRECT.test(command);
+}
+
 // git's global options name the repo a command acts on, so `git -C <path>`
 // and `git --git-dir=<path>` are how a worker reaches another project's repo
 // without a single out-of-project token anywhere else in the line.

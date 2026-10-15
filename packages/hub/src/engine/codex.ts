@@ -5,7 +5,8 @@ import type { ModelSpec, Team, Usage } from '@agent-hq/shared';
 import type { LockedDir } from '../orchestrator/util.js';
 import { AppServerClient, findCodexBinary, type JsonObject, type Notification } from './codex-rpc.js';
 import { DEFAULT_MAX_SUBAGENTS, refusalMessage, refusedWrite, workerInstructions } from './instructions.js';
-import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from './types.js';
+import type { EngineRow, OrchestratorEngine, WorkerInbox, WorkerRunCallbacks, WorkerRunResult } from './types.js';
+import { shellWrites } from '../orchestrator/policy.js';
 
 // The Codex engine: workers, leads and one-shot calls on OpenAI Codex models
 // through the app-server (see codex-rpc.ts). Same guarantees as the Claude
@@ -46,6 +47,55 @@ function describeItem(item: Item): string | null {
     case 'agentMessage': {
       const text = String(item['text'] ?? '').trim();
       return text ? text.slice(0, 80) : null;
+    }
+    default:
+      return null;
+  }
+}
+
+// A Codex item as a console row: commands and tool calls start 'running' and
+// are replaced with their output; edits are diff rows; the agent's messages
+// and reasoning arrive whole when complete.
+function itemRow(item: Item, phase: 'running' | 'done'): EngineRow | null {
+  const id = item.id ?? '';
+  if (!id) return null;
+  switch (item.type) {
+    case 'commandExecution': {
+      const text = unwrapShellCommand(String(item['command'] ?? 'command'));
+      if (phase === 'running') return { id, kind: 'tool', tool: 'shell', text, state: 'running' };
+      const exit = item['exitCode'];
+      const output = typeof item['aggregatedOutput'] === 'string' ? item['aggregatedOutput'] : '';
+      return { id, kind: 'tool', tool: 'shell', text, state: typeof exit === 'number' && exit !== 0 ? 'error' : 'ok', ...(output ? { detail: output } : {}) };
+    }
+    case 'fileChange': {
+      const changes = (item['changes'] as { path: string; diff?: string }[] | undefined) ?? [];
+      return {
+        id,
+        kind: 'diff',
+        tool: 'edit',
+        text: `edit ${changes.map((change) => change.path).join(', ') || 'files'}`,
+        detail: changes.map((change) => `${change.path}\n${change.diff ?? ''}`).join('\n\n'),
+        state: phase === 'running' ? 'running' : String(item['status'] ?? '').toLowerCase().includes('fail') || String(item['status'] ?? '').toLowerCase().includes('declin') ? 'error' : 'ok',
+      };
+    }
+    case 'mcpToolCall':
+      return {
+        id,
+        kind: 'tool',
+        tool: `${String(item['server'])}.${String(item['tool'])}`,
+        text: `${String(item['server'])}: ${String(item['tool'])}`,
+        state: phase === 'running' ? 'running' : String(item['status'] ?? '').toLowerCase().includes('fail') ? 'error' : 'ok',
+      };
+    case 'webSearch':
+      return { id, kind: 'tool', tool: 'web', text: `web search${typeof item['query'] === 'string' ? `: ${item['query']}` : ''}`, state: phase === 'running' ? 'running' : 'ok' };
+    case 'agentMessage': {
+      const text = String(item['text'] ?? '').trim();
+      return phase === 'done' && text ? { id, kind: 'message', text } : null;
+    }
+    case 'reasoning': {
+      const summary = (item['summary'] as string[] | undefined) ?? [];
+      const text = summary.join('\n').trim();
+      return phase === 'done' && text ? { id, kind: 'thinking', text } : null;
     }
     default:
       return null;
@@ -130,8 +180,12 @@ export class CodexEngine implements OrchestratorEngine {
     params: JsonObject,
     hooks: {
       onItem?: (item: Item) => void;
-      onTokens?: (total: number) => void;
+      onItemDone?: (item: Item) => void;
+      onTokens?: (total: number, last: number) => void;
       onRequest?: (method: string, params: JsonObject) => Promise<unknown>;
+      // The owner's messages while this turn runs: steered straight in.
+      inbox?: WorkerInbox;
+      onSteerFailed?: (text: string) => void;
       signal?: AbortSignal;
     } = {},
   ): Promise<{ status: string; text: string; tokens: number; error: string | null }> {
@@ -159,10 +213,11 @@ export class CodexEngine implements OrchestratorEngine {
       } else if (note.method === 'item/completed' && item) {
         if (item.id) items.set(item.id, item);
         if (item.type === 'agentMessage') text = String(item['text'] ?? '');
+        hooks.onItemDone?.(item);
       } else if (note.method === 'thread/tokenUsage/updated') {
-        const usage = note.params['tokenUsage'] as { total?: { totalTokens?: number } } | undefined;
+        const usage = note.params['tokenUsage'] as { total?: { totalTokens?: number }; last?: { totalTokens?: number } } | undefined;
         tokens = usage?.total?.totalTokens ?? tokens;
-        hooks.onTokens?.(tokens);
+        hooks.onTokens?.(tokens, usage?.last?.totalTokens ?? 0);
       } else if (note.method === 'turn/completed' && (note.params['turn'] as { id?: string } | undefined)?.id === turnId) {
         finish(note);
       }
@@ -180,15 +235,28 @@ export class CodexEngine implements OrchestratorEngine {
       if (turnId) void client.request('turn/interrupt', { threadId, turnId }, 15_000).catch(() => undefined);
     };
     hooks.signal?.addEventListener('abort', onAbort, { once: true });
+    let active = false;
+    const offInbox = hooks.inbox?.subscribe((message) => {
+      if (!active || !turnId) return false; // not running: queue for the next turn
+      const expectedTurnId = turnId;
+      void client
+        .request('turn/steer', { threadId, expectedTurnId, input: [{ type: 'text', text: message, text_elements: [] }] }, 15_000)
+        .catch(() => hooks.onSteerFailed?.(message));
+      return true;
+    });
     try {
       const started = await client.request<{ turn: { id: string } }>('turn/start', { threadId, ...params });
       turnId = started.turn.id;
+      active = true;
       for (const note of early.splice(0)) handle(note);
       if (hooks.signal?.aborted) onAbort();
       const done = await finished;
+      active = false;
       const turn = done.params['turn'] as { status: string; error?: { message?: string } | null };
       return { status: turn.status, text, tokens, error: turn.error?.message ?? null };
     } finally {
+      active = false;
+      offInbox?.();
       offNote();
       offRequest();
       hooks.signal?.removeEventListener('abort', onAbort);
@@ -227,85 +295,132 @@ export class CodexEngine implements OrchestratorEngine {
     callbacks: WorkerRunCallbacks;
     signal?: AbortSignal;
     title?: string;
+    resumeSessionId?: string;
+    inbox?: WorkerInbox;
   }): Promise<WorkerRunResult> {
     const { callbacks } = args;
     const client = await this.#ready();
     const extraDirs = args.extraDirs ?? [];
-    const { thread } = await client.request<{ thread: { id: string } }>('thread/start', {
-      model: args.model.id,
+    const threadSettings = {
       cwd: args.cwd,
       approvalPolicy: 'untrusted',
       sandbox: 'workspace-write',
       config: this.#mcpConfig(args.team.mcpServers),
       developerInstructions: workerInstructions(args.team.charter, args.maxSubagents ?? DEFAULT_MAX_SUBAGENTS),
-    });
-    // Recognizable in the owner's Codex history (archived when done, so it
-    // stays out of the way but can be resumed).
-    void client.request('thread/name/set', { threadId: thread.id, name: `Agent HQ · ${(args.title ?? args.team.name).slice(0, 60)}` }).catch(() => undefined);
+    };
+    let threadId: string;
+    if (args.resumeSessionId) {
+      // Continue the same conversation: it was archived after its last run.
+      threadId = args.resumeSessionId;
+      await client.request('thread/unarchive', { threadId }).catch(() => undefined);
+      await client.request('thread/resume', { threadId, model: args.model.id, excludeTurns: true, ...threadSettings });
+    } else {
+      const { thread } = await client.request<{ thread: { id: string } }>('thread/start', { model: args.model.id, ...threadSettings });
+      threadId = thread.id;
+      // Recognizable in the owner's Codex history (archived when done, so it
+      // stays out of the way but can be resumed).
+      void client.request('thread/name/set', { threadId, name: `Agent HQ · ${(args.title ?? args.team.name).slice(0, 60)}` }).catch(() => undefined);
+    }
+    callbacks.onSession?.(threadId);
 
-    const result = await this.#turn(
-      client,
-      thread.id,
-      {
-        input: [{ type: 'text', text: args.prompt, text_elements: [] }],
-        ...(args.model.effort ? { effort: args.model.effort } : {}),
-        sandboxPolicy: {
-          type: 'workspaceWrite',
-          writableRoots: [args.cwd, ...extraDirs],
-          networkAccess: true, // every command still asks the policy (sending data out raises a card)
-          excludeTmpdirEnvVar: true,
-          excludeSlashTmp: true,
-        },
+    let filesChanged = false;
+    let baseline: number | null = null; // the thread's token total before this run
+    let tokens = 0;
+    const late: string[] = []; // messages a finished turn couldn't take
+    const emit = (row: EngineRow) => callbacks.onTranscript?.(row);
+    const hooks = {
+      signal: args.signal,
+      inbox: args.inbox,
+      onSteerFailed: (text: string) => late.push(text),
+      onItem: (item: Item) => {
+        const line = describeItem(item);
+        if (line) callbacks.onActivity(line);
+        const row = itemRow(item, 'running');
+        if (row) emit(row);
       },
-      {
-        signal: args.signal,
-        onItem: (item) => {
-          const line = describeItem(item);
-          if (line) callbacks.onActivity(line);
-        },
-        onTokens: (total) => callbacks.onTokens(total),
-        onRequest: async (method, request) => {
-          if (method === 'item/commandExecution/requestApproval') {
-            const command = unwrapShellCommand(String(request['command'] ?? ''));
-            const decision = await callbacks.onPermission({
-              toolName: 'Bash',
-              command,
-              reason: typeof request['reason'] === 'string' && request['reason'] ? String(request['reason']) : `Requested while working in ${args.cwd}`,
-            });
-            return { decision: decision === 'approve' ? 'accept' : 'decline' };
-          }
-          if (method === 'item/fileChange/requestApproval') {
-            const paths = ((request['changes'] as { path: string }[] | undefined) ?? []).map((change) => change.path);
-            if (paths.length === 0) return { decision: 'decline' };
-            for (const path of paths) {
-              const refused = refusedWrite({ file_path: path }, args.cwd, extraDirs, args.locked);
-              if (refused) {
-                callbacks.onActivity(refused.config ? `blocked: write into Agent HQ's own data — ${refused.path}` : `blocked: write outside this project — ${refused.path}`);
-                return { decision: 'decline' };
-              }
+      onItemDone: (item: Item) => {
+        if (item.type === 'fileChange') filesChanged = true;
+        if (item.type === 'commandExecution' && shellWrites(unwrapShellCommand(String(item['command'] ?? '')))) filesChanged = true;
+        const row = itemRow(item, 'done');
+        if (row) emit(row);
+      },
+      // The thread's running total includes earlier runs of a resumed
+      // conversation: count from where this run started.
+      onTokens: (total: number, last: number) => {
+        if (baseline === null) baseline = Math.max(0, total - last);
+        tokens = Math.max(0, total - baseline);
+        callbacks.onTokens(tokens);
+      },
+      onRequest: async (method: string, request: JsonObject) => {
+        if (method === 'item/commandExecution/requestApproval') {
+          const command = unwrapShellCommand(String(request['command'] ?? ''));
+          const decision = await callbacks.onPermission({
+            toolName: 'Bash',
+            command,
+            reason: typeof request['reason'] === 'string' && request['reason'] ? String(request['reason']) : `Requested while working in ${args.cwd}`,
+          });
+          return { decision: decision === 'approve' ? 'accept' : 'decline' };
+        }
+        if (method === 'item/fileChange/requestApproval') {
+          const paths = ((request['changes'] as { path: string }[] | undefined) ?? []).map((change) => change.path);
+          if (paths.length === 0) return { decision: 'decline' };
+          for (const path of paths) {
+            const refused = refusedWrite({ file_path: path }, args.cwd, extraDirs, args.locked);
+            if (refused) {
+              callbacks.onActivity(refused.config ? `blocked: write into Agent HQ's own data — ${refused.path}` : `blocked: write outside this project — ${refused.path}`);
+              return { decision: 'decline' };
             }
-            const decision = await callbacks.onPermission({ toolName: 'Edit', command: `Edit ${paths.join(', ')}`, reason: `Requested while working in ${args.cwd}` });
-            return { decision: decision === 'approve' ? 'accept' : 'decline' };
           }
-          if (method === 'item/permissions/requestApproval') {
-            // Extra sandbox permissions are never granted: the project folder
-            // (+ inbox/outbox) is the boundary, as for Claude workers.
-            callbacks.onActivity('asked for extra sandbox permissions — not granted');
-            return { permissions: {}, scope: 'turn' };
-          }
-          if (method === 'item/tool/requestUserInput') {
-            callbacks.onActivity('asked a question mid-task — answered "decide yourself and say so in your report"');
-            return { answers: {} };
-          }
-          return {};
-        },
+          const decision = await callbacks.onPermission({ toolName: 'Edit', command: `Edit ${paths.join(', ')}`, reason: `Requested while working in ${args.cwd}` });
+          return { decision: decision === 'approve' ? 'accept' : 'decline' };
+        }
+        if (method === 'item/permissions/requestApproval') {
+          // Extra sandbox permissions are never granted: the project folder
+          // (+ inbox/outbox) is the boundary, as for Claude workers.
+          callbacks.onActivity('asked for extra sandbox permissions — not granted');
+          return { permissions: {}, scope: 'turn' };
+        }
+        if (method === 'item/tool/requestUserInput') {
+          callbacks.onActivity('asked a question mid-task — answered "decide yourself and say so in your report"');
+          return { answers: {} };
+        }
+        return {};
       },
-    );
-    void client.request('thread/archive', { threadId: thread.id }).catch(() => undefined);
+    };
+
+    let input = args.prompt;
+    let result: { status: string; text: string; tokens: number; error: string | null };
+    try {
+      for (;;) {
+        result = await this.#turn(
+          client,
+          threadId,
+          {
+            input: [{ type: 'text', text: input, text_elements: [] }],
+            ...(args.model.effort ? { effort: args.model.effort } : {}),
+            sandboxPolicy: {
+              type: 'workspaceWrite',
+              writableRoots: [args.cwd, ...extraDirs],
+              networkAccess: true, // every command still asks the policy (sending data out raises a card)
+              excludeTmpdirEnvVar: true,
+              excludeSlashTmp: true,
+            },
+          },
+          hooks,
+        );
+        // Messages that arrived as the turn ended run as one more turn on the
+        // same conversation.
+        const waiting = [...late.splice(0), ...(args.inbox?.take() ?? [])];
+        if (result.status !== 'completed' || waiting.length === 0 || args.signal?.aborted) break;
+        input = waiting.join('\n\n');
+      }
+    } finally {
+      void client.request('thread/archive', { threadId }).catch(() => undefined);
+    }
     if (result.status === 'failed') {
       throw new Error(result.error ? `Codex: ${result.error}` : 'Codex turn failed');
     }
-    return { synopsis: result.text, tokens: result.tokens, sessionId: thread.id };
+    return { synopsis: result.text, tokens: tokens || result.tokens, sessionId: threadId, filesChanged };
   }
 
   // The ChatGPT plan's limits, for the Resources page (no usage spent).
