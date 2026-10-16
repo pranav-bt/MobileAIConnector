@@ -265,6 +265,110 @@ try {
   if (!activities(chosenId, mark).some((m) => m === 'mock: read-only review · engine codex')) fail('the chosen reviewer did not run on its engine');
   console.log('reviewer seat ok: Codex author → Opus 5.5 by default; per-team choice beats all-reviewers');
 
+  // 9. The master picks the mode — only from "## Pairing" rules; your
+  // explicit choice wins; "none" falls back to the team's default.
+  send({ type: 'models.set', overrides: { teams: {} } });
+  await settle(300);
+  mark = events.length;
+  send({ type: 'task.submit', text: '@pairproj coding: pairrule-debate before any rules' });
+  const noRules = await created('before any rules');
+  await finished(noRules, mark);
+  if (taskOf(noRules)?.pair) fail('the master paired without a Pairing rule');
+  // A general rule mentioning pairs is not a Pairing rule.
+  send({ type: 'team.rules.add', teamId: 'master', rule: 'Pair programming is great; keep tasks small.' });
+  await settle(300);
+  mark = events.length;
+  send({ type: 'task.submit', text: '@pairproj coding: pairrule-debate general rule only' });
+  const generalOnly = await created('general rule only');
+  await finished(generalOnly, mark);
+  if (taskOf(generalOnly)?.pair) fail('a general rule turned pairing on');
+  send({ type: 'team.rules.add', teamId: 'master', rule: 'Pair-review anything touching auth (pairrule-review).', section: 'pairing' });
+  await settle(300);
+  mark = events.length;
+  send({ type: 'task.submit', text: '@pairproj coding: pairrule-review fix the auth check' });
+  const byRule = await created('fix the auth check');
+  await finished(byRule, mark);
+  if (taskOf(byRule)?.pair?.mode !== 'review' || taskOf(byRule)?.pair?.state !== 'agreed') fail(`the Pairing rule did not pair: ${JSON.stringify(taskOf(byRule)?.pair)}`);
+  if (!activities(byRule, mark).some((m) => /· pair mode — your pairing rule$/.test(m))) fail('the routed line does not say the rule picked it');
+  mark = events.length;
+  send({ type: 'task.submit', text: '@pairproj coding: pairrule-debate decide the cache design' });
+  const debated = await created('decide the cache design');
+  await finished(debated, mark);
+  if (taskOf(debated)?.pair?.mode !== 'debate') fail(`the master's debate pick was not used: ${taskOf(debated)?.pair?.mode}`);
+  mark = events.length;
+  send({ type: 'task.submit', text: '/solo @pairproj coding: pairrule-review solo wins' });
+  const soloWins = await created('solo wins');
+  await finished(soloWins, mark);
+  if (taskOf(soloWins)?.pair) fail('/solo lost to the master\'s pick');
+  mark = events.length;
+  send({ type: 'task.submit', text: '@pairproj coding: nothing to pair here' });
+  const none = await created('nothing to pair here');
+  await finished(none, mark);
+  if (taskOf(none)?.pair) fail('"none" paired anyway');
+  send({ type: 'models.set', overrides: { teams: { coding: { pairByDefault: true } } } });
+  await settle(300);
+  mark = events.length;
+  send({ type: 'task.submit', text: '@pairproj coding: team default still applies' });
+  const teamDefault2 = await created('team default still applies');
+  await finished(teamDefault2, mark);
+  if (taskOf(teamDefault2)?.pair?.mode !== 'review') fail('"none" from the master overrode the team default');
+  console.log('master picks ok: only Pairing rules turn pairing on (review / debate picked), /solo wins, "none" leaves the team default');
+
+  // 10. Failover (opt-in): a nearly-used-up plan hands its seats to the other
+  // engine; off by default; both nearly out = no change; recovery switches back.
+  const setUsage = (claudePct: number, codexPct: number | null) =>
+    hub.bus.publish({
+      type: 'usage.updated',
+      usage: {
+        ...hub.bus.state.usage,
+        windowPct: claudePct,
+        weeklyPct: 10,
+        codex: codexPct === null ? null : { plan: 'test', windowPct: null, windowResetsAt: null, weeklyPct: codexPct, weeklyResetsAt: null },
+      },
+    });
+  const engineOfWorker = (taskId: string, from: number) =>
+    activities(taskId, from).find((m) => m.startsWith('mock: engine '))?.slice('mock: engine '.length);
+  send({ type: 'models.set', overrides: { teams: {} } });
+  setUsage(95, 20);
+  await settle(300);
+  mark = events.length;
+  send({ type: 'task.submit', text: '@pairproj coding: failover-off check' });
+  const offCheck = await created('failover-off check');
+  await finished(offCheck, mark);
+  if (engineOfWorker(offCheck, mark) !== 'claude') fail('failover acted while switched off');
+  send({ type: 'models.set', overrides: { failover: true, teams: {} } });
+  await settle(300);
+  mark = events.length;
+  send({ type: 'task.submit', text: '@pairproj coding: failover-on check' });
+  const onCheck = await created('failover-on check');
+  await finished(onCheck, mark);
+  if (engineOfWorker(onCheck, mark) !== 'codex') fail(`a nearly-out Claude plan did not move the worker to Codex: ${engineOfWorker(onCheck, mark)}`);
+  if (!events.slice(mark).some((e) => e.type === 'activity' && /^Coding team workers: Sonnet 5 → GPT-6\.1-Sol — the Claude plan is nearly used up \(≥90%\)$/.test(e.entry.message))) {
+    fail('no failover line for the coding workers');
+  }
+  // The pair partner of a failed-over author is then the other engine again (Opus 5.5).
+  mark = events.length;
+  send({ type: 'task.submit', text: '/pair @pairproj coding: failover-pair check' });
+  const pairCheck = await created('failover-pair check');
+  await finished(pairCheck, mark);
+  if (taskOf(pairCheck)?.pair?.authorModel !== 'gpt-6.1-sol') fail(`failover pair author: ${taskOf(pairCheck)?.pair?.authorModel}`);
+  setUsage(95, 95);
+  await settle(300);
+  mark = events.length;
+  send({ type: 'task.submit', text: '@pairproj coding: failover-both check' });
+  const bothCheck = await created('failover-both check');
+  await finished(bothCheck, mark);
+  if (engineOfWorker(bothCheck, mark) !== 'claude') fail('both plans nearly out should leave seats where they are');
+  setUsage(30, 20);
+  await settle(300);
+  mark = events.length;
+  send({ type: 'task.submit', text: '@pairproj coding: failover-recovered check' });
+  const recovered = await created('failover-recovered check');
+  await finished(recovered, mark);
+  if (engineOfWorker(recovered, mark) !== 'claude') fail('seats did not move back after the plan recovered');
+  send({ type: 'models.set', overrides: { teams: {} } });
+  console.log('failover ok: off by default; nearly-out Claude → Codex seats (announced once); both out = no change; recovery moves back');
+
   console.log('PAIR SMOKE PASS');
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));

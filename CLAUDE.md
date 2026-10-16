@@ -322,6 +322,43 @@ npm run typecheck      # tsc across workspaces
   — bounded on long, brace-heavy replies). Tests: `pair-debate.smoke` (in
   `npm run smoke`), `pair-debate.live.ts` (a steered text debate + a real
   bug fix), `tools/drive-pair.mjs` (all three modes in Edge).
+- The master picks a pair mode ONLY from rules under "## Pairing" in its
+  RULES.md (`MASTER_SECTIONS.pairing`; `/rule master/pairing: …`; an
+  untouched old template is upgraded via `legacyMasterTemplate`): routing then
+  asks for `"pair": review|split|debate|none` and `RoutingDecision.pair`
+  carries it. Precedence: the owner's explicit choice (/pair, /solo, the
+  button, `pair` on task.submit) > the master's rule-based pick > the team's
+  pairByDefault ("none" falls through to it). The routed line ends "— your
+  pairing rule". Live check: `test/pair-routing.live.ts` (tasks paused:
+  routing only).
+- Failover (opt-in, `modelOverrides.failover`, Settings > Models): a seat
+  whose plan is at >= 90% of its 5-hour or weekly window (`Usage` /
+  `Usage.codex`) runs on the other engine's flagship (`PAIR_REVIEWER_DEFAULT`)
+  — master, quick checks, leads, workers, split parts, reviewers all go
+  through `#failover`; announced once per seat; unchanged when both plans are
+  nearly out or the other engine isn't installed (`EngineRouter.available`);
+  Agent HQ's own project still keeps Claude workers.
+- Codex freelancers: the owner's own Codex sessions (VS Code panel / codex
+  CLI) join the Freelancers strip as `fx-<thread id>` agents (model 'codex').
+  `codex-sessions.ts` reads `~/.codex/sessions/**/rollout-*.jsonl` by byte
+  ranges only (rollouts reach hundreds of MB): session_meta's originator/
+  source skip Agent HQ's own threads ("agent-hq"), `codex exec` runs and
+  sub-agents; names from `session_index.jsonl`; open = the thread's writer
+  lock is held (`thread-writer-locks/<id>.lock` reads fail with EBUSY) or
+  written in the last 2 min. An instruction becomes a normal freelancer task;
+  the orchestrator's runner continues the thread with `runWorker({ foreign:
+  true })` — the owner's setup untouched (no HQ instructions, their MCP,
+  model and effort, never archived) but every command/edit through the
+  policy and cards; Codex allows one writer, so a thread their window holds
+  continues in a FORK (later instructions continue the fork). Tests with a
+  redirected Claude dir skip Codex unless given `codexHome`. Tests:
+  `codex-freelancers.smoke` (fake ~/.codex, in `npm run smoke`),
+  fake-app-server owner-thread cases in `codex-engine.smoke`,
+  `codex-freelancer.live.ts` (real reader, counts only; fork + in-place on
+  throwaway threads), `probe-codex-freelancer.ts` (the writer-lock facts).
+- The phone renders pair seats' replies like the desktop (verdict / plan /
+  exchange, raw one tap away): `model/PairReplies.kt` mirrors the shared
+  parser (unit test `PairRepliesTest`).
 - Image generation (`tools/generate-image.mjs`) is LOCAL FIRST: on-demand
   ComfyUI at D:\AI\comfyui (boots per job, watchdog kills it after ~2 min
   idle — zero background footprint; models: FLUX schnell fp8 default, SDXL

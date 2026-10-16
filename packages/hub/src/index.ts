@@ -22,6 +22,7 @@ import { loadHubConfig, saveModelOverrides, savePaEnabled, savePermissionMode, t
 import type { CommandHandlers } from './commands.js';
 import { readMcpCatalog } from './engine/mcp-catalog.js';
 import { CodexEngine } from './engine/codex.js';
+import { findCodexBinary } from './engine/codex-rpc.js';
 import { EngineRouter } from './engine/router.js';
 import { TranscriptStore } from './transcripts.js';
 
@@ -34,6 +35,9 @@ export interface HubOptions {
   cwd?: string;
   workspaceRoots?: WorkspaceRoot[]; // tests override; defaults from data/config.json
   claudeProjectsDir?: string; // tests override; defaults to ~/.claude/projects
+  // Where the owner's Codex sessions live (~/.codex). A hub whose Claude dir
+  // is overridden (every test) doesn't look at Codex unless given one too.
+  codexHome?: string | null;
   freelancerOpenSessions?: () => number; // tests override the process scan
   freelancerRunner?: (sessionId: string, cwd: string, text: string) => Promise<string>; // tests override the sidecar
   paTickMs?: number; // tests speed up the PA desk clock
@@ -113,7 +117,10 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     // the model's engine. The mock engine stands in for both offline.
     const mock = mode === 'mock' ? new MockEngine() : null;
     codexEngine = mode === 'claude' ? new CodexEngine() : null;
-    const engine = new EngineRouter(mock ? { claude: mock, codex: mock } : { claude: new ClaudeEngine(), codex: codexEngine! });
+    const engine = new EngineRouter(
+      mock ? { claude: mock, codex: mock } : { claude: new ClaudeEngine(), codex: codexEngine! },
+      mock ? {} : { codex: findCodexBinary() !== null },
+    );
     const registry = new TeamRegistry(dataDir);
     registry.init();
     const projects = new ProjectRegistry(dataDir, workspaceRoots);
@@ -203,6 +210,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   // and can be messaged (the hub resumes their conversation headlessly).
   const freelancers = new FreelancerManager(bus, {
     ...(options.claudeProjectsDir ? { projectsDir: options.claudeProjectsDir } : {}),
+    codexHome: options.codexHome !== undefined ? options.codexHome : options.claudeProjectsDir ? null : undefined,
     ...(options.freelancerOpenSessions ? { openSessions: options.freelancerOpenSessions } : {}),
     ...(options.freelancerRunner ? { runner: options.freelancerRunner } : {}),
     outboxDir: outbox.outboxDir,

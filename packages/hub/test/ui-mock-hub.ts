@@ -18,6 +18,8 @@ await startHub({
   dataDir: join(sandbox, 'data'),
   generalDir: join(sandbox, 'general'),
   claudeProjectsDir: mkdtempSync(join(tmpdir(), 'agent-hq-ui-hub-claude-')),
+  // `--codex-home <dir>`: a fake ~/.codex, to show Codex freelancers
+  ...(process.argv.includes('--codex-home') ? { codexHome: process.argv[process.argv.indexOf('--codex-home') + 1] ?? null } : {}),
   workspaceRoots: [{ key: 'tmp', path: tmpdir(), label: 'test sandbox' }],
 });
 const ws = new WebSocket(`ws://127.0.0.1:${port}`);

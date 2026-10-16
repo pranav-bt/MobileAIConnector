@@ -54,7 +54,7 @@ export class MockEngine implements OrchestratorEngine {
     // task exercises the scaffold -> parallel parts -> integration path,
     // "parallel-overlap" a plan whose parts share files (must be rejected),
     // "parallel-wide" a 3-way split with no scaffold.
-    if (args.prompt.includes('"split"')) {
+    if (args.prompt.includes('{"split": false}')) {
       const taskLine = args.prompt.match(/^Task: (.*)$/m)?.[1] ?? '';
       const overlap = taskLine.includes('parallel-overlap');
       if (taskLine.includes('parallel-wide')) {
@@ -124,6 +124,9 @@ export class MockEngine implements OrchestratorEngine {
         };
       }
       const teamId = teamIds.find((id) => id && text.includes(id)) ?? teamIds[0] ?? 'coding';
+      // With pairing rules in the prompt: "pairrule-<mode>" in the ask picks that mode.
+      const pairRules = args.prompt.includes('rules for pair mode');
+      const pair = pairRules ? (text.match(/pairrule-(review|split|debate)/)?.[1] ?? 'none') : undefined;
       // Unnamed asks: "unsure-test" doesn't fit the thread (suggesting any
       // listed project id or folder named in the ask), "general-test" is
       // about no project; everything else continues the thread.
@@ -142,6 +145,7 @@ export class MockEngine implements OrchestratorEngine {
           suggest,
           title: (taskMatch?.[1] ?? 'task').slice(0, 60),
           reason: 'mock routing by keyword',
+          ...(pair ? { pair } : {}),
         }),
         tokens: 12,
       };

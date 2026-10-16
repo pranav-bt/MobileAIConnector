@@ -1,4 +1,4 @@
-import type { ModelSpec, Team } from '@agent-hq/shared';
+import type { EngineId, ModelSpec, Team } from '@agent-hq/shared';
 import type { LockedDir } from '../orchestrator/util.js';
 
 // The engine boundary. Anything that can run an agent (Claude Agent SDK
@@ -57,6 +57,10 @@ export interface WorkerInbox {
 }
 
 export interface OrchestratorEngine {
+  // Whether an engine can run on this PC at all (Codex needs its CLI).
+  // Absent = every engine is.
+  available?(engine: EngineId): boolean;
+
   // One model call, no tools — what master routing and lead reviews use.
   complete(args: { prompt: string; model: ModelSpec }): Promise<{ text: string; tokens: number }>;
 
@@ -80,6 +84,9 @@ export interface OrchestratorEngine {
     // `prompt` is then the owner's follow-up.
     resumeSessionId?: string;
     inbox?: WorkerInbox;
+    // The owner's own conversation (a Codex freelancer's thread): left as
+    // it is — not archived, no Agent HQ instructions — forked if it's open.
+    foreign?: boolean;
     // A reviewer: may read and run read-only commands, never write (file
     // tools removed, shell writes refused, Codex sandbox read-only).
     readOnly?: boolean;

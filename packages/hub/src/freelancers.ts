@@ -4,6 +4,7 @@ import { open, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { HubBus } from './bus.js';
+import { codexRollouts, codexSessionFacts, codexSessionName, codexThreadNames, heldCodexThreads, type CodexSessionFacts } from './codex-sessions.js';
 
 // Freelancers: plain Claude Code sessions on this machine.
 //
@@ -21,6 +22,14 @@ import type { HubBus } from './bus.js';
 // the reply comes back as an activity line and a report pushed to the phone.
 // (The terminal window itself can't be typed into from outside — this
 // continues the same conversation next to it.)
+//
+// CODEX — the owner's Codex sessions (VS Code panel / codex CLI) show up the
+// same way ("fx-" agents; codex-sessions.ts reads them): open while Codex
+// holds the thread's writer lock, or written in the last 2 minutes. An
+// instruction continues the thread through Agent HQ's own Codex app-server
+// (the runner the orchestrator sets: every command/edit still goes through
+// the policy) — in place when no window has it open, otherwise in a fork
+// (Codex allows one writer per thread); later instructions continue the fork.
 
 const POLL_MS = 5000;
 const PROCESS_SCAN_MS = 15_000;
@@ -41,7 +50,11 @@ interface SessionInfo {
   sessionId: string;
   cwd: string;
   name: string;
+  engine?: 'claude' | 'codex';
 }
+
+// Continues a Codex thread with an instruction (set by the orchestrator).
+export type CodexFreelancerRunner = (threadId: string, cwd: string, text: string, agentId: string) => Promise<{ reply: string; threadId: string }>;
 
 function readChunks(path: string, size: number): string {
   const fd = openSync(path, 'r');
@@ -164,8 +177,10 @@ export class FreelancerManager {
       activeCwds?: () => string[];
       openSessions?: () => number; // tests inject; real scans processes
       runner?: (sessionId: string, cwd: string, text: string) => Promise<string>; // tests inject; real spawns claude
+      codexHome?: string | null; // tests inject; null = don't look; real ~/.codex
     },
   ) {
+    this.#codexHome = options.codexHome === null ? null : (options.codexHome ?? join(homedir(), '.codex'));
     this.#bus = bus;
     this.#projectsDir = options.projectsDir ?? join(homedir(), '.claude', 'projects');
     this.#outboxDir = options.outboxDir;
@@ -175,6 +190,65 @@ export class FreelancerManager {
   }
 
   #runnerOverride: ((sessionId: string, cwd: string, text: string) => Promise<string>) | null = null;
+  #codexHome: string | null;
+  #codexRunner: CodexFreelancerRunner | null = null;
+  // Rollout facts by path (re-read only when the file moves), thread names,
+  // and the forks hub instructions continued in (agentId -> fork thread).
+  #codexFacts = new Map<string, { mtimeMs: number; size: number; facts: CodexSessionFacts | null }>();
+  #codexNames: { stamp: string; names: Map<string, string> } | undefined;
+  #codexForks = new Map<string, string>();
+
+  setCodexRunner(runner: CodexFreelancerRunner): void {
+    this.#codexRunner = runner;
+  }
+
+  // The owner's open (or just-written) Codex sessions, newest first.
+  async #codexCandidates(now: number, busyCwds: Set<string>): Promise<{ agentId: string; mtime: number; info: SessionInfo; activity: string; open: boolean }[]> {
+    const home = this.#codexHome;
+    if (!home) return [];
+    const files = await codexRollouts(home, now, LOOKBACK_MS);
+    if (files.length === 0) return [];
+    const [held, names] = await Promise.all([heldCodexThreads(home), codexThreadNames(home, this.#codexNames)]);
+    this.#codexNames = names;
+    const seen = new Set<string>();
+    const found: { agentId: string; mtime: number; info: SessionInfo; activity: string; open: boolean }[] = [];
+    for (const path of files) {
+      let stats;
+      try {
+        stats = await stat(path);
+      } catch {
+        continue;
+      }
+      seen.add(path);
+      let cached = this.#codexFacts.get(path);
+      if (!cached || cached.mtimeMs !== stats.mtimeMs || cached.size !== stats.size) {
+        let facts: CodexSessionFacts | null;
+        try {
+          const chunk = await readChunksAsync(path, stats.size);
+          const split = chunk.indexOf('\n');
+          facts = codexSessionFacts(basename(path), chunk.slice(0, Math.min(HEAD_BYTES, chunk.length)), split >= 0 ? chunk.slice(split) : chunk);
+        } catch {
+          continue; // mid-write or vanished; next tick retries
+        }
+        cached = { mtimeMs: stats.mtimeMs, size: stats.size, facts };
+        this.#codexFacts.set(path, cached);
+      }
+      const facts = cached.facts;
+      if (!facts) continue;
+      const open = held.has(facts.threadId);
+      if (!open && now - stats.mtimeMs > FALLBACK_WINDOW_MS) continue;
+      if (facts.cwd && busyCwds.has(facts.cwd.toLowerCase())) continue; // a hub worker owns this dir right now
+      found.push({
+        agentId: `fx-${facts.threadId}`, // full id: Codex ids are time-ordered, prefixes collide
+        mtime: stats.mtimeMs,
+        info: { sessionId: facts.threadId, cwd: facts.cwd ?? '', name: codexSessionName(facts, names.names), engine: 'codex' },
+        activity: facts.activity,
+        open,
+      });
+    }
+    for (const path of [...this.#codexFacts.keys()]) if (!seen.has(path)) this.#codexFacts.delete(path);
+    return found.sort((a, b) => b.mtime - a.mtime);
+  }
 
   describe(agentId: string): { name: string; cwd: string } | null {
     const info = this.#registry.get(agentId);
@@ -369,6 +443,8 @@ export class FreelancerManager {
         for (const candidate of [...byWorkspace, ...recent]) merged.set(candidate.agentId, candidate);
         visible = [...merged.values()];
       }
+      // The owner's Codex sessions: open (writer lock held) or just written.
+      visible = [...visible, ...(await this.#codexCandidates(now, busyCwds))];
 
       const seen = new Set<string>();
       for (const candidate of visible) {
@@ -386,7 +462,7 @@ export class FreelancerManager {
             teamId: null,
             status: now - candidate.mtime <= WORKING_WINDOW_MS ? 'working' : 'idle',
             activity: candidate.activity,
-            model: 'sonnet',
+            model: candidate.info.engine === 'codex' ? 'codex' : 'sonnet',
             taskId: null,
             tokensUsed: 0,
             updatedAt: now,
@@ -422,7 +498,7 @@ export class FreelancerManager {
         teamId: null,
         status,
         activity,
-        model: 'sonnet',
+        model: this.#registry.get(agentId)?.engine === 'codex' ? 'codex' : 'sonnet',
         taskId: null,
         tokensUsed: 0,
         updatedAt: Date.now(),
@@ -463,6 +539,33 @@ export class FreelancerManager {
         /* full-text delivery is best-effort; the synopsis still lands on the task */
       }
     };
+
+    if (info.engine === 'codex') {
+      const runner = this.#codexRunner;
+      if (!runner) {
+        this.#busy.delete(agentId);
+        this.#patch(agentId, info.name, 'idle', 'instruction failed');
+        return Promise.resolve({ ok: false as const, name: info.name, error: 'Codex is not available on this hub' });
+      }
+      // A fork made earlier (their window had the thread open) carries the
+      // hub's part of the conversation: continue that.
+      const thread = this.#codexForks.get(agentId) ?? info.sessionId;
+      return runner(thread, info.cwd, text, agentId).then(
+        ({ reply, threadId }) => {
+          this.#busy.delete(agentId);
+          if (threadId !== info.sessionId) this.#codexForks.set(agentId, threadId);
+          const note = threadId !== info.sessionId ? '(Continued in a fork of your Codex conversation — your Codex window has the original open.)\n\n' : '';
+          this.#patch(agentId, info.name, 'idle', reply.replace(/\s+/g, ' ').slice(0, 80));
+          deliver(note + reply);
+          return { ok: true as const, name: info.name, reply: note + reply };
+        },
+        (error: Error) => {
+          this.#busy.delete(agentId);
+          this.#patch(agentId, info.name, 'idle', 'instruction failed');
+          return { ok: false as const, name: info.name, error: error.message };
+        },
+      );
+    }
 
     if (this.#runnerOverride) {
       return this.#runnerOverride(info.sessionId, info.cwd, text).then(

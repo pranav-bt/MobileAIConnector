@@ -68,9 +68,57 @@ export const MASTER_SECTIONS = {
   handover: 'Handover',
   splitting: 'Splitting',
   stuck: 'When a task is stuck',
+  pairing: 'Pairing',
 } as const;
 
 export function masterRulesTemplate(): string {
+  return [
+    '# Master — rules',
+    '',
+    '<!--',
+    'Your rules for the master: how it picks teams, hands work between them,',
+    'splits big tasks, what it does when a task gets stuck, and when two models',
+    '(Claude + Codex) should work a task together.',
+    '- One rule per line, starting with "- ". Rules under "## Rules" apply to',
+    '  every decision; the others only to their kind of decision.',
+    '- A task is stuck when its run fails, when the lead says the worker',
+    '  could not finish it, or when QA still fails after two fix rounds. The',
+    '  master then proposes a retry, a handover or a split and ASKS you —',
+    '  unless a rule under "When a task is stuck" lets it act on its own.',
+    '- "## Pairing" rules let the master put a task in pair mode on its own:',
+    '  review (a second model checks the finished work), split (the two plan',
+    '  together and split a big build) or debate (both draft, then converge).',
+    '  Without them it never pairs on its own; /pair, /solo and the Pair',
+    '  button always win.',
+    '- These never override the project rules: a task stays in the project',
+    '  you named or the one your conversation is in.',
+    'Examples:',
+    '## Handover',
+    '- Anything that needs Roblox Studio goes to the Game Engine team.',
+    '## When a task is stuck',
+    '- Retry once on the same team without asking; ask me after that.',
+    '## Pairing',
+    '- Debate any architecture or API design decision.',
+    '- Pair-review anything touching auth, payments or data migrations.',
+    '-->',
+    '',
+    `## ${RULES_HEADING}`,
+    '',
+    `## ${MASTER_SECTIONS.routing}`,
+    '',
+    `## ${MASTER_SECTIONS.handover}`,
+    '',
+    `## ${MASTER_SECTIONS.splitting}`,
+    '',
+    `## ${MASTER_SECTIONS.stuck}`,
+    '',
+    `## ${MASTER_SECTIONS.pairing}`,
+    '',
+  ].join('\n');
+}
+
+// The master template before "## Pairing"; an untouched copy is upgraded.
+export function legacyMasterTemplate(): string {
   return [
     '# Master — rules',
     '',

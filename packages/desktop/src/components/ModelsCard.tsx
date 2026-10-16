@@ -116,7 +116,7 @@ export function ModelsCard(props: { state: HubState; send: (command: ClientComma
     ...Object.values(overrides.teams).flatMap((choice) => [choice.lead, choice.worker, choice.reviewer]),
   ];
   const pairDefaults = Object.values(overrides.teams).filter((choice) => choice.pairByDefault).length;
-  const customCount = allChoices.reduce((sum, c) => sum + (c?.model ? 1 : 0) + (c?.effort ? 1 : 0), 0) + pairDefaults;
+  const customCount = allChoices.reduce((sum, c) => sum + (c?.model ? 1 : 0) + (c?.effort ? 1 : 0), 0) + pairDefaults + (overrides.failover ? 1 : 0);
 
   const apply = (next: ModelOverrides): void => {
     const cleanTeams = Object.fromEntries(
@@ -292,6 +292,24 @@ export function ModelsCard(props: { state: HubState; send: (command: ClientComma
         {roleRow('All team leads', 'review every finished report into the synopsis (not the parallel parts of a split)', allRoleControls('lead'))}
         {roleRow('All workers', 'do the actual work', allRoleControls('worker'))}
         {roleRow('All pair reviewers', 'pair mode: check the worker\'s actual result (read-only) until they agree — default is the other engine from the worker', allRoleControls('reviewer'))}
+        {roleRow(
+          'When a plan is nearly used up',
+          "at 90% of its 5-hour or weekly window, that engine's seats move to the other engine's flagship (Opus 5.5 / GPT-6.1-Sol) until it recovers; Agent HQ's own project keeps Claude workers",
+          <label className="act" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', color: overrides.failover ? 'var(--accent)' : 'var(--text-2)' }}>
+            <input
+              type="checkbox"
+              checked={!!overrides.failover}
+              aria-label="Move work to the other engine when a plan is nearly used up"
+              onChange={(event) => {
+                const next: ModelOverrides = { ...overrides, teams: { ...overrides.teams } };
+                if (event.target.checked) next.failover = true;
+                else delete next.failover;
+                apply(next);
+              }}
+            />
+            {overrides.failover ? 'switch engines' : 'off'}
+          </label>,
+        )}
       </div>
 
       <div className="sect" style={{ marginTop: 18 }}>Per team (overrides All team leads / All workers)</div>

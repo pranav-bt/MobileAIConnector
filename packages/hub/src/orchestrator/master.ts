@@ -1,4 +1,4 @@
-import { lastJsonObject, parseRules, resolveModel, toolName, type ModelSpec, type ModelTier, type Project, type Team } from '@agent-hq/shared';
+import { lastJsonObject, parseRules, resolveModel, toolName, type ModelSpec, type ModelTier, type PairMode, type Project, type Team } from '@agent-hq/shared';
 import type { OrchestratorEngine } from '../engine/types.js';
 
 // The master agent's intake: one model call that reads the task and picks a
@@ -31,6 +31,9 @@ export interface RoutingDecision {
   // Present when the master decomposed the task into a sequenced multi-team
   // plan (each step gets the previous step's synopsis as a handover).
   steps: PlanStep[] | null;
+  // A pair mode the master picked from the owner's "## Pairing" rules
+  // (never without such a rule; the owner's explicit choice still wins).
+  pair?: PairMode | null;
 }
 
 const MASTER_MODEL: ModelTier = 'opus';
@@ -97,6 +100,7 @@ function routingPrompt(args: {
   recentWork: string[];
   text: string;
   masterRules: string[];
+  pairingRules: string[];
 }): string {
   const teamLines = args.teams
     .map((team) => `- id: ${team.id}\n  name: ${team.name}\n  charter: ${team.charter}${toolsLine(team, '  ')}`)
@@ -157,6 +161,15 @@ function routingPrompt(args: {
       args.masterRules,
       "The owner's rules for picking teams and plans (follow them; they never change the project rules above):",
     ),
+    ...(args.pairingRules.length
+      ? [
+          "The owner's rules for pair mode — two AI models working one task together (follow them):",
+          ...args.pairingRules.map((rule) => `- ${rule.replace(/^\[[^\]]+\]\s*/, '').slice(0, 300)}`),
+          'Add "pair" to your JSON: "review" (a second model checks the finished work), "split" (the two plan together and split a big build),',
+          '"debate" (both draft, then converge — decisions, designs, documents), or "none". Pick a mode ONLY when a rule above calls for this task.',
+          '',
+        ]
+      : []),
     `Task: "${args.text}"`,
     '',
     'Reply with ONLY a JSON object, no other text.',
@@ -202,6 +215,7 @@ export async function routeTask(
   thread: RoutingThread = { projectId: null, recent: [] },
   masterRules: string[] = [],
   folders: FolderCandidate[] = [],
+  pairingRules: string[] = [],
 ): Promise<RoutingDecision> {
   const fallbackTeam = keywordFallback(teams, text);
   const fallbackTitle = text.slice(0, 60);
@@ -261,6 +275,7 @@ export async function routeTask(
         recentWork: thread.recentWork ?? [],
         text,
         masterRules,
+        pairingRules,
       }),
       model,
     });
@@ -274,6 +289,7 @@ export async function routeTask(
       title?: unknown;
       reason?: unknown;
       plan?: unknown;
+      pair?: unknown;
     };
 
     // Which project, by mode. `null` = ask the owner.
@@ -342,7 +358,9 @@ export async function routeTask(
     const team = steps ? teams.find((candidate) => candidate.id === steps![0]!.teamId) : teams.find((candidate) => candidate.id === parsed.teamId);
     if (!team) throw new Error(`routing picked unknown team: ${String(parsed.teamId)}`);
 
-    return decided({ teamId: team.id, projectId: projectId ?? '', projectBasis, question: ask, title, reason, tokens, fallback: false, steps });
+    // Only a Pairing rule can turn pair mode on; anything else is "none".
+    const pair = pairingRules.length > 0 && (parsed.pair === 'review' || parsed.pair === 'split' || parsed.pair === 'debate') ? parsed.pair : null;
+    return decided({ teamId: team.id, projectId: projectId ?? '', projectBasis, question: ask, title, reason, tokens, fallback: false, steps, pair });
   } catch (error) {
     console.warn('[orchestrator] routing call failed, using keyword fallback:', error);
     // Offline: a pin, a single named project or the thread still hold;

@@ -6,8 +6,16 @@ import type { OrchestratorEngine, WorkerRunResult } from './types.js';
 export class EngineRouter implements OrchestratorEngine {
   #engines: Record<EngineId, OrchestratorEngine>;
 
-  constructor(engines: Record<EngineId, OrchestratorEngine>) {
+  #available: Partial<Record<EngineId, boolean>>;
+
+  // `available`: engines known to be missing on this PC (default: all usable).
+  constructor(engines: Record<EngineId, OrchestratorEngine>, available: Partial<Record<EngineId, boolean>> = {}) {
     this.#engines = engines;
+    this.#available = available;
+  }
+
+  available(engine: EngineId): boolean {
+    return this.#available[engine] ?? true;
   }
 
   engine(id: EngineId): OrchestratorEngine {

@@ -44,6 +44,8 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.neureal.agenthq.model.PairReplies
+import dev.neureal.agenthq.model.PairReply
 import dev.neureal.agenthq.model.PermissionRequest
 import dev.neureal.agenthq.model.Snapshot
 import dev.neureal.agenthq.model.TranscriptEntry
@@ -202,7 +204,7 @@ private fun ConsoleRow(row: TranscriptEntry, snapshot: Snapshot, onRespond: (Per
         "owner" -> "You"
         "master" -> "Master"
         "lead" -> snapshot.agents.firstOrNull { it.id == row.agentId }?.name ?: "Lead"
-        "worker" -> snapshot.agents.firstOrNull { it.id == row.agentId }?.name ?: "Worker"
+        "worker" -> snapshot.agents.firstOrNull { it.id == row.agentId }?.name ?: PairReplies.seatKind(row.agentId) ?: "Worker"
         else -> "Agent HQ"
     }
     when (row.kind) {
@@ -245,11 +247,62 @@ private fun ConsoleRow(row: TranscriptEntry, snapshot: Snapshot, onRespond: (Per
                         .padding(horizontal = 11.dp, vertical = 8.dp),
                 ) {
                     Text(if (row.role == "lead") "$who · review" else who, color = if (row.role == "lead") HQ.violet else HQ.faint, fontSize = 10.sp)
-                    SelectionContainer { Text(row.text, color = HQ.text, fontSize = 12.5.sp, lineHeight = 17.sp) }
+                    val reply = remember(row.id, row.text) { PairReplies.parse(row.agentId, row.text) }
+                    if (reply != null) PairReplyBody(reply, row.text)
+                    else SelectionContainer { Text(row.text, color = HQ.text, fontSize = 12.5.sp, lineHeight = 17.sp) }
                 }
             }
         }
     }
+}
+
+// A pair seat's reply shown readably: a verdict, a split plan, or a debate
+// exchange — the raw reply stays one tap away.
+@Composable
+private fun PairReplyBody(reply: PairReply, raw: String) {
+    var showRaw by remember(raw) { mutableStateOf(false) }
+    var showDraft by remember(raw) { mutableStateOf(false) }
+    if (showRaw) {
+        SelectionContainer { Text(raw, color = HQ.text, fontSize = 12.5.sp, lineHeight = 17.sp) }
+        return
+    }
+    val bullet = @Composable { line: String, color: Color -> Text("• $line", color = color, fontSize = 12.sp, lineHeight = 16.sp) }
+    when (reply) {
+        is PairReply.Verdict -> {
+            Text(
+                (if (reply.agree) "✓ Agrees — " else "✗ Not yet — ") + reply.summary,
+                color = if (reply.agree) HQ.green else HQ.amber, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold,
+            )
+            reply.blocking.forEach { bullet(it, HQ.text) }
+            if (reply.minor.isNotEmpty()) Text("minor: ${reply.minor.joinToString(" · ")}", color = HQ.faint, fontSize = 10.5.sp)
+        }
+        is PairReply.Plan -> {
+            if (reply.split) {
+                Text("Proposed split — ${reply.parts.size} parts", color = HQ.text, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+                reply.parts.forEach { part ->
+                    bullet("${part.title} — ${if (part.partnerBuilds) "partner builds" else "I build"} · ${part.owns.joinToString(", ")}", HQ.text)
+                }
+                if (reply.contract.isNotEmpty()) Text("contract: ${reply.contract.take(240)}", color = HQ.faint, fontSize = 10.5.sp)
+            } else {
+                Text("Not worth splitting" + if (reply.why.isNotEmpty()) " — ${reply.why}" else "", color = HQ.text, fontSize = 12.5.sp)
+            }
+        }
+        is PairReply.Exchange -> {
+            Text(
+                if (reply.accept) "✓ Accepts the other's draft" else "✗ Objects",
+                color = if (reply.accept) HQ.green else HQ.amber, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold,
+            )
+            reply.critique.forEach { bullet(it, HQ.text) }
+            if (reply.draft.isNotEmpty()) {
+                Text(
+                    if (showDraft) "hide revised draft ▾" else "revised draft ▸",
+                    color = HQ.ghost, fontSize = 10.5.sp, modifier = Modifier.clickable { showDraft = !showDraft },
+                )
+                if (showDraft) SelectionContainer { Text(reply.draft, color = HQ.text, fontSize = 12.sp, lineHeight = 16.sp) }
+            }
+        }
+    }
+    Text("show reply", color = HQ.ghost, fontSize = 10.sp, modifier = Modifier.padding(top = 2.dp).clickable { showRaw = true })
 }
 
 @Composable

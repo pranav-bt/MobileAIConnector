@@ -7,6 +7,7 @@ import {
   ensureRulesFile,
   ensureTeamRules,
   masterRulesTemplate,
+  legacyMasterTemplate,
   readRulesFile,
   resolveSection,
   rulesFileStamp,
@@ -89,7 +90,7 @@ export class TeamRegistry {
       this.#save();
     }
     for (const team of this.#teams.values()) this.#ensureMemoryDir(team);
-    ensureRulesFile(this.#masterRulesPath, masterRulesTemplate());
+    ensureRulesFile(this.#masterRulesPath, masterRulesTemplate(), legacyMasterTemplate());
   }
 
   #ensureMemoryDir(team: Team): void {
@@ -134,7 +135,7 @@ export class TeamRegistry {
     if (!path || !text) return false;
     const team = this.#teams.get(teamId);
     if (team) this.#ensureMemoryDir(team);
-    else ensureRulesFile(path, masterRulesTemplate());
+    else ensureRulesFile(path, masterRulesTemplate(), legacyMasterTemplate());
     appendToSection(path, section ? resolveSection(readRulesFile(path), section) : RULES_HEADING, text);
     return true;
   }

@@ -403,6 +403,9 @@ export const ModelOverridesSchema = z.object({
   // Pair mode's second worker (the reviewer). Default: the other engine
   // from the worker's (Claude worker → GPT-6.1-Sol, Codex worker → Opus 5.5).
   reviewer: ModelChoiceSchema.optional(),
+  // Owner's opt-in: a plan at >= 90% of its 5-hour or weekly window hands
+  // its seats to the other engine's flagship (both nearly out: no change).
+  failover: z.boolean().optional(),
   teams: z
     .record(
       z.string(),

@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { MODEL_DEFAULTS, PAIR_REVIEWER_DEFAULT, catalogModel, isInternalTask, parseExchange, parseVerdict, resolveModel, rulesFor, toolName, type Agent, type ModelChoice, type PairMode, type PairVerdict, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
+import { MODEL_DEFAULTS, PAIR_REVIEWER_DEFAULT, catalogModel, isInternalTask, parseExchange, parseVerdict, resolveModel, rulesFor, toolName, type Agent, type EngineId, type ModelChoice, type PairMode, type PairVerdict, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from '../engine/types.js';
@@ -68,6 +68,10 @@ export function splitWorthChecking(title: string, detail: string): boolean {
 // Pair mode: review rounds before the owner is asked (also the fresh budget
 // a continued pair task gets).
 export const PAIR_ROUNDS = 3;
+
+// Failover (owner's opt-in): a plan at or above this share of its 5-hour or
+// weekly window hands its seats to the other engine.
+const FAILOVER_PCT = 90;
 
 // What every pair verdict (plan or work) must look like.
 const VERDICT_FORMAT =
@@ -146,6 +150,7 @@ interface FreelancerRunner {
     text: string,
   ): Promise<{ ok: true; name: string; reply: string } | { ok: false; name: string; error: string }>;
   killAll?(): void;
+  setCodexRunner?(runner: (threadId: string, cwd: string, text: string, agentId: string) => Promise<{ reply: string; threadId: string }>): void;
 }
 
 // Synthetic team for freelancer work: gives the standard review prompt a
@@ -228,6 +233,8 @@ export class Orchestrator implements CommandHandlers {
   #chairing = new Set<string>();
   // Pair tasks mid-debate: the owner's messages go to both sides next round.
   #debating = new Set<string>();
+  // Failover switches already announced ("<seat>:<engine>").
+  #failoverNoted = new Set<string>();
   #cardsSeen = new Set<string>();
 
   #projects: ProjectRegistry;
@@ -879,6 +886,8 @@ export class Orchestrator implements CommandHandlers {
       thread,
       this.#masterRules(MASTER_SECTIONS.routing, 'plan'),
       this.#projects.discoverFolders(),
+      // only rules filed under "## Pairing" (not the general ones)
+      this.#masterRules(MASTER_SECTIONS.pairing).filter((rule) => /^\[[^\]]*pair/i.test(rule)),
     );
     this.#recordTokens(masterModel.tier, decision.tokens);
     this.#routingCount -= 1;
@@ -958,8 +967,16 @@ export class Orchestrator implements CommandHandlers {
       return;
     }
 
+    // Pair mode: your explicit choice (/pair, /solo, the button) > the
+    // master's pick from your Pairing rules > the team's default.
+    let pairBasis = '';
+    if (pairChoice === undefined && decision.pair) {
+      pairChoice = true;
+      pairMode = decision.pair;
+      pairBasis = ' — your pairing rule';
+    }
     if (decision.steps) {
-      this.#activity('master', taskId, `project: ${project.name} (${basis})`);
+      this.#activity('master', taskId, `project: ${project.name} (${basis})${pairBasis ? ` · pair mode, ${pairMode}${pairBasis}` : ''}`);
       void this.#runChain(taskId, decision.steps, project.id, decision.title, 0, pairChoice, pairMode);
       this.#masterStatus();
       return;
@@ -970,7 +987,7 @@ export class Orchestrator implements CommandHandlers {
     this.#activity(
       'master',
       taskId,
-      `routed "${decision.title}" → ${team.name} · ${project.name} (${basis})${decision.fallback ? ' (keyword fallback)' : ''}${pair ? (pair.mode === 'review' ? ' · pair mode' : ` · pair mode, ${pair.mode}`) : ''}`,
+      `routed "${decision.title}" → ${team.name} · ${project.name} (${basis})${decision.fallback ? ' (keyword fallback)' : ''}${pair ? (pair.mode === 'review' ? ' · pair mode' : ` · pair mode, ${pair.mode}`) + pairBasis : ''}`,
     );
 
     this.#startOrQueue(taskId, team, true);
@@ -1167,7 +1184,7 @@ export class Orchestrator implements CommandHandlers {
       return null;
     }
     // A pair split's part runs on the model that agreed to build it.
-    let workerSpec = task.seat?.model ? resolveModel(team.workerModel, task.seat) : this.#workerSpec(team);
+    let workerSpec = task.seat?.model ? this.#failover(resolveModel(team.workerModel, task.seat), `${team.name} workers`) : this.#workerSpec(team);
     const leadSpec = this.#leadSpec(team);
     // Must stay synchronous up to the slot increment below (callers check the
     // cap, then call) — the split pass takes over the slot the same way.
@@ -3505,7 +3522,50 @@ export class Orchestrator implements CommandHandlers {
 
   attachFreelancers(manager: FreelancerRunner): void {
     this.#freelancers = manager;
+    // The owner's Codex sessions continue through Agent HQ's own Codex
+    // engine as a foreign thread: their setup untouched (model, MCP, no HQ
+    // instructions), but every command and edit goes through the policy, with
+    // cards and console rows on the freelancer's task.
+    manager.setCodexRunner?.(async (threadId, cwd, text, agentId) => {
+      const taskId = this.#freelancerTasks.get(agentId) ?? null;
+      const scope = { cwd, extraDirs: this.#extraDirs(cwd), locked: this.#lockedData() };
+      const spec = resolveModel('codex');
+      let lastTotal = 0;
+      const run = await this.#engine.runWorker({
+        prompt: text,
+        title: `freelancer: ${text.slice(0, 40)}`,
+        team: FREELANCE_DESK,
+        model: spec,
+        cwd,
+        extraDirs: scope.extraDirs,
+        locked: scope.locked,
+        resumeSessionId: threadId,
+        foreign: true,
+        callbacks: {
+          onTranscript: (row) => {
+            if (taskId) this.#row(taskId, { ...row, role: 'worker', agentId });
+          },
+          onActivity: (message) => this.#activity(agentId, taskId, message),
+          onTokens: (total) => {
+            const delta = total - lastTotal;
+            lastTotal = total;
+            this.#recordTokens(spec.tier, delta);
+            const task = taskId ? this.#bus.state.tasks[taskId] : undefined;
+            if (task) this.#patchTask(task.id, { tokensUsed: task.tokensUsed + delta });
+          },
+          onPermission: ({ toolName, command, reason }) => {
+            const verdict = evaluatePermission(toolName, command, this.#policy.mode, scope);
+            if (verdict.decision === 'allow' || !taskId) return Promise.resolve(verdict.decision === 'allow' ? ('approve' as const) : ('deny' as const));
+            return this.#raisePermission(taskId, agentId, FREELANCE_DESK, toolName, command, reason, verdict.flags);
+          },
+        },
+      });
+      return { reply: run.synopsis, threadId: run.sessionId ?? threadId };
+    });
   }
+
+  // Which task a freelancer's instruction belongs to (for its cards and rows).
+  #freelancerTasks = new Map<string, string>();
 
   // A freelancer instruction is a real task: the terminal session is the
   // worker, the freelance desk lead reviews its report into a synopsis, and
@@ -3557,7 +3617,8 @@ export class Orchestrator implements CommandHandlers {
     });
     this.#activity(agentId, taskId, `instruction sent to freelancer ${who.name}: ${text.slice(0, 45)}`);
 
-    const result = await manager.runInstruction(agentId, text);
+    this.#freelancerTasks.set(agentId, taskId);
+    const result = await manager.runInstruction(agentId, text).finally(() => this.#freelancerTasks.delete(agentId));
     if (!result.ok) {
       this.#patchTask(taskId, { status: 'failed', synopsis: `Freelancer ${result.name}: ${result.error}` });
       this.#activity(agentId, taskId, `freelancer ${result.name} instruction failed: ${result.error.slice(0, 70)}`);
@@ -3592,21 +3653,57 @@ export class Orchestrator implements CommandHandlers {
   }
 
   #masterModel(): ModelSpec {
-    return resolveModel(MODEL_DEFAULTS.master, this.#models.master);
+    return this.#failover(resolveModel(MODEL_DEFAULTS.master, this.#models.master), 'the master');
+  }
+
+  // A plan's 5-hour or weekly window at FAILOVER_PCT or more. Codex limits
+  // are only known once Codex has run (unknown = not nearly out).
+  #planNearlyOut(engine: EngineId): boolean {
+    const usage = this.#bus.state.usage;
+    if (engine === 'claude') return Math.max(usage.windowPct, usage.weeklyPct) >= FAILOVER_PCT;
+    const codex = usage.codex;
+    return !!codex && Math.max(codex.windowPct ?? 0, codex.weeklyPct ?? 0) >= FAILOVER_PCT;
+  }
+
+  // The owner's opt-in failover: a seat whose plan is nearly used up runs on
+  // the other engine's flagship instead — unless that one is nearly out too,
+  // or not installed. Each switch is said once per seat (and again after the
+  // plan recovers and runs out again).
+  #failover(spec: ModelSpec, seat: string): ModelSpec {
+    const key = `${seat}:${spec.engine}`;
+    if (!this.#models.failover || !this.#planNearlyOut(spec.engine)) {
+      this.#failoverNoted.delete(key);
+      return spec;
+    }
+    const other: EngineId = spec.engine === 'claude' ? 'codex' : 'claude';
+    if (this.#planNearlyOut(other) || this.#engine.available?.(other) === false) return spec;
+    const target = resolveModel(other === 'codex' ? 'codex' : 'opus', {
+      model: PAIR_REVIEWER_DEFAULT[spec.engine],
+      ...(spec.effort ? { effort: spec.effort } : {}),
+    });
+    if (!this.#failoverNoted.has(key)) {
+      this.#failoverNoted.add(key);
+      this.#activity(
+        'master',
+        null,
+        `${seat}: ${catalogModel(spec.id)?.label ?? spec.id} → ${catalogModel(target.id)?.label ?? target.id} — the ${spec.engine === 'claude' ? 'Claude' : 'Codex'} plan is nearly used up (≥${FAILOVER_PCT}%)`,
+      );
+    }
+    return target;
   }
 
   #checksModel(): ModelSpec {
-    return resolveModel(MODEL_DEFAULTS.checks, this.#models.checks);
+    return this.#failover(resolveModel(MODEL_DEFAULTS.checks, this.#models.checks), 'quick checks');
   }
 
   // Team records are never mutated by model choices, so clearing the
   // overrides restores exactly each team's defaults.
   #leadSpec(team: Team): ModelSpec {
-    return resolveModel(team.leadModel, this.#models.teams[team.id]?.lead, this.#models.lead);
+    return this.#failover(resolveModel(team.leadModel, this.#models.teams[team.id]?.lead, this.#models.lead), `${team.name} lead`);
   }
 
   #workerSpec(team: Team): ModelSpec {
-    return resolveModel(team.workerModel, this.#models.teams[team.id]?.worker, this.#models.worker);
+    return this.#failover(resolveModel(team.workerModel, this.#models.teams[team.id]?.worker, this.#models.worker), `${team.name} workers`);
   }
 
   // A new task's pair state: the owner's explicit choice, else the team's
@@ -3620,9 +3717,12 @@ export class Orchestrator implements CommandHandlers {
   // the other engine's flagship — a second opinion from another model family.
   // Read-only, so Codex may review even in Agent HQ's own project.
   #reviewerSpec(team: Team, workerSpec: ModelSpec): ModelSpec {
-    return resolveModel(workerSpec.engine === 'codex' ? 'opus' : 'codex', this.#models.teams[team.id]?.reviewer, this.#models.reviewer, {
-      model: PAIR_REVIEWER_DEFAULT[workerSpec.engine],
-    });
+    return this.#failover(
+      resolveModel(workerSpec.engine === 'codex' ? 'opus' : 'codex', this.#models.teams[team.id]?.reviewer, this.#models.reviewer, {
+        model: PAIR_REVIEWER_DEFAULT[workerSpec.engine],
+      }),
+      `${team.name} reviewers`,
+    );
   }
 
   setModels(overrides: ModelOverrides): void {
@@ -3639,7 +3739,7 @@ export class Orchestrator implements CommandHandlers {
       overrides.worker,
       ...Object.values(overrides.teams).flatMap((choice) => [choice.lead, choice.worker]),
     ];
-    const custom = choices.reduce((sum, choice) => sum + (choice?.model ? 1 : 0) + (choice?.effort ? 1 : 0), 0);
+    const custom = choices.reduce((sum, choice) => sum + (choice?.model ? 1 : 0) + (choice?.effort ? 1 : 0), 0) + (overrides.failover ? 1 : 0);
     this.#activity(
       'master',
       null,

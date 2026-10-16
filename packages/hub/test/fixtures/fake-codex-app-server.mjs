@@ -126,8 +126,19 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'thread/unarchive':
       return reply({});
     case 'thread/resume':
+      // "owner-busy-…" stands for the owner's thread held open by their own
+      // Codex window; "owner-…" for one that isn't open anywhere.
+      if (String(params.threadId).startsWith('owner-busy-')) {
+        return send({ id: message.id, error: { message: `thread ${params.threadId} already has an active writer` } });
+      }
+      if (String(params.threadId).startsWith('owner-')) threads.set(params.threadId, params);
       if (!threads.has(params.threadId)) return send({ id: message.id, error: { message: 'no such thread' } });
       return reply({ thread: { id: params.threadId } });
+    case 'thread/fork': {
+      const id = `fork-${++threadCounter}-of-${params.threadId}`;
+      threads.set(id, params);
+      return reply({ thread: { id } });
+    }
     case 'turn/steer': {
       const waiter = steerWaiters.get(params.expectedTurnId);
       if (!waiter) return send({ id: message.id, error: { message: 'no active turn' } });

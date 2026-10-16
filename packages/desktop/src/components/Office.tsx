@@ -173,7 +173,7 @@ export function Office(props: { state: HubState; send: (command: ClientCommand) 
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
           <div className="lbl">Freelancers</div>
           <div className="act" style={{ color: 'var(--faint)' }}>
-            terminal Claude Code sessions · message them from here
+            your own Claude Code and Codex sessions · message them from here
           </div>
           <div className="lbl" style={{ marginLeft: 'auto', color: 'var(--faint)' }}>
             {freelancers.length > 0 ? `${freelancers.length} open` : ''}
@@ -191,7 +191,7 @@ export function Office(props: { state: HubState; send: (command: ClientCommand) 
           }}
         >
           {freelancers.length === 0 && (
-            <span className="empty-note">terminal Claude Code sessions appear here automatically</span>
+            <span className="empty-note">your open Claude Code and Codex sessions appear here automatically</span>
           )}
           {freelancers.map((agent) => (
             <div key={agent.id} className="chip" style={{ width: '100%' }}>
@@ -199,7 +199,12 @@ export function Office(props: { state: HubState; send: (command: ClientCommand) 
                 {'>_'}
               </div>
               <div style={{ minWidth: 0, flexGrow: 1 }}>
-                <div className="nm">{agent.name}</div>
+                <div className="nm">
+                  {agent.name}
+                  <span className="act" style={{ marginLeft: 6, color: agent.model === 'codex' ? '#D1556E' : 'var(--faint)' }}>
+                    {agent.model === 'codex' ? 'Codex' : 'Claude Code'}
+                  </span>
+                </div>
                 <div className="act" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {agent.activity}
                 </div>
@@ -207,7 +212,11 @@ export function Office(props: { state: HubState; send: (command: ClientCommand) 
               <span
                 className="tag"
                 style={{ cursor: 'pointer' }}
-                title="Continue this session's conversation with an instruction; the reply comes back here and on the phone."
+                title={
+                  agent.model === 'codex'
+                    ? "Continue this Codex conversation with an instruction (in a fork if its window has it open); every command still goes through your permission policy. The reply comes back here and on the phone."
+                    : "Continue this session's conversation with an instruction; the reply comes back here and on the phone."
+                }
                 onClick={() => {
                   const text = window.prompt(`Instruction for ${agent.name}:`);
                   if (text && text.trim()) send({ type: 'freelancer.send', agentId: agent.id, text: text.trim() });

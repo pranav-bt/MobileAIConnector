@@ -298,23 +298,41 @@ export class CodexEngine implements OrchestratorEngine {
     resumeSessionId?: string;
     inbox?: WorkerInbox;
     readOnly?: boolean;
+    foreign?: boolean;
   }): Promise<WorkerRunResult> {
     const { callbacks } = args;
     const client = await this.#ready();
     const extraDirs = args.extraDirs ?? [];
+    // A foreign thread is the owner's own conversation (a Codex freelancer):
+    // their setup stays as it is (no Agent HQ instructions, their MCP
+    // servers), it's never archived, and every command/edit still asks.
+    const foreign = !!args.foreign;
     const threadSettings = {
       cwd: args.cwd,
       approvalPolicy: 'untrusted',
       sandbox: args.readOnly ? 'read-only' : 'workspace-write',
-      config: this.#mcpConfig(args.team.mcpServers),
-      developerInstructions: workerInstructions(args.team.charter, args.maxSubagents ?? DEFAULT_MAX_SUBAGENTS),
+      ...(foreign
+        ? {}
+        : {
+            config: this.#mcpConfig(args.team.mcpServers),
+            developerInstructions: workerInstructions(args.team.charter, args.maxSubagents ?? DEFAULT_MAX_SUBAGENTS),
+          }),
     };
     let threadId: string;
     if (args.resumeSessionId) {
-      // Continue the same conversation: it was archived after its last run.
+      // Continue the same conversation: ours was archived after its last run.
       threadId = args.resumeSessionId;
-      await client.request('thread/unarchive', { threadId }).catch(() => undefined);
-      await client.request('thread/resume', { threadId, model: args.model.id, excludeTurns: true, ...threadSettings });
+      if (!foreign) await client.request('thread/unarchive', { threadId }).catch(() => undefined);
+      try {
+        await client.request('thread/resume', { threadId, ...(foreign ? {} : { model: args.model.id }), excludeTurns: true, ...threadSettings });
+      } catch (error) {
+        // Codex allows one writer per thread: the owner's own window has it
+        // open — continue in a fork (same history), never fight for it.
+        if (!foreign || !/active writer/i.test(error instanceof Error ? error.message : String(error))) throw error;
+        const { thread } = await client.request<{ thread: { id: string } }>('thread/fork', { threadId, ...threadSettings });
+        callbacks.onActivity('the conversation is open in a Codex window — continuing in a fork of it (same history)');
+        threadId = thread.id;
+      }
     } else {
       const { thread } = await client.request<{ thread: { id: string } }>('thread/start', { model: args.model.id, ...threadSettings });
       threadId = thread.id;
@@ -400,7 +418,7 @@ export class CodexEngine implements OrchestratorEngine {
           threadId,
           {
             input: [{ type: 'text', text: input, text_elements: [] }],
-            ...(args.model.effort ? { effort: args.model.effort } : {}),
+            ...(args.model.effort && !foreign ? { effort: args.model.effort } : {}),
             sandboxPolicy: args.readOnly
               ? { type: 'readOnly', networkAccess: true }
               : {
@@ -420,7 +438,7 @@ export class CodexEngine implements OrchestratorEngine {
         input = waiting.join('\n\n');
       }
     } finally {
-      void client.request('thread/archive', { threadId }).catch(() => undefined);
+      if (!foreign) void client.request('thread/archive', { threadId }).catch(() => undefined);
     }
     if (result.status === 'failed') {
       throw new Error(result.error ? `Codex: ${result.error}` : 'Codex turn failed');

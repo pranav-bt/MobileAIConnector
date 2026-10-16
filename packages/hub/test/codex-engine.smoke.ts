@@ -149,6 +149,40 @@ try {
   if (!requests().some((r) => r.method === 'thread/resume' && r.params['threadId'] === result.sessionId)) fail('thread not resumed');
   console.log('resume ok: same thread unarchived + resumed, it remembered');
 
+  // 2c'. The owner's own thread (a Codex freelancer): left as it is — never
+  // unarchived/archived, no Agent HQ instructions or MCP changes — but every
+  // action still asks; when their Codex window holds it, a fork continues.
+  const before = requests().length;
+  const ownerAsks: string[] = [];
+  const ownerActivity: string[] = [];
+  const free = await engine.runWorker({
+    prompt: 'fake-work for the owner',
+    team: team(),
+    model,
+    cwd: project,
+    resumeSessionId: 'owner-free-1',
+    foreign: true,
+    callbacks: { onActivity: (line) => ownerActivity.push(line), onTokens: () => {}, onPermission: async (request) => (ownerAsks.push(request.toolName), 'approve') },
+  });
+  const busy = await engine.runWorker({
+    prompt: 'more for the owner',
+    team: team(),
+    model,
+    cwd: project,
+    resumeSessionId: 'owner-busy-2',
+    foreign: true,
+    callbacks: { onActivity: (line) => ownerActivity.push(line), onTokens: () => {}, onPermission: async () => 'approve' },
+  });
+  const ownerCalls = requests().slice(before);
+  if (free.sessionId !== 'owner-free-1') fail(`a free owner thread was not continued in place: ${free.sessionId}`);
+  if (!busy.sessionId?.startsWith('fork-') || !busy.sessionId.endsWith('owner-busy-2')) fail(`a held owner thread was not forked: ${busy.sessionId}`);
+  if (!ownerActivity.some((line) => line.startsWith('the conversation is open in a Codex window'))) fail('the fork was not explained');
+  if (ownerCalls.some((r) => r.method === 'thread/archive' || r.method === 'thread/unarchive')) fail("the owner's thread was archived/unarchived");
+  const ownerResume = ownerCalls.find((r) => r.method === 'thread/resume' && r.params['threadId'] === 'owner-free-1')!;
+  if ('developerInstructions' in ownerResume.params || 'config' in ownerResume.params) fail(`the owner's thread got Agent HQ settings: ${JSON.stringify(ownerResume.params)}`);
+  if (ownerResume.params['approvalPolicy'] !== 'untrusted' || !ownerAsks.includes('Bash')) fail('actions in the owner\'s thread did not ask Agent HQ');
+  console.log("owner thread ok: continued in place when free, forked when their window holds it; never archived, no HQ settings; actions still ask");
+
   // 2d. A message while a turn runs is steered into it.
   const inbox = new MessageInbox();
   const steering = engine.runWorker({
