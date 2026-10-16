@@ -94,6 +94,9 @@ button {
 .app {
   display: grid;
   grid-template-columns: 216px 1fr 312px;
+  /* One row exactly the window's height — an auto row grows to the tallest
+     page and the overflow is clipped, so pages could never scroll. */
+  grid-template-rows: minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
 }
@@ -146,7 +149,10 @@ button {
 }
 .kill-btn:hover { background: rgba(229, 104, 92, 0.08); }
 
-.main { display: flex; flex-direction: column; min-width: 0; }
+.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+/* Pages fill the rest and scroll inside themselves (a flex item's default
+   min-height is its content, which would defeat their overflow). */
+.main > * { min-height: 0; }
 
 .topbar {
   height: 60px; flex-shrink: 0;
