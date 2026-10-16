@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { isInternalTask, type ClientCommand, type HubState, type Task } from '@agent-hq/shared';
-import { TASK_STATUS_LABELS, formatTokens } from '../status';
+import { TASK_STATUS_LABELS, agentLabel, formatTokens } from '../status';
 
 const CURRENT_STATUSES = ['routing', 'intake', 'queued', 'in_flight', 'awaiting_permission', 'review'];
 const STOPPABLE = ['routing', 'queued', 'in_flight', 'awaiting_permission', 'review'];
@@ -53,7 +53,7 @@ function TaskRow(props: {
               <span style={{ color: 'var(--ghost)', flexShrink: 0 }}>
                 {new Date(entry.at).toLocaleTimeString()}
               </span>
-              <span style={{ color: 'var(--faint)', flexShrink: 0 }}>{state.agents[entry.agentId]?.name ?? entry.agentId}</span>
+              <span style={{ color: 'var(--faint)', flexShrink: 0 }}>{agentLabel(state, entry.agentId)}</span>
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{entry.message}</span>
             </div>
           ))}

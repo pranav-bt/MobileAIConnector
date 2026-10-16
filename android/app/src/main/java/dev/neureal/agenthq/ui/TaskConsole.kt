@@ -101,7 +101,17 @@ fun TaskConsoleScreen(snapshot: Snapshot, taskId: String, onRespond: (Permission
                         "disagreed" -> "went with it — still disagreed"
                         else -> "author working"
                     }
-                    val mode = if (pair.mode == "split") "Pair · split" else "Pair"
+                    val mode = if (pair.mode == "review") "Pair" else "Pair · ${pair.mode}"
+                    pair.debate?.let { debate ->
+                        Text(
+                            if (debate.accepted != null) {
+                                "debate: went with ${if (debate.accepted == "partner") pair.reviewerModel ?: "partner" else pair.authorModel ?: "author"}'s draft after ${debate.rounds} rounds"
+                            } else {
+                                "debating — round ${debate.rounds}"
+                            },
+                            color = if (debate.accepted != null) HQ.green else HQ.amber, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                        )
+                    }
                     Text(
                         "$mode · round ${pair.round}/${pair.maxRounds} · ${pair.reviewerModel ?: "other engine"} reviews · $state",
                         color = if (pair.state == "agreed") HQ.green else HQ.accent, fontSize = 10.sp, fontFamily = FontFamily.Monospace,

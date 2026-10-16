@@ -113,7 +113,7 @@ export const ModelChoiceSchema = z.object({
 });
 export type ModelChoice = z.infer<typeof ModelChoiceSchema>;
 
-export const PairModeSchema = z.enum(['review', 'split']);
+export const PairModeSchema = z.enum(['review', 'split', 'debate']);
 export type PairMode = z.infer<typeof PairModeSchema>;
 
 export const TaskSchema = z.object({
@@ -151,6 +151,8 @@ export const TaskSchema = z.object({
   // rounds repeat until the reviewer agrees (or the round cap asks the owner).
   // 'split' = they agree a plan first, split the parts between them, each
   // part is reviewed by the other model, and the integrated whole once more.
+  // 'debate' = both draft independently, then critique and revise each
+  // other's drafts until one accepts the other's.
   pair: z
     .object({
       mode: PairModeSchema,
@@ -189,7 +191,26 @@ export const TaskSchema = z.object({
         })
         .nullable()
         .optional(),
+      // The author's planning / debate conversation.
       plannerSession: z.object({ engine: EngineIdSchema, id: z.string() }).nullable().optional(),
+      // 'debate': the latest drafts and the last exchange.
+      debate: z
+        .object({
+          rounds: z.number().int(), // round 1 = the independent drafts
+          drafts: z.object({ author: z.string(), partner: z.string() }),
+          accepted: z.enum(['author', 'partner']).nullable(),
+          last: z
+            .object({
+              round: z.number().int(),
+              authorAccepts: z.boolean(),
+              partnerAccepts: z.boolean(),
+              authorCritique: z.array(z.string()),
+              partnerCritique: z.array(z.string()),
+            })
+            .nullable(),
+        })
+        .nullable()
+        .optional(),
     })
     .nullable()
     .optional(),

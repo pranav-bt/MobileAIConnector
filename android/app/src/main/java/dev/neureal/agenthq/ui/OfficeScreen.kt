@@ -1053,24 +1053,24 @@ private fun TasksTab(snapshot: Snapshot, connected: Boolean, onSubmitTask: (Stri
             )
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                // One-shot pair mode (off → Pair → Pair · split): the hub reads
-                // the "/pair " and "/pair split " prefixes.
+                // One-shot pair mode (off → Pair → Pair · split → Pair · debate):
+                // the hub reads the "/pair ", "/pair split " and "/pair debate " prefixes.
                 val pairOn = pair != null
                 OutlinedButton(
-                    onClick = { pair = when (pair) { null -> "review"; "review" -> "split"; else -> null } },
+                    onClick = { pair = when (pair) { null -> "review"; "review" -> "split"; "split" -> "debate"; else -> null } },
                     modifier = Modifier.height(46.dp),
                     shape = RoundedCornerShape(10.dp),
                     border = androidx.compose.foundation.BorderStroke(1.dp, if (pairOn) HQ.accent else HQ.line),
                 ) {
                     Text(
-                        when (pair) { "split" -> "Pair · split"; "review" -> "Pair ✓"; else -> "Pair" },
+                        when (pair) { "split" -> "Pair · split"; "debate" -> "Pair · debate"; "review" -> "Pair ✓"; else -> "Pair" },
                         color = if (pairOn) HQ.accent else HQ.muted, fontSize = 12.sp,
                     )
                 }
                 Button(
                     onClick = {
                         if (composer.isNotBlank()) {
-                            val prefix = when (pair) { "split" -> "/pair split "; "review" -> "/pair "; else -> "" }
+                            val prefix = when (pair) { "split" -> "/pair split "; "debate" -> "/pair debate "; "review" -> "/pair "; else -> "" }
                             onSubmitTask(prefix + composer.trim())
                             composer = ""
                             pair = null

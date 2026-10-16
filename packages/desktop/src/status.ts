@@ -1,4 +1,4 @@
-import type { Agent, AgentStatus } from '@agent-hq/shared';
+import type { Agent, AgentStatus, HubState } from '@agent-hq/shared';
 
 export const STATUS_COLORS: Record<AgentStatus, string> = {
   working: '#46C08A',
@@ -63,4 +63,22 @@ export function formatResetDay(ts: number): string {
 
 export function isActive(agent: Agent): boolean {
   return agent.status === 'working' || agent.status === 'waiting_permission' || agent.status === 'reporting';
+}
+
+// An agent's display name — also for agents already gone from the office
+// (retired workers and pair seats keep showing up in logs and consoles):
+// "<team>-w3" → "Worker C-3", -r reviewer, -p planner, -d debater.
+const SEAT_KINDS: Record<string, string> = { w: 'Worker', r: 'Reviewer', p: 'Planner', d: 'Debater' };
+export function agentLabel(state: HubState, agentId: string): string {
+  const live = state.agents[agentId]?.name;
+  if (live) return live;
+  if (agentId === 'master') return 'Master';
+  const lead = agentId.match(/^(.+)-lead$/);
+  if (lead?.[1]) return `${state.teams[lead[1]]?.name ?? lead[1]} lead`;
+  const seat = agentId.match(/^(.+)-([wrpd])(\d+)$/);
+  if (seat?.[1] && seat[2] && seat[3]) {
+    const initial = (state.teams[seat[1]]?.name ?? seat[1])[0]?.toUpperCase() ?? 'X';
+    return `${SEAT_KINDS[seat[2]]} ${initial}-${seat[3]}`;
+  }
+  return agentId;
 }

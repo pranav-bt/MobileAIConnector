@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { catalogModel, jsonObjects, parseVerdict, type ClientCommand, type HubState, type Task, type TranscriptEntry } from '@agent-hq/shared';
+import { catalogModel, lastJsonObject, parseExchange, parseVerdict, type ClientCommand, type HubState, type Task, type TranscriptEntry } from '@agent-hq/shared';
 import { useTranscript } from '../hub';
-import { TASK_STATUS_LABELS, formatTokens } from '../status';
+import { TASK_STATUS_LABELS, agentLabel, formatTokens } from '../status';
 import { ApprovalCard } from './TodayPanel';
 
 // A task's console: the whole story of one task in order — your ask, where
@@ -15,9 +15,11 @@ const STOPPABLE = ['routing', 'queued', 'in_flight', 'awaiting_permission', 'rev
 
 const roleLabel = (state: HubState, entry: TranscriptEntry): string => {
   if (entry.role === 'owner') return 'You';
-  if (entry.role === 'lead') return state.agents[entry.agentId ?? '']?.name ?? 'Lead';
+  if (entry.role === 'lead') return entry.agentId ? agentLabel(state, entry.agentId) : 'Lead';
   if (entry.role === 'master') return 'Master';
-  if (entry.role === 'worker') return state.agents[entry.agentId ?? '']?.name ?? (isReviewer(entry) ? 'Reviewer' : isPlanner(entry) ? 'Planner' : 'Worker');
+  if (entry.role === 'worker') {
+    return entry.agentId ? agentLabel(state, entry.agentId) : 'Worker';
+  }
   return 'Agent HQ';
 };
 
@@ -25,6 +27,8 @@ const roleLabel = (state: HubState, entry: TranscriptEntry): string => {
 const isReviewer = (entry: TranscriptEntry): boolean => /-r\d+$/.test(entry.agentId ?? '');
 // A pair split's planner seat ("<team>-p<n>").
 const isPlanner = (entry: TranscriptEntry): boolean => /-p\d+$/.test(entry.agentId ?? '');
+// A debate's seats ("<team>-d<n>").
+const isDebater = (entry: TranscriptEntry): boolean => /-d\d+$/.test(entry.agentId ?? '');
 
 const PAIR_STATE: Record<string, { label: string; color: string }> = {
   working: { label: 'author working', color: 'var(--amber)' },
@@ -45,10 +49,23 @@ function PairLine(props: { task: Task; authorModel: string | null }): JSX.Elemen
   return (
     <>
       <div className="act" style={{ marginTop: 2 }} title="Pair mode: the author does the work, the reviewer checks the actual result (read-only) until it agrees; the lead chairs">
-        <span style={{ color: 'var(--accent)' }}>Pair{pair.mode === 'split' ? ' · split' : ''}</span> · round {pair.round}/{pair.maxRounds} · {author} ⇄ {reviewer} ·{' '}
+        <span style={{ color: 'var(--accent)' }}>Pair{pair.mode === 'review' ? '' : ` · ${pair.mode}`}</span>
+        {pair.mode === 'review' || pair.round > 0 ? ` · round ${pair.round}/${pair.maxRounds}` : ''} · {author} ⇄ {reviewer} ·{' '}
         <span style={{ color: state.color }}>{state.label}</span>
         {agreedOn ? <span className="mono"> on {agreedOn}</span> : null}
       </div>
+      {pair.debate && (
+        <div className="act" style={{ marginTop: 2 }}>
+          <span style={{ color: pair.debate.accepted ? 'var(--green)' : 'var(--amber)' }}>
+            {pair.debate.accepted
+              ? `debate: went with ${pair.debate.accepted === 'author' ? author : reviewer}'s draft after ${pair.debate.rounds} rounds`
+              : `debating — round ${pair.debate.rounds}`}
+          </span>
+          {pair.debate.last && !pair.debate.accepted
+            ? ` · ${author} ${pair.debate.last.authorAccepts ? 'accepts' : 'objects'} · ${reviewer} ${pair.debate.last.partnerAccepts ? 'accepts' : 'objects'}`
+            : ''}
+        </div>
+      )}
       {plan && (
         <div className="act" style={{ marginTop: 2 }} title={plan.contract}>
           <span style={{ color: plan.agreed ? 'var(--green)' : 'var(--amber)' }}>
@@ -62,12 +79,42 @@ function PairLine(props: { task: Task; authorModel: string | null }): JSX.Elemen
   );
 }
 
+// A debater's exchange reply: accepts or objects to the other's draft, and
+// its own revised draft (one click away). A plain first draft shows as text.
+function DebateBody(props: { text: string }): JSX.Element {
+  const exchange = parseExchange(props.text);
+  const [open, setOpen] = useState(false);
+  if (!exchange) {
+    return <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--text)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{props.text}</div>;
+  }
+  return (
+    <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--text)' }}>
+      <div>
+        <span style={{ color: exchange.accept ? 'var(--green)' : 'var(--amber)', fontWeight: 600 }}>
+          {exchange.accept ? "✓ Accepts the other's draft" : '✗ Objects'}
+        </span>
+      </div>
+      {exchange.critique.length > 0 && (
+        <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+          {exchange.critique.map((point, index) => (
+            <li key={index}>{point}</li>
+          ))}
+        </ul>
+      )}
+      {exchange.draft && (
+        <div className="act" style={{ marginTop: 4, color: 'var(--ghost)', cursor: 'pointer' }} onClick={() => setOpen(!open)}>
+          {open ? 'hide revised draft ▾' : 'revised draft ▸'}
+        </div>
+      )}
+      {open && <div style={{ marginTop: 4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{exchange.draft}</div>}
+    </div>
+  );
+}
+
 // A planner's reply, shown as the plan (the raw text stays one click away).
 function PlanBody(props: { text: string }): JSX.Element {
   const [raw, setRaw] = useState(false);
-  const plan = jsonObjects(props.text)
-    .reverse()
-    .find((value): value is { split?: unknown; why?: unknown; contract?: unknown; parts?: unknown } => !!value && typeof value === 'object' && 'split' in value);
+  const plan = lastJsonObject(props.text, (value) => 'split' in value) as { split?: unknown; why?: unknown; contract?: unknown; parts?: unknown } | null;
   const parts = Array.isArray(plan?.parts) ? (plan.parts as { title?: unknown; owns?: unknown; builder?: unknown }[]) : [];
   if (!plan || raw) {
     return <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--text)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{props.text}</div>;
@@ -225,6 +272,8 @@ function Row(props: { state: HubState; entry: TranscriptEntry; send: (command: C
           <VerdictBody text={entry.text} />
         ) : isPlanner(entry) ? (
           <PlanBody text={entry.text} />
+        ) : isDebater(entry) ? (
+          <DebateBody text={entry.text} />
         ) : (
           <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--text)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{entry.text}</div>
         )}
@@ -281,7 +330,7 @@ export function TaskConsole(props: {
   const team = task.teamId ? state.teams[task.teamId]?.name ?? task.teamId : 'unrouted';
   const project = task.projectId ? state.projects[task.projectId]?.name ?? task.projectId : null;
   const workers = Object.values(state.agents).filter((agent) => agent.taskId === taskId && agent.role === 'worker');
-  const worker = workers.find((agent) => !/-[rp]\d+$/.test(agent.id)) ?? workers[0];
+  const worker = workers.find((agent) => !/-[rpd]\d+$/.test(agent.id)) ?? workers[0];
   const modelId = worker?.modelId ?? task.seat?.model ?? task.pair?.authorModel;
   const model = modelId ? catalogModel(modelId)?.label ?? modelId : task.session ? (task.session.engine === 'codex' ? 'Codex' : 'Claude') : null;
   const running = RUNNING.includes(task.status);

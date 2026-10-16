@@ -3,7 +3,7 @@ import type { ClientCommand, HubState, PairMode, WorkspaceRoot } from '@agent-hq
 import { isActive } from '../status';
 
 const HELP =
-  '/pair <task> · /pair split <task> · /solo <task> · /project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /rule <team>[/<section>]: <rule> · /rule master/stuck: <rule> · /permissions auto|strict · /todo <text> · /note <text> · /remind <when> <text> · /event <when> <title> · /pa on|off · /tasks pause|resume|killall';
+  '/pair <task> · /pair split <task> · /pair debate <task> · /solo <task> · /project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /rule <team>[/<section>]: <rule> · /rule master/stuck: <rule> · /permissions auto|strict · /todo <text> · /note <text> · /remind <when> <text> · /event <when> <title> · /pa on|off · /tasks pause|resume|killall';
 
 export const WHEN_HELP = '<when>: "in 20m|2h|3d", "17:30", "tomorrow 09:00", or "2026-09-14 18:00"';
 
@@ -62,9 +62,13 @@ function parseSlashCommand(
   const pairMatch = text.match(/^\/(pair|solo)\s+([\s\S]+)$/i);
   if (pairMatch && pairMatch[1] && pairMatch[2]) {
     const pair = pairMatch[1].toLowerCase() === 'pair';
-    const split = pair ? pairMatch[2].match(/^split\s+([\s\S]+)$/i) : null;
-    if (split?.[1]) {
-      return { command: { type: 'task.submit', text: split[1].trim(), pair: true, pairMode: 'split' }, note: 'sent in pair mode — plan together, then split' };
+    const sub = pair ? pairMatch[2].match(/^(split|debate)\s+([\s\S]+)$/i) : null;
+    if (sub?.[1] && sub[2]) {
+      const pairMode = sub[1].toLowerCase() as PairMode;
+      return {
+        command: { type: 'task.submit', text: sub[2].trim(), pair: true, pairMode },
+        note: pairMode === 'split' ? 'sent in pair mode — plan together, then split' : 'sent in pair mode — they debate, then converge',
+      };
     }
     return { command: { type: 'task.submit', text: pairMatch[2].trim(), pair }, note: pair ? 'sent in pair mode' : 'sent solo' };
   }
@@ -171,7 +175,8 @@ export function TopBar(props: {
 }): JSX.Element {
   const [text, setText] = useState('');
   // One-shot: the next task runs in pair mode — 'review' (a second model
-  // reviews it) or 'split' (they plan together and split the parts).
+  // reviews it), 'split' (they plan together and split the parts) or
+  // 'debate' (both draft, then converge on one).
   const [pair, setPair] = useState<PairMode | null>(null);
   const [hint, setHint] = useState<string | null>(null);
   const hintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -222,15 +227,17 @@ export function TopBar(props: {
           aria-pressed={pair !== null}
           data-mode={pair ?? 'off'}
           title={
-            pair === 'split'
-              ? 'Pair · split: the two engines agree a plan, split the parts between them, and review each other\'s work (click to turn off)'
-              : pair === 'review'
-                ? 'Pair: the worker does it, the other engine reviews the actual result until they agree (click for split)'
-                : 'Pair mode for the next task (click to turn on)'
+            pair === 'debate'
+              ? 'Pair · debate: both engines draft independently, critique each other\'s draft and converge on one; you can steer mid-debate (click to turn off)'
+              : pair === 'split'
+                ? 'Pair · split: the two engines agree a plan, split the parts between them, and review each other\'s work (click for debate)'
+                : pair === 'review'
+                  ? 'Pair: the worker does it, the other engine reviews the actual result until they agree (click for split)'
+                  : 'Pair mode for the next task (click to turn on)'
           }
-          onClick={() => setPair((mode) => (mode === null ? 'review' : mode === 'review' ? 'split' : null))}
+          onClick={() => setPair((mode) => (mode === null ? 'review' : mode === 'review' ? 'split' : mode === 'split' ? 'debate' : null))}
         >
-          {pair === 'split' ? 'Pair · split' : 'Pair'}
+          {pair === 'split' ? 'Pair · split' : pair === 'debate' ? 'Pair · debate' : 'Pair'}
         </button>
       </div>
       {hint ? (

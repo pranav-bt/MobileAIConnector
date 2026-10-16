@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { isInternalTask, type ClientCommand, type HubState, type PermissionRequest, type Task } from '@agent-hq/shared';
-import { formatResetDay, formatResetTime, formatTokens, usageColor } from '../status';
+import { agentLabel, formatResetDay, formatResetTime, formatTokens, usageColor } from '../status';
 
 function teamName(state: HubState, teamId: string | null): string {
   return (teamId && state.teams[teamId]?.name) || 'Unassigned';
@@ -56,7 +56,7 @@ export function ApprovalCard(props: { state: HubState; request: PermissionReques
         </div>
       )}
       <div className="act" style={{ marginTop: 6 }}>
-        {teamName(state, request.teamId)} · {state.agents[request.agentId]?.name ?? request.agentId}
+        {teamName(state, request.teamId)} · {agentLabel(state, request.agentId)}
         {' · '}
         <span style={{ color: 'var(--accent)', cursor: 'pointer' }} onClick={() => setShowCommand(!showCommand)}>
           {showCommand ? 'hide command' : 'show command'}

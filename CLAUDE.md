@@ -197,8 +197,8 @@ npm run typecheck      # tsc across workspaces
   (`refusedWrite`), shell writes raise a card ("writes Agent HQ's own data").
   Open: `data/art`, inbox/outbox, and `data/pa` for the PA team.
 - Composer slash-commands (parsed client-side, deterministic): /pair <task> ·
-  /pair split <task> · /solo <task> (also read by the hub, so the phone just
-  prefixes) · /team add
+  /pair split <task> · /pair debate <task> · /solo <task> (also read by the
+  hub, so the phone just prefixes) · /team add
   <name>: <charter> · /team workers <team> <n> · /team remove <team> ·
   /rule <team>[/<section>]: <rule> (team "master" = the master's rules) ·
   /project add <name> <path> [description] · /project remove <project>.
@@ -303,6 +303,25 @@ npm run typecheck      # tsc across workspaces
   says it's not worth splitting, the team has no shell or a cap < 2, or it's
   Agent HQ's own project with a Codex builder. Tests: `pair-split.smoke` (in
   `npm run smoke`), `pair-split.live.ts` (a real two-module build).
+- Pair debate (`pair.mode: 'debate'`; Pair button three clicks, `/pair
+  debate <task>`) = both draft, then converge. Round 1: author and partner
+  draft independently and in parallel as read-only "Debater" seats (`-d<n>`;
+  text teams draft the deliverable, code teams the exact approach). Each
+  later round each reads the other's latest draft and replies
+  `{accept, critique, draft}` (`parseExchange` in shared); the first side to
+  accept the other's draft decides it (both = the author's revision). The
+  owner's messages mid-debate (`#debating`) reach BOTH sides next round. Cap
+  (round 4, i.e. 3 exchanges): Go with A's / Go with B's / Two more rounds;
+  None leaves it for you. Then: text work — the accepted draft IS the report
+  (`RunOptions.agreed`: no writing run; the chair's review folds in the debate
+  note); code — the author implements the agreed approach (brief via
+  `#integrationBriefs`) and the partner reviews it in its debate conversation
+  (`pair.reviewerSession`). State on `pair.debate` (drafts, last exchange,
+  winner). All structured pair replies are parsed by `lastJsonObject`
+  (fast paths for pure/fenced JSON, then ≤400 candidate starts from the end
+  — bounded on long, brace-heavy replies). Tests: `pair-debate.smoke` (in
+  `npm run smoke`), `pair-debate.live.ts` (a steered text debate + a real
+  bug fix), `tools/drive-pair.mjs` (all three modes in Edge).
 - Image generation (`tools/generate-image.mjs`) is LOCAL FIRST: on-demand
   ComfyUI at D:\AI\comfyui (boots per job, watchdog kills it after ~2 min
   idle — zero background footprint; models: FLUX schnell fp8 default, SDXL

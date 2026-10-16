@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
-import { decodeEvent, encodeCommand, parseVerdict, type ClientCommand, type HubEvent, type PermissionRequest, type Task, type TranscriptEntry } from '@agent-hq/shared';
+import { decodeEvent, encodeCommand, parseExchange, parseVerdict, type ClientCommand, type HubEvent, type PermissionRequest, type Task, type TranscriptEntry } from '@agent-hq/shared';
 import { startHub } from '../src/index.js';
 
 const PORT = Number(process.env['PAIR_SMOKE_PORT'] ?? 4643);
@@ -31,6 +31,13 @@ function fail(message: string): never {
   if (!vague || vague.blocking[0] !== 'needs work') fail('a disagreement without issues lost its summary');
   if (parseVerdict('looks fine to me') !== null) fail('no JSON should be no verdict');
   if (parseVerdict('{"summary": "x", "nested": {"agree": "yes"}}') !== null) fail('a non-boolean agree counted');
+  const fenced = parseVerdict('Here you go:\n```json\n{"agree": false, "blocking": ["no tests"], "summary": "s"}\n```\nthanks');
+  if (!fenced || fenced.agree || fenced.blocking[0] !== 'no tests') fail('a fenced verdict was misread');
+  const exchange = parseExchange('{"accept": false, "critique": ["c"], "draft": "function f() { return {a: 1}; } // \\"quoted\\" }"}');
+  if (!exchange || exchange.accept || !exchange.draft.includes('return {a: 1}')) fail(`braces inside a draft broke the exchange: ${JSON.stringify(exchange)}`);
+  const started = Date.now();
+  const hostile = parseVerdict(`${'{"x": '.repeat(8000)}${'{'.repeat(8000)}`);
+  if (hostile !== null || Date.now() - started > 500) fail(`a hostile 40k reply took ${Date.now() - started} ms`);
   console.log('verdicts ok: prose-wrapped JSON, agree-with-blockers is no agreement, no JSON is no verdict');
 }
 

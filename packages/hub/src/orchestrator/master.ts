@@ -1,4 +1,4 @@
-import { jsonObjects, parseRules, resolveModel, toolName, type ModelSpec, type ModelTier, type Project, type Team } from '@agent-hq/shared';
+import { lastJsonObject, parseRules, resolveModel, toolName, type ModelSpec, type ModelTier, type Project, type Team } from '@agent-hq/shared';
 import type { OrchestratorEngine } from '../engine/types.js';
 
 // The master agent's intake: one model call that reads the task and picks a
@@ -513,11 +513,9 @@ export function parseParallelPlan(
   maxParts: number,
   workspaceDir?: string,
 ): { found: boolean; split: boolean; plan: ParallelPlan | null; rejected: string | null; why: string } {
-  const parsed = jsonObjects(text)
-    .reverse()
-    .find((value): value is { split?: unknown; contract?: unknown; scaffold?: unknown; parts?: unknown; why?: unknown } =>
-      !!value && typeof value === 'object' && 'split' in value,
-    );
+  const parsed = lastJsonObject(text, (value) => 'split' in value) as
+    | { split?: unknown; contract?: unknown; scaffold?: unknown; parts?: unknown; why?: unknown }
+    | null;
   const why = typeof parsed?.why === 'string' ? parsed.why.trim().slice(0, 300) : '';
   if (!parsed || parsed.split !== true) return { found: !!parsed, split: false, plan: null, rejected: null, why };
   // A split was asked for: any malformed part rejects the whole plan

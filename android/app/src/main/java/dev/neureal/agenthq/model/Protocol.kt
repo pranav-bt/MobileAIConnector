@@ -72,7 +72,12 @@ data class TaskPair(
     val reviewerModel: String? = null,
     val authorModel: String? = null,
     val plan: PairPlan? = null,
+    val debate: PairDebate? = null,
 )
+
+// A debate pair: rounds so far and whose draft won (null while debating).
+@Serializable
+data class PairDebate(val rounds: Int = 0, val accepted: String? = null)
 
 // A split pair's agreed plan: who builds which part.
 @Serializable

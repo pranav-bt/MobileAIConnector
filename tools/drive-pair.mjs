@@ -83,7 +83,26 @@ const partLinks = await page.locator('.console-drawer >> text=open ›').count()
 check('links to the parts', partLinks >= 2, `${partLinks} links`);
 await page.screenshot({ path: `${SHOTS}/pair-split-console.png` });
 
-// 5. Settings > Models: reviewer seat + per-team pair box (round-trips via the hub).
+// 5. Pair · debate: the third click; the console shows who won and each
+// exchange as accept / objection.
+await page.click('.console-drawer button:has-text("Close")');
+await page.fill('.composer input', '@consolproj design: debate-codex-yields ui debate check');
+for (let click = 0; click < 3; click++) await page.click('.pair-toggle');
+check('third click = debate', (await page.innerText('.pair-toggle')) === 'Pair · debate');
+await page.press('.composer input', 'Enter');
+await page.waitForSelector('.tcard:has-text("ui debate check"):not(:has-text("[QA]"))', { timeout: 15000 });
+await page.click('.tcard:has-text("ui debate check"):not(:has-text("[QA]"))');
+await page.click('button:has-text("Open console")');
+await page.waitForSelector(".console-drawer >> text=/debate: went with Sonnet 5's draft after 2 rounds/", { timeout: 30000 });
+await page.waitForSelector('.console-drawer >> text=/with the debate/', { timeout: 30000 });
+await page.waitForTimeout(600);
+const debateText = await page.innerText('.console-drawer');
+check('debate pair line', /Pair · debate/.test(debateText));
+check("exchanges shown as accept / objection", debateText.includes("✓ Accepts the other's draft") && debateText.includes('✗ Objects') && !debateText.includes('"accept"'));
+check('both first drafts shown', debateText.includes('Mock draft (claude)') && debateText.includes('Mock draft (codex)'));
+await page.screenshot({ path: `${SHOTS}/pair-debate-console.png` });
+
+// 6. Settings > Models: reviewer seat + per-team pair box (round-trips via the hub).
 await page.click('.console-drawer button:has-text("Close")');
 await page.click('button:has-text("Settings")');
 await page.waitForSelector('text=All pair reviewers', { timeout: 10000 });

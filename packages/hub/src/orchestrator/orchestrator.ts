@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { MODEL_DEFAULTS, PAIR_REVIEWER_DEFAULT, catalogModel, isInternalTask, parseVerdict, resolveModel, rulesFor, toolName, type Agent, type ModelChoice, type PairMode, type PairVerdict, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
+import { MODEL_DEFAULTS, PAIR_REVIEWER_DEFAULT, catalogModel, isInternalTask, parseExchange, parseVerdict, resolveModel, rulesFor, toolName, type Agent, type ModelChoice, type PairMode, type PairVerdict, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from '../engine/types.js';
@@ -117,6 +117,8 @@ interface RunOptions {
   keepSlot?: boolean;
   noSplit?: boolean;
   startPct?: number;
+  // A debate's accepted draft IS the report (text work): no writing run.
+  agreed?: { report: string; note: string };
 }
 
 interface SlotWaiter {
@@ -224,6 +226,8 @@ export class Orchestrator implements CommandHandlers {
   #followUps = new Map<string, string[]>();
   // Pair tasks whose chair is reading an owner's message right now.
   #chairing = new Set<string>();
+  // Pair tasks mid-debate: the owner's messages go to both sides next round.
+  #debating = new Set<string>();
   #cardsSeen = new Set<string>();
 
   #projects: ProjectRegistry;
@@ -552,6 +556,12 @@ export class Orchestrator implements CommandHandlers {
       this.freelancerSend(task.agentIds[0], message);
       return;
     }
+    // Mid-debate: both sides hear it next round.
+    if (this.#debating.has(taskId)) {
+      this.#followUps.set(taskId, [...(this.#followUps.get(taskId) ?? []), message]);
+      this.#row(taskId, { role: 'system', kind: 'status', text: 'noted — both models hear it next round' });
+      return;
+    }
     const inbox = this.#inboxes.get(taskId);
     if (inbox && inbox.push(message)) {
       this.#row(taskId, { role: 'system', kind: 'status', text: 'sent to the worker — it reads it at its next step' });
@@ -770,10 +780,11 @@ export class Orchestrator implements CommandHandlers {
       pairChoice = modeMatch[1].toLowerCase() === 'pair';
       text = modeMatch[2].trim();
       // "/pair split …": plan together, then split the parts between them.
-      const split = pairChoice ? text.match(/^split\s+([\s\S]+)$/i) : null;
-      if (split?.[1]) {
-        pairMode = 'split';
-        text = split[1].trim();
+      // "/pair debate …": both draft, then converge on one.
+      const sub = pairChoice ? text.match(/^(split|debate)\s+([\s\S]+)$/i) : null;
+      if (sub?.[1] && sub[2]) {
+        pairMode = sub[1].toLowerCase() as PairMode;
+        text = sub[2].trim();
       }
     }
     // "@<project> do something" pins the task to a project explicitly.
@@ -959,7 +970,7 @@ export class Orchestrator implements CommandHandlers {
     this.#activity(
       'master',
       taskId,
-      `routed "${decision.title}" → ${team.name} · ${project.name} (${basis})${decision.fallback ? ' (keyword fallback)' : ''}${pair ? (pair.mode === 'split' ? ' · pair mode, split' : ' · pair mode') : ''}`,
+      `routed "${decision.title}" → ${team.name} · ${project.name} (${basis})${decision.fallback ? ' (keyword fallback)' : ''}${pair ? (pair.mode === 'review' ? ' · pair mode' : ` · pair mode, ${pair.mode}`) : ''}`,
     );
 
     this.#startOrQueue(taskId, team, true);
@@ -1163,6 +1174,8 @@ export class Orchestrator implements CommandHandlers {
     // (A follow-up from the console continues the work as it is — never re-split.)
     // A 'split' pair plans together first: its own split pass.
     if (!opts.noSplit && task.pair?.mode === 'split' && !this.#followUps.has(taskId)) return this.#pairPlanAndRun(taskId, team, autoQa);
+    // A 'debate' pair converges on a draft first.
+    if (!opts.noSplit && task.pair?.mode === 'debate' && !this.#followUps.has(taskId)) return this.#pairDebateAndRun(taskId, team, autoQa);
     if (!opts.noSplit && !task.pair && !this.#followUps.has(taskId) && this.#shouldPlanSplit(task, team)) {
       return this.#planAndRun(taskId, team, autoQa);
     }
@@ -1313,7 +1326,8 @@ export class Orchestrator implements CommandHandlers {
         runTotal = 0;
         return run;
       };
-      const result = await runAuthor(prompt, resumeSessionId);
+      if (opts.agreed) this.#patchAgent(workerId, { status: 'working', activity: 'writing up the agreed draft' });
+      const result = opts.agreed ? { synopsis: opts.agreed.report, tokens: 0, filesChanged: false } : await runAuthor(prompt, resumeSessionId);
       let report = result.synopsis;
       let filesChanged = !!result.filesChanged;
 
@@ -1323,11 +1337,11 @@ export class Orchestrator implements CommandHandlers {
         return null;
       }
 
-      let pairNote = '';
+      let pairNote = opts.agreed?.note ?? '';
       // Pair mode (second opinion): a reviewer on the other engine checks the
       // actual result; the author fixes what it flags; rounds repeat until
       // it agrees — or the round cap hands the call to the owner.
-      if (this.#bus.state.tasks[taskId]?.pair) {
+      if (this.#bus.state.tasks[taskId]?.pair && !opts.agreed) {
         const paired = await this.#pairRounds({ taskId, team, project, scope, workerSpec, workerId, controller, report, runAuthor });
         if (paired.outcome === 'stopped' || this.#stopping.has(taskId)) {
           this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' });
@@ -2041,12 +2055,12 @@ export class Orchestrator implements CommandHandlers {
   #openSeat(
     ctx: SeatContext,
     spec: ModelSpec,
-    kind: 'Reviewer' | 'Planner',
+    kind: 'Reviewer' | 'Planner' | 'Debater',
     activity: string,
     onSession: (sessionId: string) => void,
   ): { id: string; run: (prompt: string, resumeId?: string) => Promise<WorkerRunResult>; close: () => void } {
     const { taskId, team } = ctx;
-    const key = kind === 'Reviewer' ? 'r' : 'p';
+    const key = kind === 'Reviewer' ? 'r' : kind === 'Planner' ? 'p' : 'd';
     const number = (this.#workerCounters.get(`${team.id}-${key}`) ?? 0) + 1;
     this.#workerCounters.set(`${team.id}-${key}`, number);
     const id = `${team.id}-${key}${number}`;
@@ -2186,6 +2200,12 @@ export class Orchestrator implements CommandHandlers {
       `Task: ${task.title}`,
       `What was asked: ${task.detail.slice(0, 1500)}`,
       `The rounds so far:\n${rounds || '(none)'}`,
+      ...(task.pair.debate
+        ? [
+            `They debated first (${task.pair.debate.rounds} rounds) and went with the ${task.pair.debate.accepted === 'partner' ? "partner's" : "author's"} draft. ` +
+              `Author's draft: ${task.pair.debate.drafts.author.slice(0, 800)}\nPartner's draft: ${task.pair.debate.drafts.partner.slice(0, 800)}`,
+          ]
+        : []),
       `Current report to the owner: ${(task.synopsis ?? '').slice(0, 1500)}`,
       '',
       `The owner now says: "${message.slice(0, 2000)}"`,
@@ -2490,6 +2510,251 @@ export class Orchestrator implements CommandHandlers {
         },
       },
     });
+  }
+
+  // --- pair mode: debate --------------------------------------------------
+  // Both models draft independently (read-only), then each round each one
+  // reads the other's draft, critiques it and revises its own — until one
+  // accepts the other's. The owner can steer between rounds (messages reach
+  // both). Text work: the accepted draft is the product, written up by the
+  // chair. Anything else: the author implements the agreed approach and the
+  // partner reviews the result in its debate conversation.
+
+  // Called from #runTask synchronously: takes the slot like #planAndRun.
+  async #pairDebateAndRun(taskId: string, team: Team, autoQa: boolean): Promise<string | null> {
+    const task = this.#bus.state.tasks[taskId]!;
+    const leadId = `${team.id}-lead`;
+    this.#takeSlot(team.id);
+    this.#patchTask(taskId, { status: 'in_flight', agentIds: [leadId], progressPct: 2 });
+    this.#patchAgent(leadId, { status: 'working', activity: `chairing a debate: ${task.title.slice(0, 40)}`, taskId });
+    const project = (task.projectId ? this.#projects.get(task.projectId) : undefined) ?? this.#projects.defaultProject();
+    let authorSpec = this.#workerSpec(team);
+    // (debaters only read, but the author implements afterwards)
+    if (authorSpec.engine === 'codex' && project.id === this.#projects.defaultProject().id) {
+      authorSpec = resolveModel(team.workerModel === 'codex' ? 'sonnet' : team.workerModel);
+    }
+    const partnerSpec = task.pair?.reviewer?.model ? resolveModel('opus', task.pair.reviewer) : this.#reviewerSpec(team, authorSpec);
+    const workspace = project.workspaceDir || this.#workspaceDir;
+    const controller = new AbortController();
+    this.#controllers.set(taskId, controller);
+    const ctx: SeatContext = {
+      taskId,
+      team,
+      project,
+      scope: { cwd: workspace, extraDirs: this.#extraDirs(workspace, team), locked: this.#lockedData(team) },
+      controller,
+    };
+    const release = () => {
+      this.#patchAgent(leadId, { status: 'idle', activity: 'standing by', taskId: null });
+      this.#freeSlot(team.id);
+      this.#masterStatus();
+    };
+    this.#debating.add(taskId);
+    let result: { outcome: 'converged' | 'left' | 'stopped'; final?: string; note: string; picked?: boolean };
+    try {
+      result = await this.#debate(ctx, authorSpec, partnerSpec);
+    } catch (error) {
+      result = { outcome: 'stopped', note: '' };
+      if (!this.#stopping.has(taskId)) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.#patchTask(taskId, { status: 'failed', synopsis: `Failed while debating: ${message}` });
+        this.#row(taskId, { role: 'system', kind: 'status', text: `failed: ${message.slice(0, 300)}` });
+        this.#controllers.delete(taskId);
+        this.#debating.delete(taskId);
+        release();
+        void this.#recoverStuck(taskId, team, 'failed', message);
+        return null;
+      }
+    } finally {
+      this.#controllers.delete(taskId);
+      this.#debating.delete(taskId);
+    }
+    if (result.outcome === 'stopped' || this.#halted(taskId)) {
+      if (this.#bus.state.tasks[taskId]?.status !== 'paused') this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' });
+      this.#stopping.delete(taskId);
+      this.#followUps.delete(taskId);
+      release();
+      return null;
+    }
+    if (result.outcome === 'left' || result.final === undefined) {
+      this.#patchTask(taskId, { status: 'paused', stoppedBy: 'owner', synopsis: `Left for you: the two models didn't converge.\n${result.note}` });
+      this.#activity('master', taskId, 'debate left at your call — send a message to tell them how to settle it');
+      release();
+      return null;
+    }
+    // The partner reviews the implementation (if any) in its debate
+    // conversation; text work ends here, so the debate's outcome is the pair's.
+    const textWork = !team.allowedTools.includes('bash');
+    const pair = this.#bus.state.tasks[taskId]?.pair;
+    if (pair) {
+      this.#patchTask(taskId, {
+        pair: {
+          ...pair,
+          reviewer: seatChoice(partnerSpec),
+          authorModel: authorSpec.id,
+          reviewerModel: partnerSpec.id,
+          ...(textWork ? { state: result.picked ? ('disagreed' as const) : ('agreed' as const) } : {}),
+        },
+      });
+    }
+    const authorLabel = catalogModel(authorSpec.id)?.label ?? authorSpec.id;
+    const partnerLabel = catalogModel(partnerSpec.id)?.label ?? partnerSpec.id;
+    if (textWork) {
+      // Text work: the agreed draft is the deliverable.
+      return this.#runTask(taskId, team, autoQa, { noSplit: true, slotHeld: true, agreed: { report: result.final, note: result.note } });
+    }
+    this.#integrationBriefs.set(
+      taskId,
+      `You (${authorLabel}) and ${partnerLabel} debated the approach and converged on this — implement it as agreed, then build, test and commit:\n${result.final}`,
+    );
+    try {
+      return await this.#runTask(taskId, team, autoQa, { noSplit: true, slotHeld: true });
+    } finally {
+      this.#integrationBriefs.delete(taskId);
+    }
+  }
+
+  // The debate itself: drafts in parallel, then exchanges until one side
+  // accepts the other's draft (or the cap asks the owner).
+  async #debate(
+    ctx: SeatContext,
+    authorSpec: ModelSpec,
+    partnerSpec: ModelSpec,
+  ): Promise<{ outcome: 'converged' | 'left' | 'stopped'; final?: string; note: string; picked?: boolean }> {
+    const { taskId, team } = ctx;
+    const task = this.#bus.state.tasks[taskId]!;
+    const leadId = `${team.id}-lead`;
+    const authorLabel = catalogModel(authorSpec.id)?.label ?? authorSpec.id;
+    const partnerLabel = catalogModel(partnerSpec.id)?.label ?? partnerSpec.id;
+    const textWork = !team.allowedTools.includes('bash');
+    const what = textWork
+      ? 'the deliverable itself, complete'
+      : "the approach — exactly what you'd change and why (files, steps, risks, how to verify). Don't change anything yet";
+    const opening = (other: string) =>
+      `${task.detail}\n\n---\nYou and ${other} (a different AI model) will each draft this independently, then compare drafts and converge on the best one. ` +
+      `Look at the project if it helps (read-only). Write your draft: ${what}. Reply with the draft only.`;
+    const format =
+      'Reply with ONLY JSON: {"accept": true|false, "critique": ["<what is wrong or missing in their draft>"], "draft": "<your revised draft, complete>"}. ' +
+      '"accept": true means their draft is good to go as it is — at least as good as yours.';
+    const exchange = (other: string, theirs: string, owner: string[]) =>
+      (owner.length ? `The owner says (both of you get this): ${owner.join('\n')}\n\n` : '') +
+      `Here is ${other}'s current draft:\n${theirs.slice(0, 12_000)}\n\nCompare it with yours: keep what's right in theirs, fix what's wrong in yours. ${format}`;
+    // Each side keeps its conversation: the author's as the planner session,
+    // the partner's as the reviewer session (it reviews the work later).
+    const sessionOf = (side: 'author' | 'partner') => {
+      const pair = this.#bus.state.tasks[taskId]?.pair;
+      const session = side === 'author' ? pair?.plannerSession : pair?.reviewerSession;
+      const spec = side === 'author' ? authorSpec : partnerSpec;
+      return session && session.engine === spec.engine ? session.id : undefined;
+    };
+    const speak = async (side: 'author' | 'partner', prompt: string, activity: string): Promise<string> => {
+      const spec = side === 'author' ? authorSpec : partnerSpec;
+      const seat = this.#openSeat(ctx, spec, 'Debater', activity, (id) => {
+        const pair = this.#bus.state.tasks[taskId]?.pair;
+        if (!pair) return;
+        const session = { engine: spec.engine, id };
+        this.#patchTask(taskId, { pair: side === 'author' ? { ...pair, plannerSession: session } : { ...pair, reviewerSession: session } });
+      });
+      try {
+        return (await seat.run(prompt, sessionOf(side))).synopsis;
+      } finally {
+        seat.close();
+      }
+    };
+    const record = (round: number, drafts: { author: string; partner: string }, last: NonNullable<NonNullable<Task['pair']>['debate']>['last'], accepted: 'author' | 'partner' | null) => {
+      const pair = this.#bus.state.tasks[taskId]?.pair;
+      if (!pair) return;
+      this.#patchTask(taskId, {
+        pair: { ...pair, debate: { rounds: round, drafts: { author: drafts.author.slice(0, 8000), partner: drafts.partner.slice(0, 8000) }, last, accepted } },
+      });
+    };
+
+    // Round 1: both draft, independently and at the same time.
+    this.#activity(leadId, taskId, `debate round 1: ${authorLabel} and ${partnerLabel} draft independently`);
+    let [authorDraft, partnerDraft] = await Promise.all([
+      speak('author', opening(partnerLabel), 'drafting'),
+      speak('partner', opening(authorLabel), 'drafting'),
+    ]);
+    if (this.#halted(taskId)) return { outcome: 'stopped', note: '' };
+    record(1, { author: authorDraft, partner: partnerDraft }, null, null);
+    let maxRounds = PAIR_ROUNDS + 1; // round 1 drafts; the rest are exchanges
+    for (let round = 2; ; round++) {
+      if (this.#halted(taskId)) return { outcome: 'stopped', note: '' };
+      // The owner's steering, if any, reaches both sides this round.
+      const owner = this.#followUps.get(taskId) ?? [];
+      this.#followUps.delete(taskId);
+      if (owner.length) this.#activity(leadId, taskId, `debate round ${round}: both sides hear you — ${owner.join(' / ').slice(0, 120)}`);
+      this.#activity(leadId, taskId, `debate round ${round}: each reads the other's draft`);
+      const [authorReply, partnerReply] = await Promise.all([
+        speak('author', exchange(partnerLabel, partnerDraft, owner), `round ${round}: reading ${partnerLabel}'s draft`),
+        speak('partner', exchange(authorLabel, authorDraft, owner), `round ${round}: reading ${authorLabel}'s draft`),
+      ]);
+      if (this.#halted(taskId)) return { outcome: 'stopped', note: '' };
+      const a = parseExchange(authorReply);
+      const b = parseExchange(partnerReply);
+      const last = {
+        round,
+        authorAccepts: !!a?.accept,
+        partnerAccepts: !!b?.accept,
+        authorCritique: a?.critique ?? [],
+        partnerCritique: b?.critique ?? [],
+      };
+      // Whoever's draft the other accepted (as they saw it) is the result;
+      // both accepting means they've met — the author's revision carries both.
+      const accepted: 'author' | 'partner' | null = last.authorAccepts && last.partnerAccepts ? 'author' : last.partnerAccepts ? 'author' : last.authorAccepts ? 'partner' : null;
+      const final = last.authorAccepts && last.partnerAccepts ? a?.draft || authorDraft : last.partnerAccepts ? authorDraft : last.authorAccepts ? partnerDraft : undefined;
+      authorDraft = a?.draft || authorDraft;
+      partnerDraft = b?.draft || partnerDraft;
+      record(round, { author: authorDraft, partner: partnerDraft }, last, accepted);
+      if (final !== undefined && accepted) {
+        const winner = accepted === 'author' ? authorLabel : partnerLabel;
+        this.#activity(leadId, taskId, `debate converged in round ${round}: going with ${winner}'s draft`);
+        const open = accepted === 'author' ? last.partnerCritique : last.authorCritique;
+        return {
+          outcome: 'converged',
+          final,
+          note:
+            `Debate: ${authorLabel} and ${partnerLabel} drafted independently and converged in round ${round} on ${winner}'s draft.` +
+            (open.length ? ` Points the other side still raised: ${open.slice(0, 4).join('; ')}` : ''),
+        };
+      }
+      this.#activity(
+        leadId,
+        taskId,
+        `debate round ${round}: no agreement yet — ${authorLabel}: ${(last.authorCritique[0] ?? 'revised').slice(0, 90)} · ${partnerLabel}: ${(last.partnerCritique[0] ?? 'revised').slice(0, 90)}`,
+      );
+      if (round >= maxRounds) {
+        const authorOption = `Go with ${authorLabel}'s draft`;
+        const partnerOption = `Go with ${partnerLabel}'s draft`;
+        const answer = await this.#askPairCard(taskId, team, `pair-${taskId}-debate${round}`, {
+          summary:
+            `${authorLabel} and ${partnerLabel} haven't converged on "${task.title.slice(0, 60)}" after ${round - 1} exchange${round === 2 ? '' : 's'}. ` +
+            'Pick one of their drafts, give them two more rounds, or stop and decide yourself (None)? (Open the task to read both drafts.)',
+          command:
+            `${authorLabel}: ${last.authorCritique.slice(0, 3).join('; ') || '(no critique)'}\n` +
+            `${partnerLabel}: ${last.partnerCritique.slice(0, 3).join('; ') || '(no critique)'}`,
+          options: [authorOption, partnerOption, 'Two more rounds'],
+          flag: 'pair debate',
+          reason: `No convergence after ${round} rounds.`,
+        });
+        if (answer === 'stopped') return { outcome: 'stopped', note: '' };
+        if (answer === 'leave') return { outcome: 'left', note: `Open points — ${authorLabel}: ${last.authorCritique.join('; ')} · ${partnerLabel}: ${last.partnerCritique.join('; ')}` };
+        if (answer === authorOption || answer === partnerOption) {
+          const pick = answer === authorOption ? 'author' : 'partner';
+          record(round, { author: authorDraft, partner: partnerDraft }, last, pick);
+          const winner = pick === 'author' ? authorLabel : partnerLabel;
+          this.#activity('master', taskId, `going with ${winner}'s draft at your call`);
+          return {
+            outcome: 'converged',
+            final: pick === 'author' ? authorDraft : partnerDraft,
+            note: `Debate: ${authorLabel} and ${partnerLabel} didn't converge in ${round} rounds; the owner picked ${winner}'s draft.`,
+            picked: true,
+          };
+        }
+        maxRounds += 2;
+        this.#activity('master', taskId, 'two more debate rounds, at your call');
+      }
+    }
   }
 
   // --- stuck tasks ------------------------------------------------------

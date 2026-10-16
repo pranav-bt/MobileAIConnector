@@ -175,6 +175,8 @@ export class MockEngine implements OrchestratorEngine {
               ? 'Done, but the icon set still needs the design team (handoff-test).'
               : args.prompt.includes('Second opinion:')
                 ? 'Mock lead review: work checked, looks complete (with the second opinion).'
+                : args.prompt.includes('Debate: ')
+                  ? 'Mock lead review: work checked, looks complete (with the debate).'
                 : 'Mock lead review: work checked, looks complete.';
       // A worker report that says it could not finish reviews as stuck.
       const stuck = args.prompt.includes('Could not finish') ? 'the worker has no Roblox Studio connection' : null;
@@ -219,6 +221,33 @@ export class MockEngine implements OrchestratorEngine {
     // agrees, "pair-disagree-once" agrees from its second review on,
     // "pair-garbled" never gives a readable verdict. The mode is remembered
     // by the reviewer's conversation (later rounds don't repeat the task).
+    // A debate: an independent draft ("debate-slow" takes ~1.5 s, so the
+    // owner can steer mid-debate), then exchanges. Who yields: by engine —
+    // "debate-codex-yields" (the default) / "debate-claude-yields"; "debate-
+    // never" never converges. A draft repeats what the owner said.
+    if (args.readOnly && args.prompt.includes('will each draft this independently')) {
+      callbacks.onActivity(`mock: debate draft · engine ${args.model.engine}`);
+      memory.push(`DEBATEMODE:${/debate-never/i.test(args.prompt) ? 'never' : /debate-claude-yields/i.test(args.prompt) ? 'claude' : 'codex'}`);
+      if (/debate-slow/i.test(args.prompt)) await new Promise((resolve) => setTimeout(resolve, 1500));
+      const text = `Mock draft (${args.model.engine}): first take on the task.`;
+      callbacks.onTranscript?.({ id: `mock-draft-${sessionId}`, kind: 'message', text });
+      return { synopsis: text, tokens: 10, sessionId, filesChanged: false };
+    }
+    if (args.readOnly && args.prompt.includes('Compare it with yours')) {
+      callbacks.onActivity(`mock: debate exchange · engine ${args.model.engine}${args.resumeSessionId ? ' · resumed' : ''}`);
+      const exchanges = memory.filter((line) => line === 'EXCHANGE').length;
+      memory.push('EXCHANGE');
+      const mode = memory.find((line) => line.startsWith('DEBATEMODE:'))?.slice(11) ?? 'codex';
+      const heard = args.prompt.match(/The owner says \(both of you get this\): ([^\n]+)/)?.[1];
+      const accept = mode !== 'never' && mode === args.model.engine;
+      const text = JSON.stringify({
+        accept,
+        critique: accept ? [] : [`${args.model.engine} thinks the other draft misses the edge cases`],
+        draft: `Mock draft (${args.model.engine}) revised ${exchanges + 1}x.${heard ? ` heard: ${heard}` : ''}`,
+      });
+      callbacks.onTranscript?.({ id: `mock-exchange-${sessionId}-${exchanges}`, kind: 'message', text });
+      return { synopsis: text, tokens: 11, sessionId, filesChanged: false };
+    }
     // A pair split's partner reviewing the plan: "plan-never-agree" never
     // agrees, "plan-disagree-once" agrees from its second look on.
     if (args.readOnly && /proposed this split plan|revised the plan:/.test(args.prompt)) {

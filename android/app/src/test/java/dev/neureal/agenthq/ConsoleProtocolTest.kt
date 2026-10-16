@@ -67,6 +67,13 @@ class ConsoleProtocolTest {
         assertEquals(2, split.pair?.plan?.rounds)
         assertEquals("partner", split.pair?.plan?.parts?.get(1)?.builder)
         assertEquals("t-5", split.pair?.plan?.parts?.get(0)?.taskId)
+        val debate = json.decodeFromString<Task>(
+            """{"id":"t-6","title":"d","status":"done","pair":{"mode":"debate","maxRounds":3,"round":0,"rounds":[],""" +
+                """"debate":{"rounds":2,"drafts":{"author":"a","partner":"b"},"accepted":"partner","last":null}}}""",
+        )
+        assertEquals("debate", debate.pair?.mode)
+        assertEquals("partner", debate.pair?.debate?.accepted)
+        assertEquals(2, debate.pair?.debate?.rounds)
     }
 
     @Test
