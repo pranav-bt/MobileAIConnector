@@ -3,6 +3,7 @@ import {
   ModelOverridesSchema,
   HubEventSchema,
   ModelTierSchema,
+  PairModeSchema,
   PermissionDecisionSchema,
   PermissionScopeSchema,
   type HubEvent,
@@ -33,6 +34,9 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     // Pair mode for this task (true) or solo (false); omitted = the team's
     // default. "/pair " and "/solo " prefixes on the text do the same.
     pair: z.boolean().optional(),
+    // With pair: 'review' (default) or 'split' (plan together, then split
+    // the parts between the two engines). "/pair split …" does the same.
+    pairMode: PairModeSchema.optional(),
   }),
   z.object({
     type: z.literal('task.stop'),

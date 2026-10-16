@@ -1,9 +1,9 @@
 import { useRef, useState } from 'react';
-import type { ClientCommand, HubState, WorkspaceRoot } from '@agent-hq/shared';
+import type { ClientCommand, HubState, PairMode, WorkspaceRoot } from '@agent-hq/shared';
 import { isActive } from '../status';
 
 const HELP =
-  '/pair <task> · /solo <task> · /project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /rule <team>[/<section>]: <rule> · /rule master/stuck: <rule> · /permissions auto|strict · /todo <text> · /note <text> · /remind <when> <text> · /event <when> <title> · /pa on|off · /tasks pause|resume|killall';
+  '/pair <task> · /pair split <task> · /solo <task> · /project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /rule <team>[/<section>]: <rule> · /rule master/stuck: <rule> · /permissions auto|strict · /todo <text> · /note <text> · /remind <when> <text> · /event <when> <title> · /pa on|off · /tasks pause|resume|killall';
 
 export const WHEN_HELP = '<when>: "in 20m|2h|3d", "17:30", "tomorrow 09:00", or "2026-09-14 18:00"';
 
@@ -56,11 +56,16 @@ function parseSlashCommand(
 ): { command: ClientCommand; note: string } | { hint: string } | null {
   if (!text.startsWith('/')) return null;
   // "/pair <task>": both engines — the worker does it, a second model reviews
-  // it until they agree. "/solo <task>": one worker even if the team pairs by
-  // default. (The hub strips the prefix; it reads the same from any client.)
+  // it until they agree. "/pair split <task>": they agree a plan, split the
+  // parts between them and review each other's. "/solo <task>": one worker
+  // even if the team pairs by default. (The hub reads the same prefixes.)
   const pairMatch = text.match(/^\/(pair|solo)\s+([\s\S]+)$/i);
   if (pairMatch && pairMatch[1] && pairMatch[2]) {
     const pair = pairMatch[1].toLowerCase() === 'pair';
+    const split = pair ? pairMatch[2].match(/^split\s+([\s\S]+)$/i) : null;
+    if (split?.[1]) {
+      return { command: { type: 'task.submit', text: split[1].trim(), pair: true, pairMode: 'split' }, note: 'sent in pair mode — plan together, then split' };
+    }
     return { command: { type: 'task.submit', text: pairMatch[2].trim(), pair }, note: pair ? 'sent in pair mode' : 'sent solo' };
   }
   // "/project new BeatBox personal" creates the folder under the right root.
@@ -165,8 +170,9 @@ export function TopBar(props: {
   send: (command: ClientCommand) => void;
 }): JSX.Element {
   const [text, setText] = useState('');
-  // One-shot: the next task runs in pair mode (a second model reviews it).
-  const [pair, setPair] = useState(false);
+  // One-shot: the next task runs in pair mode — 'review' (a second model
+  // reviews it) or 'split' (they plan together and split the parts).
+  const [pair, setPair] = useState<PairMode | null>(null);
   const [hint, setHint] = useState<string | null>(null);
   const hintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeCount = Object.values(props.state.agents).filter(isActive).length;
@@ -193,9 +199,9 @@ export function TopBar(props: {
       }
       return;
     }
-    props.send({ type: 'task.submit', text: trimmed, ...(pair ? { pair: true } : {}) });
+    props.send({ type: 'task.submit', text: trimmed, ...(pair ? { pair: true, pairMode: pair } : {}) });
     setText('');
-    setPair(false);
+    setPair(null);
   };
 
   return (
@@ -213,11 +219,18 @@ export function TopBar(props: {
         <button
           type="button"
           className={`pair-toggle${pair ? ' on' : ''}`}
-          aria-pressed={pair}
-          title="Pair mode for the next task: the worker does it, a second model (the other engine) reviews the actual result until they agree"
-          onClick={() => setPair((on) => !on)}
+          aria-pressed={pair !== null}
+          data-mode={pair ?? 'off'}
+          title={
+            pair === 'split'
+              ? 'Pair · split: the two engines agree a plan, split the parts between them, and review each other\'s work (click to turn off)'
+              : pair === 'review'
+                ? 'Pair: the worker does it, the other engine reviews the actual result until they agree (click for split)'
+                : 'Pair mode for the next task (click to turn on)'
+          }
+          onClick={() => setPair((mode) => (mode === null ? 'review' : mode === 'review' ? 'split' : null))}
         >
-          Pair
+          {pair === 'split' ? 'Pair · split' : 'Pair'}
         </button>
       </div>
       {hint ? (

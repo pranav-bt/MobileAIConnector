@@ -219,6 +219,53 @@ export class MockEngine implements OrchestratorEngine {
     // agrees, "pair-disagree-once" agrees from its second review on,
     // "pair-garbled" never gives a readable verdict. The mode is remembered
     // by the reviewer's conversation (later rounds don't repeat the task).
+    // A pair split's partner reviewing the plan: "plan-never-agree" never
+    // agrees, "plan-disagree-once" agrees from its second look on.
+    if (args.readOnly && /proposed this split plan|revised the plan:/.test(args.prompt)) {
+      callbacks.onActivity(`mock: plan review · engine ${args.model.engine}${args.resumeSessionId ? ' · resumed' : ''}`);
+      const looks = memory.filter((line) => line === 'PLANREVIEW').length;
+      memory.push('PLANREVIEW');
+      const lower = args.prompt.toLowerCase();
+      const known = memory.find((line) => line.startsWith('PLANMODE:'))?.slice(9);
+      const mode = known ?? (lower.includes('plan-never-agree') ? 'never' : lower.includes('plan-disagree-once') ? 'once' : 'agree');
+      if (!known) memory.push(`PLANMODE:${mode}`);
+      const agree = mode === 'agree' || (mode === 'once' && looks >= 1);
+      const text = JSON.stringify({
+        agree,
+        blocking: agree ? [] : ['module B needs its own config file in its part'],
+        minor: [],
+        summary: agree ? 'The split is clean and the contract is enough.' : 'Not yet: module B is missing its config.',
+      });
+      callbacks.onTranscript?.({ id: `mock-planreview-${sessionId}-${looks}`, kind: 'message', text });
+      return { synopsis: text, tokens: 12, sessionId, filesChanged: false };
+    }
+    // A pair split's planner: "pairsplit-solo" says it isn't worth splitting,
+    // "pairsplit-invalid-once" first proposes overlapping parts; otherwise
+    // module A for the author and module B for the partner.
+    if (args.readOnly && args.prompt.includes('"builder": "you" | "partner"')) {
+      callbacks.onActivity(`mock: plan draft · engine ${args.model.engine}${args.resumeSessionId ? ' · resumed' : ''}`);
+      const drafts = memory.filter((line) => line === 'DRAFT').length;
+      memory.push('DRAFT');
+      const lower = args.prompt.toLowerCase();
+      const known = memory.find((line) => line.startsWith('DRAFTMODE:'))?.slice(10);
+      const mode = known ?? (lower.includes('pairsplit-solo') ? 'solo' : lower.includes('pairsplit-invalid-once') ? 'invalid' : 'plan');
+      if (!known) memory.push(`DRAFTMODE:${mode}`);
+      const plan =
+        mode === 'solo'
+          ? { split: false, why: 'mock: one small change, nothing to split' }
+          : {
+              split: true,
+              contract: 'src/a and src/b each export start(); src/index calls both.',
+              scaffold: lower.includes('pairsplit-scaffold') ? 'create src/index with the folder layout' : '',
+              parts: [
+                { title: 'Module A', instruction: 'build module A', owns: ['src/a'], builder: 'you' },
+                { title: 'Module B', instruction: 'build module B', owns: mode === 'invalid' && drafts === 0 ? ['src/a/b'] : ['src/b'], builder: 'partner' },
+              ],
+            };
+      const text = `Here is my plan.\n${JSON.stringify(plan)}`;
+      callbacks.onTranscript?.({ id: `mock-plan-${sessionId}-${drafts}`, kind: 'message', text });
+      return { synopsis: text, tokens: 14, sessionId, filesChanged: false };
+    }
     if (args.readOnly) {
       callbacks.onActivity(`mock: read-only review · engine ${args.model.engine}${args.resumeSessionId ? ' · resumed' : ''}`);
       const reviewsBefore = memory.filter((line) => line === 'REVIEW').length;

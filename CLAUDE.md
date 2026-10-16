@@ -197,7 +197,8 @@ npm run typecheck      # tsc across workspaces
   (`refusedWrite`), shell writes raise a card ("writes Agent HQ's own data").
   Open: `data/art`, inbox/outbox, and `data/pa` for the PA team.
 - Composer slash-commands (parsed client-side, deterministic): /pair <task> ·
-  /solo <task> (also read by the hub, so the phone just prefixes) · /team add
+  /pair split <task> · /solo <task> (also read by the hub, so the phone just
+  prefixes) · /team add
   <name>: <charter> · /team workers <team> <n> · /team remove <team> ·
   /rule <team>[/<section>]: <rule> (team "master" = the master's rules) ·
   /project add <name> <path> [description] · /project remove <project>.
@@ -280,9 +281,28 @@ npm run typecheck      # tsc across workspaces
   goes straight to the card. The lead CHAIRS: its review gets the second
   opinion folded in, and a message to a finished pair task goes through
   `#chairReply` — a question is answered, a change goes to the author and is
-  re-reviewed (fresh 3-round budget). Pair tasks never split. Codex may
+  re-reviewed (fresh 3-round budget). Review pairs never split. Codex may
   review in Agent HQ's own project (read-only). Tests: `pair.smoke` (in
   `npm run smoke`), `pair.live.ts` (Claude⇄Codex both ways, code + doc).
+- Pair split (`pair.mode: 'split'`; Pair button clicked twice, `/pair split
+  <task>`, `pairMode` on task.submit) = plan together, then split. The author
+  (worker seat) drafts a split plan from the real project as a read-only
+  "Planner" seat — the lead split's JSON plus `"builder": "you" | "partner"`
+  per part (`parseParallelPlan` + `SPLIT_RULES` in master.ts, same ownership
+  validation) — and the partner (the reviewer seat) reviews it as a verdict.
+  Invalid plans go straight back to the author; rounds repeat until the
+  partner agrees; the cap card offers Go with this plan / Two more rounds /
+  Skip the split (`pair-<task>-plan<n>`). Then `#runSplit` runs with seats:
+  scaffold on the author, each part on its builder (`Task.seat`, a
+  ModelChoice `#runTask` honors) with `pair.reviewer` = the OTHER model, so
+  every part gets a cross-review (part reviewers check only the part's owned
+  files); the author integrates and the partner reviews the integrated whole
+  in its plan conversation. The plan lives on `pair.plan` (parts link to
+  their task ids; the console gets link rows to every part of any split).
+  Falls back to a second opinion — with a line saying why — when the author
+  says it's not worth splitting, the team has no shell or a cap < 2, or it's
+  Agent HQ's own project with a Codex builder. Tests: `pair-split.smoke` (in
+  `npm run smoke`), `pair-split.live.ts` (a real two-module build).
 - Image generation (`tools/generate-image.mjs`) is LOCAL FIRST: on-demand
   ComfyUI at D:\AI\comfyui (boots per job, watchdog kills it after ~2 min
   idle — zero background footprint; models: FLUX schnell fp8 default, SDXL

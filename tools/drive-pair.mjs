@@ -61,7 +61,29 @@ await page.waitForTimeout(500);
 await page.screenshot({ path: `${SHOTS}/pair-chair.png` });
 check('chair answered', true);
 
-// 4. Settings > Models: reviewer seat + per-team pair box (round-trips via the hub).
+// 4. Pair · split: the button's second click; the console shows the agreed
+// plan (who builds what), the planner's reply as a plan, and links to parts.
+await page.click('.console-drawer button:has-text("Close")');
+await page.fill('.composer input', '@consolproj coding: pairsplit-basic ui split check');
+await page.click('.pair-toggle');
+await page.click('.pair-toggle');
+check('second click = split', (await page.getAttribute('.pair-toggle', 'data-mode')) === 'split' && (await page.innerText('.pair-toggle')) === 'Pair · split');
+await page.press('.composer input', 'Enter');
+await page.waitForSelector('.tcard:has-text("pairsplit-basic"):not(:has-text("[QA]")):not(:has-text("[part"))', { timeout: 15000 });
+await page.click('.tcard:has-text("pairsplit-basic"):not(:has-text("[QA]")):not(:has-text("[part"))');
+await page.click('button:has-text("Open console")');
+await page.waitForSelector('.console-drawer >> text=/plan agreed in 1 round/', { timeout: 30000 });
+await page.waitForSelector('.console-drawer >> text=/with the second opinion/', { timeout: 30000 });
+await page.waitForTimeout(600);
+const splitText = await page.innerText('.console-drawer');
+check('split pair line', /Pair · split · round 1\/3 · Sonnet 5 ⇄ GPT-6\.1-Sol/.test(splitText), splitText.match(/Pair · split[^\n]*/)?.[0] ?? '(none)');
+check('plan line names the builders', /Module A — Sonnet 5 · Module B — GPT-6\.1-Sol/.test(splitText));
+check('planner reply shown as a plan', splitText.includes('Proposed split — 2 parts') && splitText.includes('partner builds'));
+const partLinks = await page.locator('.console-drawer >> text=open ›').count();
+check('links to the parts', partLinks >= 2, `${partLinks} links`);
+await page.screenshot({ path: `${SHOTS}/pair-split-console.png` });
+
+// 5. Settings > Models: reviewer seat + per-team pair box (round-trips via the hub).
 await page.click('.console-drawer button:has-text("Close")');
 await page.click('button:has-text("Settings")');
 await page.waitForSelector('text=All pair reviewers', { timeout: 10000 });

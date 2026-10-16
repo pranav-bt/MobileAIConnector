@@ -101,10 +101,20 @@ fun TaskConsoleScreen(snapshot: Snapshot, taskId: String, onRespond: (Permission
                         "disagreed" -> "went with it — still disagreed"
                         else -> "author working"
                     }
+                    val mode = if (pair.mode == "split") "Pair · split" else "Pair"
                     Text(
-                        "Pair · round ${pair.round}/${pair.maxRounds} · ${pair.reviewerModel ?: "other engine"} reviews · $state",
+                        "$mode · round ${pair.round}/${pair.maxRounds} · ${pair.reviewerModel ?: "other engine"} reviews · $state",
                         color = if (pair.state == "agreed") HQ.green else HQ.accent, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
                     )
+                    pair.plan?.let { plan ->
+                        Text(
+                            "plan ${if (plan.agreed) "agreed" else "chosen by you"} in ${plan.rounds} · " +
+                                plan.parts.joinToString(" · ") { part ->
+                                    "${part.title} — ${if (part.builder == "partner") pair.reviewerModel ?: "partner" else pair.authorModel ?: "author"}"
+                                },
+                            color = HQ.muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 2,
+                        )
+                    }
                 }
             }
             if (task != null && task.status in STOPPABLE) {

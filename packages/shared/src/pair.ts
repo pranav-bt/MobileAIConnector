@@ -35,8 +35,9 @@ export function parseVerdict(text: string): PairVerdict | null {
   };
 }
 
-// Every balanced {...} in a text that parses as JSON (string-aware).
-function jsonObjects(text: string): unknown[] {
+// Every balanced {...} in a text that parses as JSON (string-aware), in
+// order — a model's reply may wrap its JSON in prose.
+export function jsonObjects(text: string): unknown[] {
   const found: unknown[] = [];
   for (let i = text.indexOf('{'); i !== -1; i = text.indexOf('{', i + 1)) {
     let depth = 0;

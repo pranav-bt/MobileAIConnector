@@ -1,4 +1,4 @@
-import type { ClientCommand, ModelOverrides, ModelTier } from '@agent-hq/shared';
+import type { ClientCommand, ModelOverrides, ModelTier, PairMode } from '@agent-hq/shared';
 
 // The server parses wire frames into ClientCommands and hands them here.
 // The demo driver and the orchestrator each provide an implementation.
@@ -6,7 +6,7 @@ import type { ClientCommand, ModelOverrides, ModelTier } from '@agent-hq/shared'
 // these handlers — the server routes them to the SecurityController.
 export interface CommandHandlers {
   // pair: true/false forces pair mode on/off; omitted = the team's default.
-  submitTask(text: string, projectId: string | null, pair?: boolean): void;
+  submitTask(text: string, projectId: string | null, pair?: boolean, pairMode?: PairMode): void;
   stopTask(taskId: string): void;
   // Task console: talk to a task (the demo hub has no consoles).
   messageTask?(taskId: string, text: string): void;
@@ -54,7 +54,7 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
     case 'hello':
       return; // connection bookkeeping happens in the server
     case 'task.submit':
-      return handlers.submitTask(command.text, command.projectId ?? null, command.pair);
+      return handlers.submitTask(command.text, command.projectId ?? null, command.pair, command.pairMode);
     case 'task.stop':
       return handlers.stopTask(command.taskId);
     case 'task.message':

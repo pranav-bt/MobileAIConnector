@@ -57,6 +57,16 @@ class ConsoleProtocolTest {
         assertEquals(5, task.pair?.maxRounds)
         assertEquals("reviewing", task.pair?.state)
         assertEquals("gpt-6.1-sol", task.pair?.reviewerModel)
+        assertEquals("review", task.pair?.mode)
+        val split = json.decodeFromString<Task>(
+            """{"id":"t-4","title":"s","status":"done","pair":{"mode":"split","maxRounds":3,"round":1,"rounds":[],""" +
+                """"plan":{"rounds":2,"agreed":true,"contract":"c","scaffold":null,"parts":[""" +
+                """{"title":"A","owns":["src/a"],"builder":"author","taskId":"t-5"},{"title":"B","owns":["src/b"],"builder":"partner"}]}}}""",
+        )
+        assertEquals("split", split.pair?.mode)
+        assertEquals(2, split.pair?.plan?.rounds)
+        assertEquals("partner", split.pair?.plan?.parts?.get(1)?.builder)
+        assertEquals("t-5", split.pair?.plan?.parts?.get(0)?.taskId)
     }
 
     @Test

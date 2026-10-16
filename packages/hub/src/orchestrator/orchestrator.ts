@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { MODEL_DEFAULTS, PAIR_REVIEWER_DEFAULT, catalogModel, isInternalTask, parseVerdict, resolveModel, rulesFor, toolName, type Agent, type PairVerdict, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
+import { MODEL_DEFAULTS, PAIR_REVIEWER_DEFAULT, catalogModel, isInternalTask, parseVerdict, resolveModel, rulesFor, toolName, type Agent, type ModelChoice, type PairMode, type PairVerdict, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from '../engine/types.js';
@@ -11,6 +11,9 @@ import {
   coordinateFollowUp,
   evaluateQaReport,
   planParallelSplit,
+  parseParallelPlan,
+  ownerRulesBlock,
+  SPLIT_RULES,
   reviewWorkerReport,
   routeTask,
   type ParallelPlan,
@@ -65,6 +68,22 @@ export function splitWorthChecking(title: string, detail: string): boolean {
 // Pair mode: review rounds before the owner is asked (also the fresh budget
 // a continued pair task gets).
 export const PAIR_ROUNDS = 3;
+
+// What every pair verdict (plan or work) must look like.
+const VERDICT_FORMAT =
+  'Reply with ONLY JSON: {"agree": true|false, "blocking": ["<issue that must be fixed>"], "minor": ["<optional suggestion>"], "summary": "<one sentence>"}. ' +
+  '"agree" is true only when no blocking issue remains. Blocking = wrong, broken, missing what was asked, or unsafe — not style.';
+
+// Where a pair's side seat (reviewer / planner) runs and what it may touch.
+interface SeatContext {
+  taskId: string;
+  team: Team;
+  project: Project;
+  scope: { cwd: string; extraDirs: string[]; locked: LockedDir };
+  controller: AbortController;
+}
+
+const seatChoice = (spec: ModelSpec): ModelChoice => ({ model: spec.id, ...(spec.effort ? { effort: spec.effort } : {}) });
 
 // A short fingerprint of the work under review, so "agreed" names the exact
 // version: the git working-tree diff (tracked + untracked files) in a repo,
@@ -612,8 +631,8 @@ export class Orchestrator implements CommandHandlers {
 
   // --- commands ----------------------------------------------------------
 
-  submitTask(text: string, _projectId?: string | null, pair?: boolean): void {
-    void this.#intake(text, pair);
+  submitTask(text: string, _projectId?: string | null, pair?: boolean, pairMode?: PairMode): void {
+    void this.#intake(text, pair, pairMode);
   }
 
   activeWorkerCwds(): string[] {
@@ -742,7 +761,7 @@ export class Orchestrator implements CommandHandlers {
     }
   }
 
-  async #intake(rawText: string, pairChoice?: boolean): Promise<void> {
+  async #intake(rawText: string, pairChoice?: boolean, pairMode: PairMode = 'review'): Promise<void> {
     let text = rawText.trim();
     // "/pair …" / "/solo …" turn pair mode on/off for this task (the
     // composer's toggle sends the same as a flag; neither = the team's default).
@@ -750,6 +769,12 @@ export class Orchestrator implements CommandHandlers {
     if (modeMatch && modeMatch[1] && modeMatch[2]) {
       pairChoice = modeMatch[1].toLowerCase() === 'pair';
       text = modeMatch[2].trim();
+      // "/pair split …": plan together, then split the parts between them.
+      const split = pairChoice ? text.match(/^split\s+([\s\S]+)$/i) : null;
+      if (split?.[1]) {
+        pairMode = 'split';
+        text = split[1].trim();
+      }
     }
     // "@<project> do something" pins the task to a project explicitly.
     let forcedProjectId: string | null = null;
@@ -924,17 +949,17 @@ export class Orchestrator implements CommandHandlers {
 
     if (decision.steps) {
       this.#activity('master', taskId, `project: ${project.name} (${basis})`);
-      void this.#runChain(taskId, decision.steps, project.id, decision.title, 0, pairChoice);
+      void this.#runChain(taskId, decision.steps, project.id, decision.title, 0, pairChoice, pairMode);
       this.#masterStatus();
       return;
     }
 
-    const pair = this.#pairFor(team, pairChoice);
+    const pair = this.#pairFor(team, pairChoice, pairMode);
     this.#patchTask(taskId, { teamId: team.id, projectId: project.id, title: decision.title, status: 'queued', pair });
     this.#activity(
       'master',
       taskId,
-      `routed "${decision.title}" → ${team.name} · ${project.name} (${basis})${decision.fallback ? ' (keyword fallback)' : ''}${pair ? ' · pair mode' : ''}`,
+      `routed "${decision.title}" → ${team.name} · ${project.name} (${basis})${decision.fallback ? ' (keyword fallback)' : ''}${pair ? (pair.mode === 'split' ? ' · pair mode, split' : ' · pair mode') : ''}`,
     );
 
     this.#startOrQueue(taskId, team, true);
@@ -950,6 +975,7 @@ export class Orchestrator implements CommandHandlers {
     overallTitle: string,
     recoveryRound = 0,
     pairChoice?: boolean,
+    pairMode: PairMode = 'review',
   ): Promise<void> {
     this.#activity(
       'master',
@@ -981,7 +1007,7 @@ export class Orchestrator implements CommandHandlers {
         agentIds: [],
         synopsis: null,
         tokensUsed: 0,
-        pair: this.#pairFor(team, pairChoice),
+        pair: this.#pairFor(team, pairChoice, pairMode),
         createdAt: this.#bus.state.tasks[taskId]?.createdAt ?? now(),
         updatedAt: now(),
       };
@@ -1124,16 +1150,19 @@ export class Orchestrator implements CommandHandlers {
   // hands it on or frees it); `noSplit` — skip the split pass; `startPct` —
   // progress to resume from (an integration run continues its parts' 70%).
   async #runTask(taskId: string, team: Team, autoQa = true, opts: RunOptions = {}): Promise<string | null> {
-    let workerSpec = this.#workerSpec(team);
-    const leadSpec = this.#leadSpec(team);
     const task = this.#bus.state.tasks[taskId];
     if (!task) {
       if (opts.slotHeld && !opts.keepSlot) this.#freeSlot(team.id);
       return null;
     }
+    // A pair split's part runs on the model that agreed to build it.
+    let workerSpec = task.seat?.model ? resolveModel(team.workerModel, task.seat) : this.#workerSpec(team);
+    const leadSpec = this.#leadSpec(team);
     // Must stay synchronous up to the slot increment below (callers check the
     // cap, then call) — the split pass takes over the slot the same way.
     // (A follow-up from the console continues the work as it is — never re-split.)
+    // A 'split' pair plans together first: its own split pass.
+    if (!opts.noSplit && task.pair?.mode === 'split' && !this.#followUps.has(taskId)) return this.#pairPlanAndRun(taskId, team, autoQa);
     if (!opts.noSplit && !task.pair && !this.#followUps.has(taskId) && this.#shouldPlanSplit(task, team)) {
       return this.#planAndRun(taskId, team, autoQa);
     }
@@ -1294,15 +1323,6 @@ export class Orchestrator implements CommandHandlers {
         return null;
       }
 
-      // A split piece's raw report goes straight to the integration worker;
-      // only the integrated whole gets the lead's review.
-      if (piece) {
-        const report = result.synopsis.trim().slice(0, MAX_PIECE_REPORT) || 'Finished without a written report.';
-        this.#patchTask(taskId, { status: 'done', progressPct: 100, synopsis: report });
-        this.#activity(`${team.id}-lead`, taskId, `part report in: ${task.title.slice(0, 50)}`);
-        return report;
-      }
-
       let pairNote = '';
       // Pair mode (second opinion): a reviewer on the other engine checks the
       // actual result; the author fixes what it flags; rounds repeat until
@@ -1326,6 +1346,16 @@ export class Orchestrator implements CommandHandlers {
         report = paired.report;
         filesChanged = filesChanged || paired.filesChanged;
         pairNote = paired.note;
+      }
+
+      // A split piece's raw report goes straight to the integration worker;
+      // only the integrated whole gets the lead's review. (A pair split's
+      // part was reviewed by the other model just above; that goes along.)
+      if (piece) {
+        const pieceReport = (pairNote ? `${report.trim()}\n${pairNote}` : report.trim()).slice(0, MAX_PIECE_REPORT) || 'Finished without a written report.';
+        this.#patchTask(taskId, { status: 'done', progressPct: 100, synopsis: pieceReport });
+        this.#activity(`${team.id}-lead`, taskId, `part report in: ${task.title.slice(0, 50)}`);
+        return pieceReport;
       }
 
       // Lead review: the worker's report becomes the synopsis the owner reads.
@@ -1526,21 +1556,33 @@ export class Orchestrator implements CommandHandlers {
   // Entered holding the planning slot. The slot travels scaffold -> part 1,
   // and the last part to finish hands its slot to the integration run, so a
   // split never gives up capacity mid-flight; other parts claim slots through
-  // the priority line.
-  async #runSplit(taskId: string, team: Team, plan: ParallelPlan, autoQa: boolean): Promise<string | null> {
+  // the priority line. A pair split (`pair`) runs each part on its builder's
+  // model, has the OTHER model review it, and the scaffold on the author.
+  async #runSplit(
+    taskId: string,
+    team: Team,
+    plan: ParallelPlan,
+    autoQa: boolean,
+    pair?: { author: ModelSpec; partner: ModelSpec },
+  ): Promise<string | null> {
     const parent = this.#bus.state.tasks[taskId]!;
     const leadId = `${team.id}-lead`;
     const count = plan.parts.length;
+    const label = (spec: ModelSpec) => catalogModel(spec.id)?.label ?? spec.id;
+    const builderOf = (part: ParallelPlan['parts'][number]) => (pair ? (part.builder === 'partner' ? pair.partner : pair.author) : null);
     this.#activity(
       leadId,
       taskId,
-      `split into ${count} parallel parts${plan.scaffold ? ' after a scaffold' : ''}: ${plan.parts.map((part) => part.title).join(' · ')}`,
+      `split into ${count} parallel parts${plan.scaffold ? ' after a scaffold' : ''}: ` +
+        plan.parts.map((part) => (pair ? `${part.title} (${label(builderOf(part)!)})` : part.title)).join(' · '),
     );
     this.#patchAgent(leadId, { status: 'working', activity: `coordinating ${count} parallel workers`, taskId });
     this.#patchTask(taskId, { progressPct: 5 });
 
     const header =
-      `This is one piece of "${parent.title}", which the ${team.name} lead split across parallel workers.\n\n` +
+      (pair
+        ? `This is one piece of "${parent.title}". ${label(pair.author)} and ${label(pair.partner)} (two different AI models) agreed a plan and split the parts between them.\n\n`
+        : `This is one piece of "${parent.title}", which the ${team.name} lead split across parallel workers.\n\n`) +
       `Overall task: ${parent.detail.slice(0, 3000)}\n\n` +
       'Shared contract (code against it exactly; if it is wrong, work around it and say so in your report):\n' +
       (plan.contract || '(none given — follow the existing code layout)');
@@ -1558,6 +1600,7 @@ export class Orchestrator implements CommandHandlers {
           `${header}\n\nYour piece: build ONLY the shared skeleton the parallel parts need before they start:\n${plan.scaffold}\n\n` +
             `The parts that follow (do not build their contents): ${partList}. Commit the skeleton when it is in place.`,
           true,
+          pair ? { seat: seatChoice(pair.author) } : {},
         );
         if (this.#halted(taskId)) return null;
         if (scaffold.report === null) {
@@ -1573,6 +1616,8 @@ export class Orchestrator implements CommandHandlers {
         plan.parts.map((part, index) => {
           const inherits = index === 0; // part 1 takes over the held slot
           if (inherits) slotHeld = false;
+          const builder = builderOf(part);
+          const reviewer = pair ? (part.builder === 'partner' ? pair.author : pair.partner) : null;
           return this.#runSplitPiece(
             taskId,
             team,
@@ -1583,8 +1628,21 @@ export class Orchestrator implements CommandHandlers {
               'Rules: create/edit only paths you own (read anything). Do NOT commit, reset, stash, checkout or otherwise change git state, ' +
               'and do not add dependencies or run repo-wide formatters — the integration step does that. ' +
               'Do NOT run the repo-wide test suite, full build, typecheck or linters: the other parts are still writing files, so ' +
-              'those results are meaningless. At most run tests scoped to files you own; the integration step builds and runs everything.',
+              'those results are meaningless. At most run tests scoped to files you own; the integration step builds and runs everything.' +
+              (reviewer ? `\nWhen you're done, ${label(reviewer)} (the other model) reviews your part.` : ''),
             inherits,
+            builder && reviewer
+              ? {
+                  seat: seatChoice(builder),
+                  pair: { mode: 'review', maxRounds: PAIR_ROUNDS, round: 0, state: 'working', rounds: [], reviewer: seatChoice(reviewer) },
+                  onCreated: (pieceId) => {
+                    const current = this.#bus.state.tasks[taskId]?.pair;
+                    if (!current?.plan) return;
+                    const parts = current.plan.parts.map((entry, at) => (at === index ? { ...entry, taskId: pieceId } : entry));
+                    this.#patchTask(taskId, { pair: { ...current, plan: { ...current.plan, parts } } });
+                  },
+                }
+              : {},
           ).then(({ report, ran }) => {
             finished += 1;
             if (ran) {
@@ -1607,14 +1665,18 @@ export class Orchestrator implements CommandHandlers {
       }
       results.forEach((report, index) =>
         reports.push(
-          `Part ${index + 1} (${plan.parts[index]!.title}): ${report ?? 'FAILED or stopped — no report; finish or flag this part yourself.'}`,
+          `Part ${index + 1} (${plan.parts[index]!.title}${pair ? `, built by ${label(builderOf(plan.parts[index]!)!)}` : ''}): ` +
+            `${report ?? 'FAILED or stopped — no report; finish or flag this part yourself.'}`,
         ),
       );
 
       // Integration: the original task, one worker, with every part's report.
       this.#integrationBriefs.set(
         taskId,
-        `The ${team.name} lead split this task across parallel workers; their parts are now in this workspace, uncommitted. ` +
+        (pair
+          ? `${label(pair.author)} and ${label(pair.partner)} agreed a plan and built the parts in parallel; each part was reviewed by the other model. `
+          : `The ${team.name} lead split this task across parallel workers; `) +
+          'their parts are now in this workspace, uncommitted. ' +
           'You are the integration step: check the parts fit together against the shared contract, fix seams and conflicts, ' +
           'finish anything a part left incomplete, build and run the tests, then commit in small logical steps. ' +
           'Report on the whole task as delivered.\n\n' +
@@ -1651,13 +1713,14 @@ export class Orchestrator implements CommandHandlers {
   // QA or coordination of its own (the integrated parent gets those). With
   // `slotHeld` it runs on the caller's slot; otherwise it claims one. `ran`
   // means it finished still holding a slot, which the caller must hand on or
-  // free.
+  // free. `extra`: a pair split's builder seat and cross-review.
   async #runSplitPiece(
     parentId: string,
     team: Team,
     title: string,
     detail: string,
     slotHeld: boolean,
+    extra: { seat?: ModelChoice; pair?: NonNullable<Task['pair']>; onCreated?: (pieceId: string) => void } = {},
   ): Promise<{ report: string | null; ran: boolean }> {
     const parent = this.#bus.state.tasks[parentId]!;
     this.#taskCounter += 1;
@@ -1679,7 +1742,11 @@ export class Orchestrator implements CommandHandlers {
       createdAt: now(),
       updatedAt: now(),
       parentTaskId: parentId,
+      ...(extra.seat ? { seat: extra.seat } : {}),
+      ...(extra.pair ? { pair: extra.pair } : {}),
     });
+    this.#link(parentId, pieceId, title.slice(0, 60));
+    extra.onCreated?.(pieceId);
     if (!slotHeld && !(await this.#claimSlot(pieceId, team, parentId))) {
       if (this.#bus.state.tasks[pieceId]?.status === 'queued') {
         this.#patchTask(pieceId, { status: 'paused', synopsis: 'Stopped with its parent task.' });
@@ -1847,9 +1914,10 @@ export class Orchestrator implements CommandHandlers {
     const { taskId, team } = ctx;
     let report = ctx.report;
     let filesChanged = false;
-    const reviewerSpec = this.#reviewerSpec(team, ctx.workerSpec);
     // A continued pair task (the owner's follow-up) gets a fresh round budget.
     const start = this.#bus.state.tasks[taskId]?.pair;
+    // The pair's own reviewer (a split part: the OTHER builder), else the owner's choices.
+    const reviewerSpec = start?.reviewer?.model ? resolveModel('opus', start.reviewer) : this.#reviewerSpec(team, ctx.workerSpec);
     if (start) {
       const maxRounds = start.round > 0 ? Math.max(start.maxRounds, start.round + PAIR_ROUNDS) : start.maxRounds;
       this.#patchTask(taskId, { pair: { ...start, maxRounds, state: 'working', reviewerModel: reviewerSpec.id, authorModel: ctx.workerSpec.id } });
@@ -1920,63 +1988,90 @@ export class Orchestrator implements CommandHandlers {
 
   // One review: a read-only worker on the reviewer's engine, its own
   // conversation across rounds, visible in the office as "Reviewer X-n".
-  async #reviewRound(
-    ctx: {
-      taskId: string;
-      team: Team;
-      project: Project;
-      scope: { cwd: string; extraDirs: string[]; locked: LockedDir };
-      controller: AbortController;
-    },
-    reviewerSpec: ModelSpec,
-    report: string,
-    round: number,
-  ): Promise<PairVerdict & { unreadable?: boolean }> {
+  async #reviewRound(ctx: SeatContext, reviewerSpec: ModelSpec, report: string, round: number): Promise<PairVerdict & { unreadable?: boolean }> {
     const { taskId, team } = ctx;
     const task = this.#bus.state.tasks[taskId];
-    const number = (this.#workerCounters.get(`${team.id}-review`) ?? 0) + 1;
-    this.#workerCounters.set(`${team.id}-review`, number);
-    const reviewerId = `${team.id}-r${number}`;
-    this.#publishAgent({
-      id: reviewerId,
-      name: `Reviewer ${(team.name[0] ?? 'X').toUpperCase()}-${number}`,
-      role: 'worker',
-      teamId: team.id,
-      status: 'working',
-      activity: `reviewing round ${round}`,
-      model: reviewerSpec.tier,
-      modelId: reviewerSpec.id,
-      taskId,
-      tokensUsed: 0,
-      updatedAt: now(),
-    });
     const previous = task?.pair?.reviewerSession;
     const resume = previous && previous.engine === reviewerSpec.engine ? previous.id : undefined;
-    const verdictFormat =
-      'Reply with ONLY JSON: {"agree": true|false, "blocking": ["<issue that must be fixed>"], "minor": ["<optional suggestion>"], "summary": "<one sentence>"}. ' +
-      '"agree" is true only when no blocking issue remains. Blocking = wrong, broken, missing what was asked, or unsafe — not style.';
     // Text work (no shell team): the report IS the product, so it's reviewed
     // in full against the ask; anything else is checked in the project itself.
     const textWork = !team.allowedTools.includes('bash');
     const shown = report.slice(0, textWork ? 12_000 : 4000);
-    const prompt = resume
-      ? `The author revised the work. Their new report:\n${shown}\n\n` +
-        (textWork ? 'Check the revised work against the ask again. ' : "Check the ACTUAL current state of the project again (don't trust the report). ") +
-        verdictFormat
-      : `${task?.detail ?? ''}\n\n---\nYou are the reviewer (a second opinion from a different model). Another AI worker did the task above. ` +
-        (textWork
-          ? `Their work:\n${shown}\n\nCheck it against what was asked: accuracy, completeness, anything missing or wrong. `
-          : `Their report:\n${shown}\n\nInspect the ACTUAL result in the project (git diff/status, the files, run read-only checks) — don't trust the report. `) +
-        `You may read and run checks but must not change anything. ${verdictFormat}`;
-    let lastTotal = 0;
-    let reviewerTokens = 0;
-    const review = (text: string, resumeId?: string) => {
-      lastTotal = 0; // each engine run counts from zero
+    // A split's part is reviewed on its own files: the other parts are being
+    // written in the same tree right now.
+    const partNote = task?.parentTaskId
+      ? "This is ONE part of a split build: review only the files this part owns (listed above). Other parts are being written in the same workspace right now — ignore their files and don't run repo-wide builds or tests. "
+      : '';
+    // The first review of the work gets the whole brief, even in a
+    // conversation that started earlier (a split's partner reviewed the plan).
+    const firstReview = (task?.pair?.rounds.length ?? 0) === 0;
+    const prompt =
+      resume && !firstReview
+        ? `The author revised the work. Their new report:\n${shown}\n\n` +
+          (textWork ? 'Check the revised work against the ask again. ' : "Check the ACTUAL current state of the project again (don't trust the report). ") +
+          partNote +
+          VERDICT_FORMAT
+        : `${task?.detail ?? ''}\n\n---\nYou are the reviewer (a second opinion from a different model). Another AI worker did the task above. ` +
+          (textWork
+            ? `Their work:\n${shown}\n\nCheck it against what was asked: accuracy, completeness, anything missing or wrong. `
+            : `Their report:\n${shown}\n\nInspect the ACTUAL result in the project (git diff/status, the files, run read-only checks) — don't trust the report. `) +
+          partNote +
+          `You may read and run checks but must not change anything. ${VERDICT_FORMAT}`;
+    const seat = this.#openSeat(ctx, reviewerSpec, 'Reviewer', `reviewing round ${round}`, (id) => {
+      const pair = this.#bus.state.tasks[taskId]?.pair;
+      if (pair) this.#patchTask(taskId, { pair: { ...pair, reviewerSession: { engine: reviewerSpec.engine, id } } });
+    });
+    try {
+      let verdict = parseVerdict((await seat.run(prompt, resume)).synopsis);
+      // No readable verdict: ask once more (same conversation when possible).
+      if (!verdict && !ctx.controller.signal.aborted) {
+        const session = this.#bus.state.tasks[taskId]?.pair?.reviewerSession;
+        const again = session && session.engine === reviewerSpec.engine ? session.id : undefined;
+        verdict = parseVerdict((await seat.run(again ? `Your reply had no readable verdict. ${VERDICT_FORMAT}` : prompt, again)).synopsis);
+      }
+      return verdict ?? { agree: false, blocking: ['The reviewer gave no readable verdict.'], minor: [], summary: 'no readable verdict', unreadable: true };
+    } finally {
+      seat.close();
+    }
+  }
+
+  // A read-only side seat on a task — a pair's reviewer or planner: its own
+  // visible agent; each run() is one engine run (resumable), and its tokens
+  // land on the task and its project.
+  #openSeat(
+    ctx: SeatContext,
+    spec: ModelSpec,
+    kind: 'Reviewer' | 'Planner',
+    activity: string,
+    onSession: (sessionId: string) => void,
+  ): { id: string; run: (prompt: string, resumeId?: string) => Promise<WorkerRunResult>; close: () => void } {
+    const { taskId, team } = ctx;
+    const key = kind === 'Reviewer' ? 'r' : 'p';
+    const number = (this.#workerCounters.get(`${team.id}-${key}`) ?? 0) + 1;
+    this.#workerCounters.set(`${team.id}-${key}`, number);
+    const id = `${team.id}-${key}${number}`;
+    this.#publishAgent({
+      id,
+      name: `${kind} ${(team.name[0] ?? 'X').toUpperCase()}-${number}`,
+      role: 'worker',
+      teamId: team.id,
+      status: 'working',
+      activity,
+      model: spec.tier,
+      modelId: spec.id,
+      taskId,
+      tokensUsed: 0,
+      updatedAt: now(),
+    });
+    let seatTokens = 0;
+    const title = this.#bus.state.tasks[taskId]?.title ?? taskId;
+    const run = (prompt: string, resumeId?: string): Promise<WorkerRunResult> => {
+      let lastTotal = 0; // each engine run counts from zero
       return this.#engine.runWorker({
-        prompt: text,
-        title: `review: ${task?.title ?? taskId}`,
+        prompt,
+        title: `${kind.toLowerCase()}: ${title}`,
         team,
-        model: reviewerSpec,
+        model: spec,
         cwd: ctx.scope.cwd,
         extraDirs: ctx.scope.extraDirs,
         locked: ctx.scope.locked,
@@ -1985,46 +2080,32 @@ export class Orchestrator implements CommandHandlers {
         ...(resumeId ? { resumeSessionId: resumeId } : {}),
         signal: ctx.controller.signal,
         callbacks: {
-          onSession: (id) => {
-            const pair = this.#bus.state.tasks[taskId]?.pair;
-            if (pair) this.#patchTask(taskId, { pair: { ...pair, reviewerSession: { engine: reviewerSpec.engine, id } } });
-          },
-          onTranscript: (row) => this.#row(taskId, { ...row, role: 'worker', agentId: reviewerId }),
+          onSession,
+          onTranscript: (row) => this.#row(taskId, { ...row, role: 'worker', agentId: id }),
           onActivity: (message) => {
-            this.#patchAgent(reviewerId, { status: 'working', activity: message.slice(0, 90) });
-            this.#activity(reviewerId, taskId, message);
+            this.#patchAgent(id, { status: 'working', activity: message.slice(0, 90) });
+            this.#activity(id, taskId, message);
           },
           onTokens: (total) => {
             const delta = total - lastTotal;
             lastTotal = total;
-            reviewerTokens += delta;
-            this.#patchAgent(reviewerId, { tokensUsed: reviewerTokens });
+            seatTokens += delta;
+            this.#patchAgent(id, { tokensUsed: seatTokens });
             const current = this.#bus.state.tasks[taskId];
             if (current) this.#patchTask(taskId, { tokensUsed: current.tokensUsed + delta });
-            this.#recordTokens(reviewerSpec.tier, delta);
+            this.#recordTokens(spec.tier, delta);
             const ledger = this.#projects.addTokens(ctx.project.id, delta);
             if (ledger) this.#bus.publish({ type: 'project.updated', project: ledger.project });
           },
           onPermission: ({ toolName, command, reason }) => {
             const verdict = evaluatePermission(toolName, command, this.#policy.mode, ctx.scope);
             if (verdict.decision === 'allow') return Promise.resolve('approve' as const);
-            return this.#raisePermission(taskId, reviewerId, team, toolName, command, reason, verdict.flags);
+            return this.#raisePermission(taskId, id, team, toolName, command, reason, verdict.flags);
           },
         },
       });
     };
-    try {
-      let verdict = parseVerdict((await review(prompt, resume)).synopsis);
-      // No readable verdict: ask once more (same conversation when possible).
-      if (!verdict && !ctx.controller.signal.aborted) {
-        const session = this.#bus.state.tasks[taskId]?.pair?.reviewerSession;
-        const again = session && session.engine === reviewerSpec.engine ? session.id : undefined;
-        verdict = parseVerdict((await review(again ? `Your reply had no readable verdict. ${verdictFormat}` : prompt, again)).synopsis);
-      }
-      return verdict ?? { agree: false, blocking: ['The reviewer gave no readable verdict.'], minor: [], summary: 'no readable verdict', unreadable: true };
-    } finally {
-      this.#retireWorker(reviewerId);
-    }
+    return { id, run, close: () => this.#retireWorker(id) };
   }
 
   // The round cap: the owner decides — go with it, two more rounds, or stop.
@@ -2037,8 +2118,30 @@ export class Orchestrator implements CommandHandlers {
     round: number,
     unreadable = false,
   ): Promise<'accept' | 'more' | 'leave' | 'stopped'> {
-    const requestId = `pair-${taskId}-${round}`;
     const title = this.#bus.state.tasks[taskId]?.title ?? 'this task';
+    const answer = await this.#askPairCard(taskId, team, `pair-${taskId}-${round}`, {
+      summary: unreadable
+        ? `${reviewerLabel} gave no readable verdict on "${title.slice(0, 60)}" (asked twice). ` +
+          `Go with ${authorLabel}'s version as it is, give the review two more rounds, or stop and decide yourself (None)?`
+        : `${authorLabel} and ${reviewerLabel} still disagree after ${round} round${round === 1 ? '' : 's'} on "${title.slice(0, 60)}": ` +
+          `${issues.slice(0, 3).join('; ').slice(0, 220)}. Go with the current version, give them two more rounds, or stop and decide yourself (None)?`,
+      command: issues.map((issue) => `- ${issue}`).join('\n') || '(no details)',
+      options: ['Go with it as it is', 'Two more rounds'],
+      flag: unreadable ? 'no readable review' : 'pair disagreement',
+      reason: unreadable ? 'The reviewer never gave a readable verdict.' : `Reviewer's open points after ${round} round${round === 1 ? '' : 's'}.`,
+    });
+    if (answer === 'stopped' || answer === 'leave') return answer;
+    return answer === 'Two more rounds' ? 'more' : 'accept';
+  }
+
+  // A pair's pick-one master card: resolves to the picked option's label,
+  // 'leave' (None), or 'stopped' (the task was stopped while it waited).
+  async #askPairCard(
+    taskId: string,
+    team: Team,
+    requestId: string,
+    card: { summary: string; command: string; options: string[]; flag: string; reason: string },
+  ): Promise<string | 'leave' | 'stopped'> {
     this.#bus.publish({
       type: 'permission.updated',
       request: {
@@ -2046,15 +2149,11 @@ export class Orchestrator implements CommandHandlers {
         taskId,
         agentId: 'master',
         teamId: team.id,
-        command: issues.map((issue) => `- ${issue}`).join('\n') || '(no details)',
-        summary: unreadable
-          ? `${reviewerLabel} gave no readable verdict on "${title.slice(0, 60)}" (asked twice). ` +
-            `Go with ${authorLabel}'s version as it is, give the review two more rounds, or stop and decide yourself (None)?`
-          : `${authorLabel} and ${reviewerLabel} still disagree after ${round} round${round === 1 ? '' : 's'} on "${title.slice(0, 60)}": ` +
-            `${issues.slice(0, 3).join('; ').slice(0, 220)}. Go with the current version, give them two more rounds, or stop and decide yourself (None)?`,
-        options: ['Go with it as it is', 'Two more rounds'],
-        flags: [unreadable ? 'no readable review' : 'pair disagreement'],
-        reason: unreadable ? 'The reviewer never gave a readable verdict.' : `Reviewer's open points after ${round} round${round === 1 ? '' : 's'}.`,
+        command: card.command,
+        summary: card.summary,
+        options: card.options,
+        flags: [card.flag],
+        reason: card.reason,
         status: 'pending',
         scope: 'once',
         requestedAt: now(),
@@ -2067,8 +2166,8 @@ export class Orchestrator implements CommandHandlers {
     );
     if (this.#bus.state.permissions[requestId]?.status === 'expired') return 'stopped';
     if (this.#bus.state.tasks[taskId]?.status === 'awaiting_permission') this.#patchTask(taskId, { status: 'in_flight' });
-    if (decision !== 'approve') return 'leave';
-    return choice === 1 ? 'more' : 'accept';
+    if (decision !== 'approve' || choice === undefined) return 'leave';
+    return card.options[choice] ?? 'leave';
   }
 
   // The owner talks to a finished pair task through its chair (the lead):
@@ -2114,6 +2213,283 @@ export class Orchestrator implements CommandHandlers {
     this.#followUps.set(taskId, [instruction]);
     this.#activity(`${team.id}-lead`, taskId, `handing it to the author: ${instruction.slice(0, 80)}`);
     this.#continueTask(taskId);
+  }
+
+  // --- pair mode: plan together, then split -------------------------------
+  // The author (worker seat) drafts a split plan from the real project
+  // (read-only) and assigns each part to itself or its partner (the other
+  // engine); the partner reviews the plan until it agrees. Then the split
+  // machinery runs: scaffold on the author, the parts in parallel — each on
+  // its builder's engine and reviewed by the OTHER model — then the author
+  // integrates and the partner reviews the integrated whole.
+
+  // Called from #runTask synchronously: takes the slot like #planAndRun.
+  async #pairPlanAndRun(taskId: string, team: Team, autoQa: boolean): Promise<string | null> {
+    const task = this.#bus.state.tasks[taskId]!;
+    const leadId = `${team.id}-lead`;
+    this.#takeSlot(team.id);
+    this.#patchTask(taskId, { status: 'in_flight', agentIds: [leadId], progressPct: 2 });
+    this.#patchAgent(leadId, { status: 'working', activity: `pair planning: ${task.title.slice(0, 40)}`, taskId });
+    const project = (task.projectId ? this.#projects.get(task.projectId) : undefined) ?? this.#projects.defaultProject();
+    const hubProject = project.id === this.#projects.defaultProject().id;
+    let authorSpec = this.#workerSpec(team);
+    if (authorSpec.engine === 'codex' && hubProject) authorSpec = resolveModel(team.workerModel === 'codex' ? 'sonnet' : team.workerModel);
+    const partnerSpec = task.pair?.reviewer?.model ? resolveModel('opus', task.pair.reviewer) : this.#reviewerSpec(team, authorSpec);
+    // Not a fit for splitting: the pair still works — as a second opinion.
+    const asReview = (why: string) => {
+      this.#activity(leadId, taskId, `pair split → second opinion instead: ${why}`);
+      const pair = this.#bus.state.tasks[taskId]?.pair;
+      if (pair) this.#patchTask(taskId, { pair: { ...pair, mode: 'review' } });
+      return this.#runTask(taskId, team, autoQa, { noSplit: true, slotHeld: true });
+    };
+    if (!team.allowedTools.includes('bash') || team.maxConcurrentWorkers < 2) {
+      return asReview(`the ${team.name} can't run two builders at once`);
+    }
+    if (hubProject && (authorSpec.engine === 'codex' || partnerSpec.engine === 'codex')) {
+      return asReview("Codex doesn't build in Agent HQ's own project yet — it reviews instead");
+    }
+    const workspace = project.workspaceDir || this.#workspaceDir;
+    const controller = new AbortController();
+    this.#controllers.set(taskId, controller);
+    const ctx: SeatContext = {
+      taskId,
+      team,
+      project,
+      scope: { cwd: workspace, extraDirs: this.#extraDirs(workspace, team), locked: this.#lockedData(team) },
+      controller,
+    };
+    const release = () => {
+      this.#patchAgent(leadId, { status: 'idle', activity: 'standing by', taskId: null });
+      this.#freeSlot(team.id);
+      this.#masterStatus();
+    };
+    let agreed: { outcome: 'agreed' | 'review' | 'left' | 'stopped'; plan?: ParallelPlan; note: string };
+    try {
+      agreed = await this.#pairPlan(ctx, authorSpec, partnerSpec);
+    } catch (error) {
+      agreed = { outcome: 'stopped', note: '' };
+      if (!this.#stopping.has(taskId)) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.#patchTask(taskId, { status: 'failed', synopsis: `Failed while planning: ${message}` });
+        this.#row(taskId, { role: 'system', kind: 'status', text: `failed: ${message.slice(0, 300)}` });
+        this.#controllers.delete(taskId);
+        release();
+        void this.#recoverStuck(taskId, team, 'failed', message);
+        return null;
+      }
+    } finally {
+      this.#controllers.delete(taskId);
+    }
+    if (agreed.outcome === 'stopped' || this.#halted(taskId)) {
+      if (this.#bus.state.tasks[taskId]?.status !== 'paused') this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' });
+      this.#stopping.delete(taskId);
+      release();
+      return null;
+    }
+    if (agreed.outcome === 'left') {
+      this.#patchTask(taskId, {
+        status: 'paused',
+        stoppedBy: 'owner',
+        synopsis: `Left for you: the two models didn't agree on a plan.\n${agreed.note}`,
+      });
+      this.#activity('master', taskId, 'pair plan left at your call — send a message to tell them how to proceed');
+      release();
+      return null;
+    }
+    if (agreed.outcome === 'review' || !agreed.plan) return asReview(agreed.note);
+    // The integrated whole is reviewed by the partner (in its plan conversation).
+    const pair = this.#bus.state.tasks[taskId]?.pair;
+    if (pair) this.#patchTask(taskId, { pair: { ...pair, reviewer: seatChoice(partnerSpec), authorModel: authorSpec.id, reviewerModel: partnerSpec.id } });
+    return this.#runSplit(taskId, team, agreed.plan, autoQa, { author: authorSpec, partner: partnerSpec });
+  }
+
+  // Plan rounds: the author drafts / revises (its planning conversation), the
+  // partner reviews (its own). Invalid plans go straight back to the author.
+  async #pairPlan(
+    ctx: SeatContext,
+    authorSpec: ModelSpec,
+    partnerSpec: ModelSpec,
+  ): Promise<{ outcome: 'agreed' | 'review' | 'left' | 'stopped'; plan?: ParallelPlan; note: string }> {
+    const { taskId, team } = ctx;
+    const task = this.#bus.state.tasks[taskId]!;
+    const leadId = `${team.id}-lead`;
+    const authorLabel = catalogModel(authorSpec.id)?.label ?? authorSpec.id;
+    const partnerLabel = catalogModel(partnerSpec.id)?.label ?? partnerSpec.id;
+    const maxParts = Math.min(MAX_PARALLEL_PARTS, team.maxConcurrentWorkers);
+    const format =
+      'Reply with ONLY JSON. Not worth splitting: {"split": false, "why": "<one sentence>"}. Otherwise: ' +
+      '{"split": true, "contract": "<shared contract>", "scaffold": "<skeleton to build first, or empty>", ' +
+      '"parts": [{"title": "<short title>", "instruction": "<what to build>", "owns": ["<file or dir>"], "builder": "you" | "partner"}]} ' +
+      `with 2-${maxParts} parts; every part names its builder and each of you builds at least one.`;
+    const brief = [
+      task.detail,
+      '',
+      '---',
+      `You and a partner — ${partnerLabel}, a different AI model — will build this together. First you agree a plan: you draft it, your partner reviews it.`,
+      "Look at the project first (read-only: change nothing yet). Then split the work into parts that can be built at the SAME time, and say who builds each part — you or your partner. Balance the load and play to each model's strengths.",
+      ...SPLIT_RULES,
+      'Write the shared contract every part codes against (folder layout, module names, public interfaces, data shapes). If the parts need a common skeleton first, describe it as the scaffold — you build it before the parts start. After the parts, you integrate: merge, build, test and commit.',
+      'If the task is small or its steps must happen in order, say it is not worth splitting.',
+      '',
+      ...ownerRulesBlock(this.#masterRules(MASTER_SECTIONS.splitting, 'split'), "The owner's rules for splitting work (follow them):"),
+      format,
+    ].join('\n');
+    let maxRounds = PAIR_ROUNDS;
+    let feedback = '';
+    let lastPlan: ParallelPlan | null = null;
+    for (let round = 1; ; round++) {
+      if (this.#halted(taskId)) return { outcome: 'stopped', note: '' };
+      // 1. The author drafts, or revises in the same conversation.
+      const session = this.#bus.state.tasks[taskId]?.pair?.plannerSession;
+      const resume = session && session.engine === authorSpec.engine ? session.id : undefined;
+      const planner = this.#openSeat(ctx, authorSpec, 'Planner', round === 1 ? 'drafting the plan' : `revising the plan (round ${round})`, (id) => {
+        const pair = this.#bus.state.tasks[taskId]?.pair;
+        if (pair) this.#patchTask(taskId, { pair: { ...pair, plannerSession: { engine: authorSpec.engine, id } } });
+      });
+      let draft: string;
+      try {
+        draft = (await planner.run(resume && feedback ? `${feedback}\n${format}` : feedback ? `${brief}\n\n${feedback}` : brief, resume)).synopsis;
+      } finally {
+        planner.close();
+      }
+      if (this.#halted(taskId)) return { outcome: 'stopped', note: '' };
+      const parsed = parseParallelPlan(draft, maxParts, ctx.scope.cwd);
+      if (parsed.found && !parsed.split) {
+        return { outcome: 'review', note: `${authorLabel} judged it not worth splitting${parsed.why ? ` — ${parsed.why}` : ''}` };
+      }
+      const plan = parsed.plan;
+      const invalid = !parsed.found
+        ? 'there was no readable plan in your reply'
+        : parsed.rejected
+          ? parsed.rejected
+          : plan && plan.parts.some((part) => !part.builder)
+            ? 'every part needs "builder": "you" or "partner"'
+            : plan && !(plan.parts.some((part) => part.builder === 'you') && plan.parts.some((part) => part.builder === 'partner'))
+              ? 'each of you must build at least one part'
+              : '';
+      let issues: string[];
+      let unreadable = false;
+      if (invalid || !plan) {
+        issues = [invalid || 'no plan'];
+        this.#activity(leadId, taskId, `plan round ${round}: ${authorLabel}'s plan can't be used — ${invalid}`);
+        feedback = `Your plan can't be used: ${invalid}. Fix it.`;
+      } else {
+        lastPlan = plan;
+        this.#recordPlan(taskId, plan, round, false);
+        this.#activity(
+          leadId,
+          taskId,
+          `plan round ${round}: ${authorLabel} proposes ${plan.parts.length} parts — ` +
+            plan.parts.map((part) => `${part.title} (${part.builder === 'you' ? authorLabel : partnerLabel})`).join(' · '),
+        );
+        // 2. The partner reviews it (its conversation carries on into the
+        // review of the integrated work).
+        const verdict = await this.#reviewPlan(ctx, partnerSpec, plan, round, authorLabel);
+        if (this.#halted(taskId)) return { outcome: 'stopped', note: '' };
+        if (verdict.agree) {
+          this.#recordPlan(taskId, plan, round, true);
+          this.#activity(leadId, taskId, `plan agreed in round ${round}: ${partnerLabel} — ${verdict.summary}`);
+          return { outcome: 'agreed', plan, note: '' };
+        }
+        issues = verdict.blocking.slice(0, 5);
+        unreadable = !!verdict.unreadable;
+        this.#activity(leadId, taskId, `plan round ${round}: ${partnerLabel} wants changes — ${issues.join('; ').slice(0, 220)}`);
+        feedback =
+          `Your partner (${partnerLabel}) reviewed the plan and wants changes:\n${issues.map((issue) => `- ${issue}`).join('\n')}\n` +
+          (verdict.minor.length ? `Minor notes (optional): ${verdict.minor.slice(0, 5).join('; ')}\n` : '') +
+          'Revise the plan (or, if a point is wrong, keep that part and explain why in the contract).';
+      }
+      if (round >= maxRounds || unreadable) {
+        const title = this.#bus.state.tasks[taskId]?.title ?? 'this task';
+        const options = lastPlan ? ['Go with this plan', 'Two more rounds', 'Skip the split'] : ['Two more rounds', 'Skip the split'];
+        const answer = await this.#askPairCard(taskId, team, `pair-${taskId}-plan${round}`, {
+          summary:
+            `${authorLabel} and ${partnerLabel} haven't agreed how to split "${title.slice(0, 60)}" after ${round} round${round === 1 ? '' : 's'}: ` +
+            `${issues.slice(0, 3).join('; ').slice(0, 220)}. ` +
+            (lastPlan ? `Go with ${authorLabel}'s latest plan, ` : '') +
+            'give them two more rounds, skip the split (one builder, the other reviews), or stop and decide yourself (None)?',
+          command: [
+            ...(lastPlan ? lastPlan.parts.map((part) => `${part.title} — ${part.builder === 'you' ? authorLabel : partnerLabel} — owns ${part.owns.join(', ')}`) : []),
+            ...issues.map((issue) => `- ${issue}`),
+          ].join('\n'),
+          options,
+          flag: 'pair plan disagreement',
+          reason: `No agreed plan after ${round} round${round === 1 ? '' : 's'}.`,
+        });
+        if (answer === 'stopped') return { outcome: 'stopped', note: '' };
+        if (answer === 'leave') return { outcome: 'left', note: `Open points: ${issues.join('; ')}` };
+        if (answer === 'Skip the split') return { outcome: 'review', note: 'you chose to skip the split' };
+        if (answer === 'Go with this plan' && lastPlan) {
+          this.#recordPlan(taskId, lastPlan, round, false);
+          this.#activity('master', taskId, `going with ${authorLabel}'s plan at your call`);
+          return { outcome: 'agreed', plan: lastPlan, note: '' };
+        }
+        maxRounds += 2;
+        this.#activity('master', taskId, 'two more planning rounds, at your call');
+      }
+    }
+  }
+
+  // The partner's read of a plan: a verdict, in its own conversation.
+  async #reviewPlan(
+    ctx: SeatContext,
+    partnerSpec: ModelSpec,
+    plan: ParallelPlan,
+    round: number,
+    authorLabel: string,
+  ): Promise<PairVerdict & { unreadable?: boolean }> {
+    const { taskId } = ctx;
+    const task = this.#bus.state.tasks[taskId]!;
+    const previous = task.pair?.reviewerSession;
+    const resume = previous && previous.engine === partnerSpec.engine ? previous.id : undefined;
+    const shown = JSON.stringify(
+      {
+        contract: plan.contract,
+        scaffold: plan.scaffold ?? '',
+        parts: plan.parts.map((part) => ({ title: part.title, instruction: part.instruction, owns: part.owns, builder: part.builder === 'you' ? authorLabel : 'you (the partner)' })),
+      },
+      null,
+      2,
+    );
+    const prompt = resume
+      ? `${authorLabel} revised the plan:\n${shown}\n\nCheck it again. ${VERDICT_FORMAT}`
+      : `${task.detail}\n\n---\nYou are the partner: you and ${authorLabel} (a different AI model) will build this together, splitting the parts between you. ` +
+        `${authorLabel} proposed this split plan:\n${shown}\n\n` +
+        'Look at the project (read-only) and check the plan: does it cover everything asked; are the parts truly independent, with disjoint files; ' +
+        'is the contract enough to code against; is the scaffold right; and are the parts YOU would build sensible for you? ' +
+        `You may read and run checks but must not change anything. ${VERDICT_FORMAT}`;
+    const seat = this.#openSeat(ctx, partnerSpec, 'Reviewer', `reviewing the plan (round ${round})`, (id) => {
+      const pair = this.#bus.state.tasks[taskId]?.pair;
+      if (pair) this.#patchTask(taskId, { pair: { ...pair, reviewerSession: { engine: partnerSpec.engine, id } } });
+    });
+    try {
+      let verdict = parseVerdict((await seat.run(prompt, resume)).synopsis);
+      if (!verdict && !ctx.controller.signal.aborted) {
+        const session = this.#bus.state.tasks[taskId]?.pair?.reviewerSession;
+        const again = session && session.engine === partnerSpec.engine ? session.id : undefined;
+        verdict = parseVerdict((await seat.run(again ? `Your reply had no readable verdict. ${VERDICT_FORMAT}` : prompt, again)).synopsis);
+      }
+      return verdict ?? { agree: false, blocking: ['The partner gave no readable verdict on the plan.'], minor: [], summary: 'no readable verdict', unreadable: true };
+    } finally {
+      seat.close();
+    }
+  }
+
+  #recordPlan(taskId: string, plan: ParallelPlan, rounds: number, agreed: boolean): void {
+    const pair = this.#bus.state.tasks[taskId]?.pair;
+    if (!pair) return;
+    this.#patchTask(taskId, {
+      pair: {
+        ...pair,
+        plan: {
+          rounds,
+          agreed,
+          contract: plan.contract.slice(0, 4000),
+          scaffold: plan.scaffold,
+          parts: plan.parts.map((part) => ({ title: part.title, owns: part.owns, builder: part.builder === 'partner' ? 'partner' : 'author' })),
+        },
+      },
+    });
   }
 
   // --- stuck tasks ------------------------------------------------------
@@ -2970,9 +3346,9 @@ export class Orchestrator implements CommandHandlers {
 
   // A new task's pair state: the owner's explicit choice, else the team's
   // "pair by default" setting.
-  #pairFor(team: Team, pairChoice?: boolean): NonNullable<Task['pair']> | null {
+  #pairFor(team: Team, pairChoice?: boolean, mode: PairMode = 'review'): NonNullable<Task['pair']> | null {
     const on = pairChoice ?? !!this.#models.teams[team.id]?.pairByDefault;
-    return on ? { mode: 'review', maxRounds: PAIR_ROUNDS, round: 0, state: 'working', rounds: [] } : null;
+    return on ? { mode, maxRounds: PAIR_ROUNDS, round: 0, state: 'working', rounds: [] } : null;
   }
 
   // Pair mode's reviewer: the owner's choice (per team > all reviewers), else

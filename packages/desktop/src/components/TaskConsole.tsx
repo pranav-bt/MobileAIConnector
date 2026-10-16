@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { catalogModel, parseVerdict, type ClientCommand, type HubState, type Task, type TranscriptEntry } from '@agent-hq/shared';
+import { catalogModel, jsonObjects, parseVerdict, type ClientCommand, type HubState, type Task, type TranscriptEntry } from '@agent-hq/shared';
 import { useTranscript } from '../hub';
 import { TASK_STATUS_LABELS, formatTokens } from '../status';
 import { ApprovalCard } from './TodayPanel';
@@ -17,12 +17,14 @@ const roleLabel = (state: HubState, entry: TranscriptEntry): string => {
   if (entry.role === 'owner') return 'You';
   if (entry.role === 'lead') return state.agents[entry.agentId ?? '']?.name ?? 'Lead';
   if (entry.role === 'master') return 'Master';
-  if (entry.role === 'worker') return state.agents[entry.agentId ?? '']?.name ?? (isReviewer(entry) ? 'Reviewer' : 'Worker');
+  if (entry.role === 'worker') return state.agents[entry.agentId ?? '']?.name ?? (isReviewer(entry) ? 'Reviewer' : isPlanner(entry) ? 'Planner' : 'Worker');
   return 'Agent HQ';
 };
 
 // Pair mode's reviewer seat ("<team>-r<n>").
 const isReviewer = (entry: TranscriptEntry): boolean => /-r\d+$/.test(entry.agentId ?? '');
+// A pair split's planner seat ("<team>-p<n>").
+const isPlanner = (entry: TranscriptEntry): boolean => /-p\d+$/.test(entry.agentId ?? '');
 
 const PAIR_STATE: Record<string, { label: string; color: string }> = {
   working: { label: 'author working', color: 'var(--amber)' },
@@ -39,11 +41,61 @@ function PairLine(props: { task: Task; authorModel: string | null }): JSX.Elemen
   const reviewer = pair.reviewerModel ? catalogModel(pair.reviewerModel)?.label ?? pair.reviewerModel : 'the other engine';
   const author = pair.authorModel ? catalogModel(pair.authorModel)?.label ?? pair.authorModel : props.authorModel ?? 'author';
   const agreedOn = pair.state === 'agreed' ? pair.rounds.at(-1)?.version : undefined;
+  const plan = pair.plan;
   return (
-    <div className="act" style={{ marginTop: 2 }} title="Pair mode: the author does the work, the reviewer checks the actual result (read-only) until it agrees; the lead chairs">
-      <span style={{ color: 'var(--accent)' }}>Pair</span> · round {pair.round}/{pair.maxRounds} · {author} ⇄ {reviewer} ·{' '}
-      <span style={{ color: state.color }}>{state.label}</span>
-      {agreedOn ? <span className="mono"> on {agreedOn}</span> : null}
+    <>
+      <div className="act" style={{ marginTop: 2 }} title="Pair mode: the author does the work, the reviewer checks the actual result (read-only) until it agrees; the lead chairs">
+        <span style={{ color: 'var(--accent)' }}>Pair{pair.mode === 'split' ? ' · split' : ''}</span> · round {pair.round}/{pair.maxRounds} · {author} ⇄ {reviewer} ·{' '}
+        <span style={{ color: state.color }}>{state.label}</span>
+        {agreedOn ? <span className="mono"> on {agreedOn}</span> : null}
+      </div>
+      {plan && (
+        <div className="act" style={{ marginTop: 2 }} title={plan.contract}>
+          <span style={{ color: plan.agreed ? 'var(--green)' : 'var(--amber)' }}>
+            plan {plan.agreed ? 'agreed' : 'chosen by you'} in {plan.rounds} round{plan.rounds === 1 ? '' : 's'}
+          </span>
+          {' · '}
+          {plan.parts.map((part) => `${part.title} — ${part.builder === 'author' ? author : reviewer}`).join(' · ')}
+        </div>
+      )}
+    </>
+  );
+}
+
+// A planner's reply, shown as the plan (the raw text stays one click away).
+function PlanBody(props: { text: string }): JSX.Element {
+  const [raw, setRaw] = useState(false);
+  const plan = jsonObjects(props.text)
+    .reverse()
+    .find((value): value is { split?: unknown; why?: unknown; contract?: unknown; parts?: unknown } => !!value && typeof value === 'object' && 'split' in value);
+  const parts = Array.isArray(plan?.parts) ? (plan.parts as { title?: unknown; owns?: unknown; builder?: unknown }[]) : [];
+  if (!plan || raw) {
+    return <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--text)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{props.text}</div>;
+  }
+  return (
+    <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--text)' }}>
+      {plan.split === true ? (
+        <>
+          <div style={{ fontWeight: 600 }}>Proposed split — {parts.length} parts</div>
+          <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+            {parts.map((part, index) => (
+              <li key={index}>
+                {String(part.title ?? `Part ${index + 1}`)} <span className="act" style={{ color: 'var(--faint)' }}>— {part.builder === 'partner' ? 'partner builds' : 'I build'} · owns {Array.isArray(part.owns) ? part.owns.join(', ') : '?'}</span>
+              </li>
+            ))}
+          </ul>
+          {typeof plan.contract === 'string' && plan.contract && (
+            <div className="act" style={{ marginTop: 4, color: 'var(--faint)' }}>
+              contract: {plan.contract.slice(0, 300)}
+            </div>
+          )}
+        </>
+      ) : (
+        <div>Not worth splitting{typeof plan.why === 'string' && plan.why ? ` — ${plan.why}` : ''}</div>
+      )}
+      <div className="act" style={{ marginTop: 4, color: 'var(--ghost)', cursor: 'pointer' }} onClick={() => setRaw(true)}>
+        show reply
+      </div>
     </div>
   );
 }
@@ -171,6 +223,8 @@ function Row(props: { state: HubState; entry: TranscriptEntry; send: (command: C
         </div>
         {isReviewer(entry) ? (
           <VerdictBody text={entry.text} />
+        ) : isPlanner(entry) ? (
+          <PlanBody text={entry.text} />
         ) : (
           <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--text)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{entry.text}</div>
         )}
@@ -227,8 +281,9 @@ export function TaskConsole(props: {
   const team = task.teamId ? state.teams[task.teamId]?.name ?? task.teamId : 'unrouted';
   const project = task.projectId ? state.projects[task.projectId]?.name ?? task.projectId : null;
   const workers = Object.values(state.agents).filter((agent) => agent.taskId === taskId && agent.role === 'worker');
-  const worker = workers.find((agent) => !/-r\d+$/.test(agent.id)) ?? workers[0];
-  const model = worker?.modelId ? catalogModel(worker.modelId)?.label ?? worker.modelId : task.session ? (task.session.engine === 'codex' ? 'Codex' : 'Claude') : null;
+  const worker = workers.find((agent) => !/-[rp]\d+$/.test(agent.id)) ?? workers[0];
+  const modelId = worker?.modelId ?? task.seat?.model ?? task.pair?.authorModel;
+  const model = modelId ? catalogModel(modelId)?.label ?? modelId : task.session ? (task.session.engine === 'codex' ? 'Codex' : 'Claude') : null;
   const running = RUNNING.includes(task.status);
   const canSend = !!task.teamId;
   const placeholder = !canSend

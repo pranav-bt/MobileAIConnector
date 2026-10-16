@@ -65,11 +65,25 @@ data class TaskSession(val engine: String, val id: String)
 
 @Serializable
 data class TaskPair(
+    val mode: String = "review", // review | split
     val maxRounds: Int = 3,
     val round: Int = 0,
     val state: String? = null, // working | reviewing | agreed | disagreed
     val reviewerModel: String? = null,
+    val authorModel: String? = null,
+    val plan: PairPlan? = null,
 )
+
+// A split pair's agreed plan: who builds which part.
+@Serializable
+data class PairPlan(
+    val rounds: Int = 0,
+    val agreed: Boolean = false,
+    val parts: List<PairPlanPart> = emptyList(),
+)
+
+@Serializable
+data class PairPlanPart(val title: String, val builder: String = "author", val taskId: String? = null)
 
 // One row of a task's console (rows with the same id replace each other).
 @Serializable

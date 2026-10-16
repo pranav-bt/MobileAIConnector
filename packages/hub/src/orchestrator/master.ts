@@ -1,4 +1,4 @@
-import { parseRules, resolveModel, toolName, type ModelSpec, type ModelTier, type Project, type Team } from '@agent-hq/shared';
+import { jsonObjects, parseRules, resolveModel, toolName, type ModelSpec, type ModelTier, type Project, type Team } from '@agent-hq/shared';
 import type { OrchestratorEngine } from '../engine/types.js';
 
 // The master agent's intake: one model call that reads the task and picks a
@@ -445,6 +445,8 @@ export interface ParallelPart {
   title: string;
   instruction: string;
   owns: string[];
+  // Pair split only: which of the two models builds it.
+  builder?: 'you' | 'partner';
 }
 
 export interface ParallelPlan {
@@ -503,6 +505,64 @@ function parseOwns(raw: unknown): string[] {
   return entries.filter((entry): entry is string => typeof entry === 'string').map((entry) => entry.trim()).filter(Boolean);
 }
 
+// A split plan out of a model's reply (the last JSON object with "split").
+// `split` false = the model judged it not worth splitting (`why` says so);
+// `rejected` = it asked for a split but the plan failed validation.
+export function parseParallelPlan(
+  text: string,
+  maxParts: number,
+  workspaceDir?: string,
+): { found: boolean; split: boolean; plan: ParallelPlan | null; rejected: string | null; why: string } {
+  const parsed = jsonObjects(text)
+    .reverse()
+    .find((value): value is { split?: unknown; contract?: unknown; scaffold?: unknown; parts?: unknown; why?: unknown } =>
+      !!value && typeof value === 'object' && 'split' in value,
+    );
+  const why = typeof parsed?.why === 'string' ? parsed.why.trim().slice(0, 300) : '';
+  if (!parsed || parsed.split !== true) return { found: !!parsed, split: false, plan: null, rejected: null, why };
+  // A split was asked for: any malformed part rejects the whole plan
+  // (dropping one would silently lose its work).
+  if (!Array.isArray(parsed.parts) || parsed.parts.length < 2 || parsed.parts.length > maxParts) {
+    return { found: true, split: true, plan: null, rejected: `a split needs 2-${maxParts} parts`, why };
+  }
+  const parts: ParallelPart[] = [];
+  for (const raw of parsed.parts) {
+    const part = (typeof raw === 'object' && raw !== null ? raw : {}) as { title?: unknown; instruction?: unknown; owns?: unknown; builder?: unknown };
+    if (typeof part.instruction !== 'string' || !part.instruction.trim()) {
+      return { found: true, split: true, plan: null, rejected: 'a part had no instruction', why };
+    }
+    parts.push({
+      title: typeof part.title === 'string' && part.title.trim() ? part.title.trim().slice(0, 40) : `Part ${parts.length + 1}`,
+      instruction: part.instruction.trim(),
+      owns: parseOwns(part.owns),
+      ...(part.builder === 'you' || part.builder === 'partner' ? { builder: part.builder } : {}),
+    });
+  }
+  if (!ownershipIsDisjoint(parts.map((part) => part.owns), workspaceDir)) {
+    return { found: true, split: true, plan: null, rejected: 'parts did not own non-empty, disjoint file sets', why };
+  }
+  return {
+    found: true,
+    split: true,
+    plan: {
+      contract: typeof parsed.contract === 'string' ? parsed.contract.trim() : '',
+      scaffold: typeof parsed.scaffold === 'string' && parsed.scaffold.trim() ? parsed.scaffold.trim() : null,
+      parts,
+    },
+    rejected: null,
+    why,
+  };
+}
+
+// The split rules every planner gets (the lead's split pass and a pair's
+// joint plan).
+export const SPLIT_RULES = [
+  'All parts edit the SAME working tree at once, so each part must own an explicit list of',
+  'workspace-relative files/directories (no globs), and no path may equal or sit inside another',
+  "part's path. Shared files (package manifests, shared types, entry points) belong to the scaffold",
+  'or the integration step, never to a part.',
+];
+
 // `rejected` is set when the lead asked for a split but the plan failed
 // validation (the task then runs as one worker).
 export async function planParallelSplit(
@@ -526,10 +586,7 @@ export async function planParallelSplit(
     'Split ONLY when the task is big and has 2 or more substantial parts that can be built at the SAME',
     'time in DISJOINT files or directories (e.g. separate subsystems or modules). Do NOT split small',
     'tasks, bug fixes, investigations, single-file changes, or work whose parts must happen in order.',
-    'All parts edit the SAME working tree at once, so each part must own an explicit list of',
-    'workspace-relative files/directories (no globs), and no path may equal or sit inside another',
-    "part's path. Shared files (package manifests, shared types, entry points) belong to the scaffold",
-    'or the integration step, never to a part.',
+    ...SPLIT_RULES,
     'When you split, you are the sync point: write the shared contract every part codes against',
     '(folder layout, module names, public interfaces, data shapes, event names). If the parts need a',
     'common skeleton first (repo init, folder structure, shared types), describe it as the scaffold —',
@@ -543,39 +600,9 @@ export async function planParallelSplit(
   try {
     const result = await engine.complete({ prompt, model });
     tokens = result.tokens;
-    const jsonMatch = result.text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return { plan: null, tokens, rejected: null };
-    const parsed = JSON.parse(jsonMatch[0]) as { split?: unknown; contract?: unknown; scaffold?: unknown; parts?: unknown };
-    if (parsed.split !== true) return { plan: null, tokens, rejected: null };
-    // The lead asked for a split: any malformed part rejects the whole plan
-    // (dropping one would silently lose its work).
-    if (!Array.isArray(parsed.parts) || parsed.parts.length < 2 || parsed.parts.length > maxParts) {
-      return { plan: null, tokens, rejected: `a split needs 2-${maxParts} parts` };
-    }
-    const parts: ParallelPart[] = [];
-    for (const raw of parsed.parts) {
-      const part = (typeof raw === 'object' && raw !== null ? raw : {}) as { title?: unknown; instruction?: unknown; owns?: unknown };
-      if (typeof part.instruction !== 'string' || !part.instruction.trim()) {
-        return { plan: null, tokens, rejected: 'a part had no instruction' };
-      }
-      parts.push({
-        title: typeof part.title === 'string' && part.title.trim() ? part.title.trim().slice(0, 40) : `Part ${parts.length + 1}`,
-        instruction: part.instruction.trim(),
-        owns: parseOwns(part.owns),
-      });
-    }
-    if (!ownershipIsDisjoint(parts.map((part) => part.owns), workspaceDir)) {
-      return { plan: null, tokens, rejected: 'parts did not own non-empty, disjoint file sets' };
-    }
-    return {
-      plan: {
-        contract: typeof parsed.contract === 'string' ? parsed.contract.trim() : '',
-        scaffold: typeof parsed.scaffold === 'string' && parsed.scaffold.trim() ? parsed.scaffold.trim() : null,
-        parts,
-      },
-      tokens,
-      rejected: null,
-    };
+    const { plan, rejected } = parseParallelPlan(result.text, maxParts, workspaceDir);
+    // (the lead's split never assigns builders — one engine builds every part)
+    return { plan: plan && { ...plan, parts: plan.parts.map(({ builder: _builder, ...part }) => part) }, tokens, rejected };
   } catch {
     return { plan: null, tokens, rejected: null }; // splitting is an optimization — on any doubt, run as one worker
   }

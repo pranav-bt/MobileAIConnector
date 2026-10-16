@@ -101,6 +101,21 @@ export const TeamSchema = z.object({
 });
 export type Team = z.infer<typeof TeamSchema>;
 
+// 'ultra' exists only on some Codex models; each catalog entry lists its own.
+export const EffortLevelSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+export type EffortLevel = z.infer<typeof EffortLevelSchema>;
+
+// One role's choice: model and effort are independent, so "all workers:
+// effort low" composes with "Coding workers: Opus 5.5". Missing = default.
+export const ModelChoiceSchema = z.object({
+  model: z.string().optional(),
+  effort: EffortLevelSchema.optional(),
+});
+export type ModelChoice = z.infer<typeof ModelChoiceSchema>;
+
+export const PairModeSchema = z.enum(['review', 'split']);
+export type PairMode = z.infer<typeof PairModeSchema>;
+
 export const TaskSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -128,12 +143,17 @@ export const TaskSchema = z.object({
   // The worker's conversation (Claude session / Codex thread), so the task
   // can be continued from its console with full memory — even after a restart.
   session: z.object({ engine: EngineIdSchema, id: z.string() }).nullable().optional(),
+  // The model this task's worker runs on, when it isn't the team's worker
+  // seat (a pair split's part runs on the engine that agreed to build it).
+  seat: ModelChoiceSchema.nullable().optional(),
   // Pair mode: two workers on two engines. 'review' = second opinion — the
   // author does the work, the reviewer (read-only) checks the actual result,
   // rounds repeat until the reviewer agrees (or the round cap asks the owner).
+  // 'split' = they agree a plan first, split the parts between them, each
+  // part is reviewed by the other model, and the integrated whole once more.
   pair: z
     .object({
-      mode: z.literal('review'),
+      mode: PairModeSchema,
       maxRounds: z.number().int().min(1),
       round: z.number().int().min(0),
       state: z.enum(['working', 'reviewing', 'agreed', 'disagreed']).optional(),
@@ -153,6 +173,23 @@ export const TaskSchema = z.object({
       reviewerSession: z.object({ engine: EngineIdSchema, id: z.string() }).nullable().optional(),
       reviewerModel: z.string().optional(), // catalog id of the reviewer seat
       authorModel: z.string().optional(), // catalog id of the author (worker) seat
+      // This task's reviewer, when set by the pair itself (a split part is
+      // reviewed by the OTHER builder); else the owner's reviewer choices.
+      reviewer: ModelChoiceSchema.optional(),
+      // 'split': the plan both models agreed (who builds what) and its rounds.
+      plan: z
+        .object({
+          rounds: z.number().int(),
+          agreed: z.boolean(),
+          contract: z.string(),
+          scaffold: z.string().nullable(),
+          parts: z.array(
+            z.object({ title: z.string(), owns: z.array(z.string()), builder: z.enum(['author', 'partner']), taskId: z.string().optional() }),
+          ),
+        })
+        .nullable()
+        .optional(),
+      plannerSession: z.object({ engine: EngineIdSchema, id: z.string() }).nullable().optional(),
     })
     .nullable()
     .optional(),
@@ -296,10 +333,6 @@ export const WorkspaceRootSchema = z.object({
 });
 export type WorkspaceRoot = z.infer<typeof WorkspaceRootSchema>;
 
-// 'ultra' exists only on some Codex models; each catalog entry lists its own.
-export const EffortLevelSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
-export type EffortLevel = z.infer<typeof EffortLevelSchema>;
-
 // The models Settings > Models offers. Every id was verified to run through
 // the hub's Agent SDK (packages/hub/test/probe-models.ts --live), and
 // defaultEffort is the level Claude Code actually applied when the hub sent
@@ -336,14 +369,6 @@ export const MODEL_CATALOG: CatalogModel[] = [
   { id: 'gpt-5.6-luna', label: 'GPT-5.6-Luna', engine: 'codex', tier: 'codex', description: 'Codex · older fast and efficient model', efforts: ALL_EFFORTS, defaultEffort: 'medium' },
 ];
 export const catalogModel = (id: string): CatalogModel | undefined => MODEL_CATALOG.find((model) => model.id === id);
-
-// One role's choice: model and effort are independent, so "all workers:
-// effort low" composes with "Coding workers: Opus 5.5". Missing = default.
-export const ModelChoiceSchema = z.object({
-  model: z.string().optional(),
-  effort: EffortLevelSchema.optional(),
-});
-export type ModelChoice = z.infer<typeof ModelChoiceSchema>;
 
 // The owner's model choices — an override LAYER over the built-in defaults
 // and each team record's leadModel/workerModel (which are never mutated, so
