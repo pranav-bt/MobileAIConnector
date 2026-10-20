@@ -115,7 +115,21 @@ npm run typecheck      # tsc across workspaces
   `/dev/null`, regexes (`\s*`, `\n`), awk programs or a bare `/` as write
   targets (they were most of the false "writes outside this project" cards).
   Workers already load the project's CLAUDE.md and `.claude/settings*.json`
-  (settingSources default = all); MCP stays the team's grants only.
+  (settingSources default = all).
+- Project MCP: besides its team's grants, a worker gets the MCP servers set
+  up for its project folder, as Claude Code opened there loads them
+  (`projectMcpServers` in engine/mcp-catalog.ts): the folder's own servers
+  (`claude mcp add` there → ~/.claude.json `projects`, any path casing) and the
+  project's `.mcp.json` servers the owner APPROVED (enableAllProjectMcpServers
+  / enabledMcpjsonServers in ~/.claude.json or the project's
+  `.claude/settings(.local).json`; disabledMcpjsonServers wins; `${VAR}`
+  expanded). An unapproved one never starts (a program from the repo) and
+  the task says so. Merged in `#workerTeam` for authors and side seats (both
+  engines take it via `team.mcpServers`); the team's grant wins a name clash.
+  User-scope servers still reach workers only as team grants. Tests:
+  `project-mcp.smoke` (in `npm run smoke`), `roblox-mcp.live.ts` (real workers
+  reach Roblox Studio via a project's .mcp.json and via a team grant; neither
+  → no tool).
 - Stuck tasks get one recovery pass (`planRecovery`, quick check): a task is
   stuck when its run fails, when the lead review returns `stuck` (the worker
   did not achieve the main goal — the task is marked failed "Stuck — …", no

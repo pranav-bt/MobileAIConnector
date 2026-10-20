@@ -168,7 +168,9 @@ function Connections(props: { team: Team; catalog: string[]; send: Send }): JSX.
     <div className="tcard" style={{ padding: 16 }}>
       <div className="sect" style={{ margin: 0 }}>Connections (MCP)</div>
       <div className="act" style={{ color: 'var(--faint)', marginTop: 4 }}>
-        servers set up for Claude Code on this PC. {props.team.name} workers get exactly the ones ticked — nothing else.
+        servers set up for Claude Code on this PC. {props.team.name} workers get the ones ticked, in every project — plus,
+        like Claude Code opened in that folder, the servers set up for the project they're working in (its own, and its
+        .mcp.json ones you approved).
       </div>
       {names.length === 0 ? (
         <span className="empty-note" style={{ display: 'block', marginTop: 8 }}>none configured on this PC</span>

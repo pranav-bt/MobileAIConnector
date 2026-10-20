@@ -43,6 +43,7 @@ export function FolderAccess(props: { state: HubState; send: (command: ClientCom
       {fixed("The project's Claude Code folder (~\\.claude\\projects\\<project> — memory, tool results)", 'read & write')}
       {fixed('The phone inbox / outbox', 'read & write')}
       {fixed('Anywhere under the workspace roots above', 'read')}
+      {fixed("MCP servers set up for the project folder in Claude Code (its own, and .mcp.json ones you approved) — besides the team's", 'connected')}
       {grants.map((grant) => (
         <div key={grant.path} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
           <span className="mono" style={{ fontSize: 11.5, flexGrow: 1, overflowWrap: 'anywhere' }}>{grant.path}</span>

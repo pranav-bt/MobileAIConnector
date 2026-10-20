@@ -219,6 +219,8 @@ export class Orchestrator implements CommandHandlers {
   #rulesTimer: NodeJS.Timeout | null = null;
   #onInfoChange: () => void = () => {};
   #mcpCatalog: () => Record<string, unknown> = () => ({});
+  // The MCP servers set up for a project folder in Claude Code (engine-provided).
+  #projectMcp: (cwd: string) => { servers: Record<string, unknown>; unapproved: string[] } = () => ({ servers: {}, unapproved: [] });
   // Stuck tasks the master already ran a recovery pass for (one per task).
   #recoveryAsked = new Set<string>();
   // Tasks a recovery spawned (and their QA/fix/handover descendants) -> 1.
@@ -388,8 +390,31 @@ export class Orchestrator implements CommandHandlers {
 
   // MCP connections by name from the PC's catalog (engine-provided). A team
   // gets exactly these; names not in the catalog are refused, never guessed.
-  configureMcpCatalog(read: () => Record<string, unknown>): void {
+  configureMcpCatalog(read: () => Record<string, unknown>, project?: (cwd: string) => { servers: Record<string, unknown>; unapproved: string[] }): void {
     this.#mcpCatalog = read;
+    if (project) this.#projectMcp = project;
+  }
+
+  // MCP as Claude Code opened in the project folder has it: the team's
+  // grants plus the servers set up for that folder (its own, and the
+  // .mcp.json ones the owner approved) — so a Roblox project's workers reach
+  // Studio whatever their team. The team's grant wins on a name clash.
+  // `announce` says what was added (and what an unapproved .mcp.json asked for).
+  #workerTeam(team: Team, cwd: string, taskId: string | null, announce: boolean): Team {
+    let project: { servers: Record<string, unknown>; unapproved: string[] };
+    try {
+      project = this.#projectMcp(cwd);
+    } catch {
+      return team;
+    }
+    const added = Object.keys(project.servers).filter((name) => !(name in (team.mcpServers ?? {})));
+    if (announce && taskId) {
+      if (added.length) this.#activity('master', taskId, `MCP from this project folder: ${added.join(', ')} (as in Claude Code opened there)`);
+      if (project.unapproved.length) {
+        this.#activity('master', taskId, `not started: ${project.unapproved.join(', ')} from this project's .mcp.json — approve it in Claude Code there first`);
+      }
+    }
+    return added.length ? { ...team, mcpServers: { ...project.servers, ...(team.mcpServers ?? {}) } } : team;
   }
 
   mcpCatalogNames(): string[] {
@@ -1448,6 +1473,8 @@ export class Orchestrator implements CommandHandlers {
           return this.#raisePermission(taskId, workerId, team, toolName, command, reason, verdict.flags);
         },
       };
+      // The team as the engine sees it: + this project's MCP servers.
+      const workerTeam = this.#workerTeam(team, scope.cwd, taskId, true);
       const runAuthor = async (authorPrompt: string, resumeId?: string) => {
         if (inbox.closed) {
           inbox = new MessageInbox();
@@ -1460,7 +1487,7 @@ export class Orchestrator implements CommandHandlers {
         const run = await this.#engine.runWorker({
           prompt: authorPrompt,
           title: task.title,
-          team,
+          team: workerTeam,
           model: workerSpec,
           cwd: scope.cwd,
           extraDirs: scope.extraDirs,
@@ -2237,7 +2264,7 @@ export class Orchestrator implements CommandHandlers {
       return this.#engine.runWorker({
         prompt,
         title: `${kind.toLowerCase()}: ${title}`,
-        team,
+        team: this.#workerTeam(team, ctx.scope.cwd, null, false),
         model: spec,
         cwd: ctx.scope.cwd,
         extraDirs: ctx.scope.extraDirs,

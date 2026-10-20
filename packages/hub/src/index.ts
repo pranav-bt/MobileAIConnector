@@ -20,7 +20,7 @@ import { SecurityController } from './security/controller.js';
 import { startLimitsPoller } from './usage/limits.js';
 import { loadHubConfig, saveModelOverrides, savePaEnabled, saveAccessGrants, savePermissionMode, type PermissionMode, type WorkspaceRoot } from './config.js';
 import type { CommandHandlers } from './commands.js';
-import { readMcpCatalog } from './engine/mcp-catalog.js';
+import { projectMcpServers, readMcpCatalog } from './engine/mcp-catalog.js';
 import { CodexEngine } from './engine/codex.js';
 import { findCodexBinary } from './engine/codex-rpc.js';
 import { EngineRouter } from './engine/router.js';
@@ -147,7 +147,10 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
       saveModelOverrides(dataDir, overrides);
       bus.publish({ type: 'hub.updated', info: makeInfo() });
     });
-    orchestrator.configureMcpCatalog(() => readMcpCatalog(options.claudeConfigPath));
+    orchestrator.configureMcpCatalog(
+      () => readMcpCatalog(options.claudeConfigPath),
+      (cwd) => projectMcpServers(cwd, options.claudeConfigPath),
+    );
     orchestrator.configureAccess(
       accessGrants,
       (grants) => {
