@@ -87,9 +87,35 @@ npm run typecheck      # tsc across workspaces
 - Interdisciplinary flow is master-driven: after every completed report the
   master runs a coordination pass (haiku) and may dispatch follow-up tasks to
   other teams (leads huddle in the Meeting room); QA reports get a verdict
-  instead — real issues spawn a `[fix]` task back to the source team, capped
-  at two rounds before escalating to the owner. Both are depth-capped so
+  instead — real issues send the SAME task back to its worker's own
+  conversation with QA's findings (`#qaFindings`; the run's prompt says it's
+  QA, no coordination pass after it; re-QA'd when files changed), capped at
+  two rounds (`#qaFixRounds`) before escalating to the owner (a freelancer's
+  fix is still a `[fix]` task on its same session). Both are depth-capped so
   follow-ups can't cascade.
+- One window per ask: QA passes, handovers to other teams, recovery moves,
+  later plan steps and split pieces carry `Task.rootTaskId` = the owner's ask.
+  `#row` mirrors every step row into the ask's transcript (id
+  `<step>~<row>`, `stepTaskId`), so the ask's console is the whole story; a
+  message to the ask goes to a step that's working (else continues the ask);
+  stopping the ask stops its live steps. Clients fold steps with `foldAsks`
+  (shared/threads.ts; Android `model/Asks.kt`): one card per ask, live with
+  the working step ("now: QA team — QA check"), a trail when done, tokens
+  summed — Today, Tasks, History, and the phone. Tests: `one-window.smoke`
+  (in `npm run smoke`), `tools/drive-one-window.mjs`, `AsksTest`.
+- Folder access (Settings > Hub, `access.set`, local clients only — a device's
+  is dropped; `data/config.json` `accessGrants`, default: `%TEMP%\claude`,
+  Claude Code's scratch folder, read & write): 'write' folders join every
+  worker's writable scope (`#extraDirs` → Claude's directory grants, the shell
+  policy, Codex's writableRoots); 'read' ones are named to workers. Each
+  worker also gets its project's own Claude Code folder
+  (`<claudeProjectsDir>/<cwd slug>` — memory, tool results), as Claude Code
+  in VS Code has it. Refused: relative paths, missing folders, a whole drive
+  for writing, Agent HQ's data dir. The shell policy no longer reads
+  `/dev/null`, regexes (`\s*`, `\n`), awk programs or a bare `/` as write
+  targets (they were most of the false "writes outside this project" cards).
+  Workers already load the project's CLAUDE.md and `.claude/settings*.json`
+  (settingSources default = all); MCP stays the team's grants only.
 - Stuck tasks get one recovery pass (`planRecovery`, quick check): a task is
   stuck when its run fails, when the lead review returns `stuck` (the worker
   did not achieve the main goal — the task is marked failed "Stuck — …", no

@@ -1,13 +1,14 @@
 import { useState } from 'react';
-import { isInternalTask, type ClientCommand, type HubState, type Task } from '@agent-hq/shared';
+import { foldAsks, isInternalTask, type AskView, type ClientCommand, type HubState, type Task } from '@agent-hq/shared';
 import { TASK_STATUS_LABELS, agentLabel, formatTokens } from '../status';
+import { StepLine } from './StepLine';
 
 const CURRENT_STATUSES = ['routing', 'intake', 'queued', 'in_flight', 'awaiting_permission', 'review'];
 const STOPPABLE = ['routing', 'queued', 'in_flight', 'awaiting_permission', 'review'];
 
 function TaskRow(props: {
   state: HubState;
-  task: Task;
+  task: Task | AskView;
   expanded: boolean;
   onToggle: () => void;
   send: (command: ClientCommand) => void;
@@ -17,7 +18,9 @@ function TaskRow(props: {
   const status = TASK_STATUS_LABELS[task.status] ?? { label: task.status, color: 'var(--muted)' };
   const team = task.teamId ? state.teams[task.teamId]?.name ?? task.teamId : 'unrouted';
   const project = task.projectId ? state.projects[task.projectId]?.name ?? task.projectId : null;
-  const activity = state.activityLog.filter((entry) => entry.taskId === task.id).slice(-12);
+  // The ask's activity includes its steps' (QA, handovers…).
+  const stepIds = new Set(('steps' in task ? task.steps : []).map((step) => step.id));
+  const activity = state.activityLog.filter((entry) => entry.taskId === task.id || (entry.taskId !== null && stepIds.has(entry.taskId))).slice(-12);
 
   return (
     <div className="tcard" style={{ cursor: 'pointer' }} onClick={props.onToggle}>
@@ -29,6 +32,7 @@ function TaskRow(props: {
         {team}{project ? ` · ${project}` : ''} · {formatTokens(task.tokensUsed)} tokens · started{' '}
         {new Date(task.createdAt).toLocaleTimeString()}
       </div>
+      <StepLine state={state} task={task} />
       {['in_flight', 'awaiting_permission', 'review'].includes(task.status) && (
         <div className="track">
           <div className="fill" style={{ width: `${task.progressPct}%` }} />
@@ -85,7 +89,8 @@ export function TasksPage(props: {
   onOpenConsole: (taskId: string) => void;
 }): JSX.Element {
   const [expanded, setExpanded] = useState<string | null>(null);
-  const tasks = Object.values(props.state.tasks).sort((a, b) => b.updatedAt - a.updatedAt);
+  // One row per ask: its steps (QA, handovers, parts…) fold into it.
+  const tasks = foldAsks(Object.values(props.state.tasks)).sort((a, b) => b.updatedAt - a.updatedAt);
   const current = tasks.filter((task) => CURRENT_STATUSES.includes(task.status));
   const recent = tasks.filter((task) => !CURRENT_STATUSES.includes(task.status) && !isInternalTask(task)).slice(0, 5);
 

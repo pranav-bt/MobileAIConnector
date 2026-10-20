@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { ClientCommand, HubState } from '@agent-hq/shared';
 import { DEFAULT_HUB_PORT } from '@agent-hq/shared';
 import { HUB_URL_STORAGE_KEY, currentHubUrl } from '../hub';
+import { FolderAccess } from './FolderAccess';
 import { ModelsCard } from './ModelsCard';
 
 export function SettingsPage(props: { state: HubState; send: (command: ClientCommand) => void }): JSX.Element {
@@ -28,7 +29,7 @@ export function SettingsPage(props: { state: HubState; send: (command: ClientCom
     <div style={{ flexGrow: 1, padding: '18px 20px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, alignContent: 'start', overflowY: 'auto' }}>
       <ModelsCard state={props.state} send={props.send} />
 
-      <div className="tcard" style={{ padding: 16 }}>
+      <div className="tcard" style={{ padding: 16, gridColumn: '1 / -1' }}>
         <div className="sect">Hub</div>
         {row('Mode', info.mode === 'claude' ? 'claude — real agents' : info.mode === 'demo' ? 'demo — scripted, no usage' : 'mock — fake engine')}
         {row('Workspace (where tasks run)', info.workspaceDir || '—')}
@@ -51,6 +52,7 @@ export function SettingsPage(props: { state: HubState; send: (command: ClientCom
             ))}
           </div>
         )}
+        {info.mode !== 'demo' && <FolderAccess state={props.state} send={props.send} />}
         {info.mode === 'demo' && (
           <div className="act" style={{ marginTop: 10, color: 'var(--amber)' }}>
             demo mode is scripted theater — restart the hub with `npm run hub:engine` for real agents

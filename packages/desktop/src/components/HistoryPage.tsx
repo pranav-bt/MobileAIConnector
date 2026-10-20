@@ -1,5 +1,6 @@
-import { isInternalTask, type HubState, type Task } from '@agent-hq/shared';
+import { foldAsks, isInternalTask, type HubState, type Task } from '@agent-hq/shared';
 import { TASK_STATUS_LABELS, formatTokens } from '../status';
+import { StepLine } from './StepLine';
 
 function duration(task: Task): string {
   const ms = task.updatedAt - task.createdAt;
@@ -9,7 +10,8 @@ function duration(task: Task): string {
 }
 
 export function HistoryPage(props: { state: HubState; onOpenConsole: (taskId: string) => void }): JSX.Element {
-  const finished = Object.values(props.state.tasks)
+  // One entry per ask: its steps (QA, handovers…) are in its console.
+  const finished = foldAsks(Object.values(props.state.tasks))
     .filter((task) => ['done', 'failed', 'paused'].includes(task.status) && !isInternalTask(task))
     .sort((a, b) => b.updatedAt - a.updatedAt);
 
@@ -35,6 +37,7 @@ export function HistoryPage(props: { state: HubState; onOpenConsole: (taskId: st
                 {team} · {duration(task)} · {formatTokens(task.tokensUsed)} tokens ·{' '}
                 {new Date(task.updatedAt).toLocaleString()}
               </div>
+              <StepLine state={props.state} task={task} />
               {task.synopsis && (
                 <div style={{ fontSize: 12, color: 'var(--text-2)', lineHeight: 1.55, marginTop: 7, whiteSpace: 'pre-line' }}>{task.synopsis}</div>
               )}

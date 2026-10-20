@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ModelOverridesSchema, type ModelOverrides } from '@agent-hq/shared';
+import { AccessGrantSchema, ModelOverridesSchema, type AccessGrant, type ModelOverrides } from '@agent-hq/shared';
 
 // Hub-level configuration (data/config.json). Workspace roots are the ONLY
 // places projects and files may live; project registration outside them is
@@ -19,7 +20,12 @@ export interface HubConfig {
   permissionMode: PermissionMode;
   paEnabled: boolean; // the PA desk master switch (/pa on|off)
   modelOverrides: ModelOverrides; // owner model choices over the defaults
+  accessGrants: AccessGrant[]; // folders every worker may read / write (Settings > Hub)
 }
+
+// Claude Code's scratch folder (…\Temp\claude\<project>\<session>\scratchpad):
+// workers use it the way Claude Code does in VS Code, so it's open by default.
+export const DEFAULT_ACCESS_GRANTS: AccessGrant[] = [{ path: join(tmpdir(), 'claude'), access: 'write' }];
 
 const DEFAULT_CONFIG: HubConfig = {
   workspaceRoots: [
@@ -30,6 +36,7 @@ const DEFAULT_CONFIG: HubConfig = {
   permissionMode: 'auto',
   paEnabled: true,
   modelOverrides: { teams: {} },
+  accessGrants: DEFAULT_ACCESS_GRANTS,
 };
 
 export function loadHubConfig(dataDir: string): HubConfig {
@@ -49,6 +56,13 @@ export function loadHubConfig(dataDir: string): HubConfig {
           const result = ModelOverridesSchema.safeParse(parsed.modelOverrides ?? {});
           return result.success ? result.data : { teams: {} };
         })(),
+        // Missing = the defaults; an edited list (even empty) is the owner's.
+        accessGrants: Array.isArray(parsed.accessGrants)
+          ? parsed.accessGrants.flatMap((grant) => {
+              const result = AccessGrantSchema.safeParse(grant);
+              return result.success ? [result.data] : [];
+            })
+          : DEFAULT_ACCESS_GRANTS,
       };
     } catch {
       /* unreadable — fall through to defaults */
@@ -74,4 +88,10 @@ export function saveModelOverrides(dataDir: string, overrides: ModelOverrides): 
   const configPath = join(dataDir, 'config.json');
   const config = loadHubConfig(dataDir);
   writeFileSync(configPath, JSON.stringify({ ...config, modelOverrides: overrides }, null, 2));
+}
+
+export function saveAccessGrants(dataDir: string, grants: AccessGrant[]): void {
+  const configPath = join(dataDir, 'config.json');
+  const config = loadHubConfig(dataDir);
+  writeFileSync(configPath, JSON.stringify({ ...config, accessGrants: grants }, null, 2));
 }

@@ -230,6 +230,16 @@ try {
   if (!consoleRows || consoleRows.taskId !== pending.request.taskId || consoleRows.entries.length === 0) fail('phone did not get the task console over the sealed session');
   console.log(`phone console ok: ${consoleRows.entries.length} rows arrived sealed`);
 
+  // 4d. Opening folders to every worker is the PC owner's call: a device's
+  // access.set is dropped, whatever it asks for.
+  const updatesBefore = events.filter((e) => e.type === 'hub.updated').length;
+  phone.send(sealed.seal(encodeCommand({ type: 'access.set', grants: [{ path: 'C:\\Windows\\Temp', access: 'write' }] })));
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  if (events.filter((e) => e.type === 'hub.updated').slice(updatesBefore).some((e) => e.type === 'hub.updated' && e.info.accessGrants?.some((grant) => /windows/i.test(grant.path)))) {
+    fail('a paired device opened a folder to the workers');
+  }
+  console.log('device folder access refused: only the PC can open folders to workers');
+
   // 5. Kill switch: session drops, device unpinned, reconnect refused.
   local.send(encodeCommand({ type: 'device.revoke' }));
   await phoneClosed;

@@ -1,4 +1,4 @@
-import type { ClientCommand, ModelOverrides, ModelTier, PairMode } from '@agent-hq/shared';
+import type { AccessGrant, ClientCommand, ModelOverrides, ModelTier, PairMode } from '@agent-hq/shared';
 
 // The server parses wire frames into ClientCommands and hands them here.
 // The demo driver and the orchestrator each provide an implementation.
@@ -47,6 +47,8 @@ export interface CommandHandlers {
   paListRemove(list: string, index: number): void;
   tasksControl(action: 'pause' | 'resume' | 'killall'): void;
   setModels(overrides: ModelOverrides): void;
+  // Folders every worker may read / write (the demo hub has no workers).
+  setAccessGrants?(grants: AccessGrant[]): void;
 }
 
 export function dispatchCommand(handlers: CommandHandlers, command: ClientCommand): void {
@@ -104,6 +106,8 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
       return handlers.tasksControl(command.action);
     case 'models.set':
       return handlers.setModels(command.overrides);
+    case 'access.set':
+      return handlers.setAccessGrants?.(command.grants);
     case 'pairing.start':
     case 'pairing.cancel':
     case 'device.revoke':

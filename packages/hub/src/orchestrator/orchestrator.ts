@@ -1,9 +1,10 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { MODEL_DEFAULTS, PAIR_REVIEWER_DEFAULT, catalogModel, isInternalTask, parseExchange, parseVerdict, resolveModel, rulesFor, toolName, type Agent, type EngineId, type ModelChoice, type PairMode, type PairVerdict, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
+import { MODEL_DEFAULTS, PAIR_REVIEWER_DEFAULT, catalogModel, isInternalTask, isLiveStatus, stepKind, parseExchange, parseVerdict, resolveModel, rulesFor, toolName, type AccessGrant, type Agent, type EngineId, type ModelChoice, type PairMode, type PairVerdict, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from '../engine/types.js';
@@ -233,6 +234,15 @@ export class Orchestrator implements CommandHandlers {
   #chairing = new Set<string>();
   // Pair tasks mid-debate: the owner's messages go to both sides next round.
   #debating = new Set<string>();
+  // QA findings waiting for their task's fix round (it continues in place),
+  // and fix rounds so far per task.
+  #qaFindings = new Map<string, string>();
+  #qaFixRounds = new Map<string, number>();
+  // Folders opened to every worker, and where Claude Code keeps its
+  // per-project folders (tests point this at a temp dir).
+  #accessGrants: AccessGrant[] = [];
+  #onAccessChange: (grants: AccessGrant[]) => void = () => {};
+  #claudeProjectsDir = join(homedir(), '.claude', 'projects');
   // Failover switches already announced ("<seat>:<engine>").
   #failoverNoted = new Set<string>();
   #cardsSeen = new Set<string>();
@@ -540,7 +550,17 @@ export class Orchestrator implements CommandHandlers {
 
   #row(taskId: string, row: Omit<TranscriptRow, 'id'> & { id?: string }): void {
     if (!this.#transcripts) return;
-    this.#transcripts.append(taskId, { ...row, id: row.id ?? this.#transcripts.nextId() });
+    const id = row.id ?? this.#transcripts.nextId();
+    this.#transcripts.append(taskId, { ...row, id });
+    // One window per ask: a step's rows (QA, a handover, a part…) also land
+    // in the ask's own console, marked with the step.
+    const root = this.#bus.state.tasks[taskId]?.rootTaskId;
+    if (root && root !== taskId) this.#transcripts.append(root, { ...row, id: `${taskId}~${id}`, stepTaskId: taskId });
+  }
+
+  // The owner's ask a task belongs to (itself, unless it's a step of one).
+  #rootOf(taskId: string): string {
+    return this.#bus.state.tasks[taskId]?.rootTaskId ?? taskId;
   }
 
   // A status row on one task that points at another (QA, fix, handover…).
@@ -567,6 +587,15 @@ export class Orchestrator implements CommandHandlers {
     if (this.#debating.has(taskId)) {
       this.#followUps.set(taskId, [...(this.#followUps.get(taskId) ?? []), message]);
       this.#row(taskId, { role: 'system', kind: 'status', text: 'noted — both models hear it next round' });
+      return;
+    }
+    // A step of this ask is working right now (QA, a handover…): it reads it.
+    const step = this.#inboxes.has(taskId)
+      ? undefined
+      : Object.values(this.#bus.state.tasks).find((candidate) => candidate.rootTaskId === taskId && this.#inboxes.has(candidate.id));
+    if (step && this.#inboxes.get(step.id)?.push(message)) {
+      const stepTeam = step.teamId ? this.#registry.get(step.teamId)?.name ?? step.teamId : 'step';
+      this.#row(taskId, { role: 'system', kind: 'status', text: `sent to the ${stepTeam} worker (${stepKind(step)}) — it reads it at its next step` });
       return;
     }
     const inbox = this.#inboxes.get(taskId);
@@ -617,7 +646,17 @@ export class Orchestrator implements CommandHandlers {
   // in every project are told to use by name.
   #extraDirs(cwd: string, team?: Team): string[] {
     const paDir = team && this.#isPaTeam(team) && this.#pa ? this.#pa.paths.dir : '';
-    const extras = [this.#outboxDir, this.#inboxDir, paDir].filter(Boolean);
+    // The project's own Claude Code folder (its memory, saved tool results) —
+    // as Claude Code opened in that folder has it — and the folders the
+    // owner opened for writing (Settings > Hub; the scratch folder by default).
+    const claudeCode = this.#claudeCodeDir(cwd);
+    try {
+      mkdirSync(claudeCode, { recursive: true });
+    } catch {
+      // can't create it — it just isn't offered
+    }
+    const granted = this.#accessGrants.filter((grant) => grant.access === 'write').map((grant) => grant.path);
+    const extras = [this.#outboxDir, this.#inboxDir, paDir, claudeCode, ...granted].filter(Boolean);
     return [...new Set(extras)].filter((dir) => existsSync(dir) && !isInside(dir, cwd));
   }
 
@@ -629,6 +668,79 @@ export class Orchestrator implements CommandHandlers {
     const dataDir = this.#registry.dataDir;
     const paDir = team && this.#isPaTeam(team) && this.#pa ? this.#pa.paths.dir : '';
     return { dir: dataDir, open: [join(dataDir, 'art'), this.#inboxDir, this.#outboxDir, paDir].filter(Boolean) };
+  }
+
+  // --- folder access -----------------------------------------------------
+  // Folders the owner opened to every worker (Settings > Hub, local only):
+  // 'write' ones join every worker's writable scope (Claude's directory
+  // grants, the shell policy, Codex's sandbox), 'read' ones are named to
+  // workers as readable. Agent HQ's own data stays locked whatever is here.
+
+  configureAccess(grants: AccessGrant[], onChange: (grants: AccessGrant[]) => void, claudeProjectsDir?: string): void {
+    this.#accessGrants = grants;
+    this.#onAccessChange = onChange;
+    if (claudeProjectsDir) this.#claudeProjectsDir = claudeProjectsDir;
+  }
+
+  accessGrantsList(): AccessGrant[] {
+    return this.#accessGrants;
+  }
+
+  setAccessGrants(grants: AccessGrant[]): void {
+    const dataDir = resolve(this.#registry.dataDir);
+    const kept: AccessGrant[] = [];
+    const seen = new Set<string>();
+    for (const grant of grants) {
+      const path = grant.path.trim();
+      const refuse = (why: string) => this.#activity('master', null, `folder access: not added ${path} — ${why}`);
+      if (!isAbsolute(path)) {
+        refuse('use a full path, like C:\\Tools');
+        continue;
+      }
+      const full = resolve(path);
+      if (seen.has(full.toLowerCase())) continue;
+      if (!existsSync(full)) {
+        refuse("that folder doesn't exist");
+        continue;
+      }
+      if (grant.access === 'write' && /^([A-Za-z]:\\?|\\\\[^\\]+\\[^\\]+\\?)$/.test(full)) {
+        refuse('a whole drive is too broad to open for writing — pick a folder');
+        continue;
+      }
+      if (grant.access === 'write' && (isInside(full, dataDir) || isInside(dataDir, full))) {
+        refuse("Agent HQ's own data folder stays locked for workers");
+        continue;
+      }
+      seen.add(full.toLowerCase());
+      kept.push({ path: full, access: grant.access });
+    }
+    const before = new Map(this.#accessGrants.map((grant) => [grant.path.toLowerCase(), grant.access]));
+    this.#accessGrants = kept;
+    this.#onAccessChange(kept);
+    const changes = [
+      ...kept.filter((grant) => before.get(grant.path.toLowerCase()) !== grant.access).map((grant) => `${grant.access === 'write' ? 'read & write' : 'read'}: ${grant.path}`),
+      ...[...before.keys()].filter((path) => !seen.has(path)).map((path) => `removed: ${path}`),
+    ];
+    if (changes.length) this.#activity('master', null, `folder access updated — ${changes.join(' · ')} (applies to work that starts from now)`);
+  }
+
+  // Claude Code's own folder for a project (~/.claude/projects/<project>:
+  // its memory and saved tool results) — open to the project's workers the
+  // way it is to Claude Code opened in that folder.
+  #claudeCodeDir(cwd: string): string {
+    return join(this.#claudeProjectsDir, resolve(cwd).replace(/[^a-zA-Z0-9]/g, '-'));
+  }
+
+  // What workers are told about the folders the owner opened.
+  #accessNote(): string {
+    const write = this.#accessGrants.filter((grant) => grant.access === 'write').map((grant) => grant.path);
+    const read = this.#accessGrants.filter((grant) => grant.access === 'read').map((grant) => grant.path);
+    if (write.length === 0 && read.length === 0) return '';
+    return [
+      'Folders the owner opened to you (beyond your project):',
+      ...write.map((path) => `- read & write: ${path}`),
+      ...read.map((path) => `- read only: ${path}`),
+    ].join('\n');
   }
 
   #isPaTeam(team: Pick<Team, 'id'>): boolean {
@@ -657,6 +769,10 @@ export class Orchestrator implements CommandHandlers {
   }
 
   stopTask(taskId: string, by: 'owner' | 'killall' = 'owner'): void {
+    // Stopping an ask stops every step of it still going (QA, a handover…).
+    for (const step of Object.values(this.#bus.state.tasks)) {
+      if (step.rootTaskId === taskId && step.id !== taskId && isLiveStatus(step.status)) this.stopTask(step.id, by);
+    }
     const task = this.#bus.state.tasks[taskId];
     if (!task || ['done', 'failed', 'paused'].includes(task.status)) return;
     this.#stopping.add(taskId);
@@ -1004,6 +1120,7 @@ export class Orchestrator implements CommandHandlers {
     recoveryRound = 0,
     pairChoice?: boolean,
     pairMode: PairMode = 'review',
+    rootTaskId?: string, // a recovery plan: every step belongs to that ask
   ): Promise<void> {
     this.#activity(
       'master',
@@ -1036,6 +1153,8 @@ export class Orchestrator implements CommandHandlers {
         synopsis: null,
         tokensUsed: 0,
         pair: this.#pairFor(team, pairChoice, pairMode),
+        // later steps of a plan belong to the ask that started it
+        rootTaskId: rootTaskId ?? (index === 0 ? this.#bus.state.tasks[taskId]?.rootTaskId ?? null : firstTaskId),
         createdAt: this.#bus.state.tasks[taskId]?.createdAt ?? now(),
         updatedAt: now(),
       };
@@ -1063,6 +1182,8 @@ export class Orchestrator implements CommandHandlers {
     const sections = [task.detail];
     const integrationBrief = this.#integrationBriefs.get(task.id);
     if (integrationBrief) sections.push('', integrationBrief);
+    const access = this.#accessNote();
+    if (access) sections.push('', access);
     const history = Object.values(this.#bus.state.tasks)
       .filter((t) => t.projectId === task.projectId && t.status === 'done' && t.id !== task.id && t.synopsis && !isInternalTask(t))
       .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -1264,15 +1385,26 @@ export class Orchestrator implements CommandHandlers {
       // continues the same conversation (resumed session, same engine);
       // messages sent before the worker started join its brief.
       const current = this.#bus.state.tasks[taskId] ?? task;
-      const followText = followUps.join('\n\n');
+      // A fix round: QA's findings come in their own words (and anything the
+      // owner sent rides along); no coordination pass after it.
+      const qaFindings = this.#qaFindings.get(taskId);
+      this.#qaFindings.delete(taskId);
+      const qaRound = qaFindings !== undefined;
+      const ownerSaid = qaRound ? followUps.filter((text) => text !== qaFindings) : followUps;
+      const followText = [
+        qaRound ? `Agent HQ's QA team checked this work and found issues. Fix them here, in the same work — it will be re-checked:\n${qaFindings}` : '',
+        ownerSaid.length ? `${qaRound ? 'The owner also says' : 'The owner follows up on this task'}:\n${ownerSaid.join('\n\n')}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n\n');
       const resumeSessionId = continuing && current.session?.engine === workerSpec.engine ? current.session.id : undefined;
       const prompt = resumeSessionId
-        ? `The owner follows up on this task:\n${followText}`
+        ? followText
         : continuing
-          ? `${followText}\n\n(The owner's follow-up on earlier work — the original ask and what was reported are below.)\n\n` +
+          ? `${followText}\n\n(A follow-up on earlier work — the original ask and what was reported are below.)\n\n` +
             `${this.#buildWorkerPrompt(current)}\nEarlier report: ${(current.synopsis ?? '(none)').slice(0, 1500)}`
           : followUps.length > 0
-            ? `${this.#buildWorkerPrompt(current)}\n\nThe owner added while this was waiting:\n${followText}`
+            ? `${this.#buildWorkerPrompt(current)}\n\nThe owner added while this was waiting:\n${followUps.join('\n\n')}`
             : this.#buildWorkerPrompt(current);
       if (resumeSessionId) this.#activity(workerId, taskId, `resuming the conversation (${workerSpec.engine})`);
       // The author's runs (one, or one per pair round) share these callbacks;
@@ -1438,7 +1570,7 @@ export class Orchestrator implements CommandHandlers {
       // Everything else gets the master's coordination pass: does the report
       // hand work to a different team?
       if (task.title.startsWith('[QA]')) void this.#handleQaOutcome(taskId, review.synopsis);
-      else if (autoQa) void this.#coordinate(taskId, team, review.synopsis);
+      else if (autoQa && !qaRound) void this.#coordinate(taskId, team, review.synopsis);
     } catch (error) {
       if (this.#stopping.has(taskId)) {
         this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' });
@@ -1488,7 +1620,8 @@ export class Orchestrator implements CommandHandlers {
       return;
     }
     this.#patchTask(taskId, { status: 'queued', stoppedBy: null, progressPct: 5 });
-    this.#activity('master', taskId, task.session ? 'continuing the same conversation with your follow-up' : 'starting a new run with your follow-up (no saved conversation)');
+    const what = this.#qaFindings.has(taskId) ? "QA's findings" : 'your follow-up';
+    this.#activity('master', taskId, task.session ? `continuing the same conversation with ${what}` : `starting a new run with ${what} (no saved conversation)`);
     this.#startOrQueue(taskId, team, true);
   }
 
@@ -1773,6 +1906,7 @@ export class Orchestrator implements CommandHandlers {
       createdAt: now(),
       updatedAt: now(),
       parentTaskId: parentId,
+      rootTaskId: this.#rootOf(parentId),
       ...(extra.seat ? { seat: extra.seat } : {}),
       ...(extra.pair ? { pair: extra.pair } : {}),
     });
@@ -1811,6 +1945,7 @@ export class Orchestrator implements CommandHandlers {
     this.#publishTask({
       id: taskId,
       title: `[QA] ${source.title}`.slice(0, 60),
+      rootTaskId: this.#rootOf(sourceTaskId),
       detail:
         `QA the completed task "${source.title}" in this project. What was reported done: ${synopsis || '(no synopsis)'}\n\n` +
         "Run the project's REAL tests, and where applicable actually run the app in its proper environment " +
@@ -1904,6 +2039,7 @@ export class Orchestrator implements CommandHandlers {
       this.#publishTask({
         id: followId,
         title: item.title.slice(0, 60),
+        rootTaskId: this.#rootOf(taskId),
         detail:
           `${item.instruction}\n\n` +
           `Handover from the ${team.name} ("${task.title}"): ${synopsis.replace(/\s+/g, ' ').slice(0, 600)}`,
@@ -2886,7 +3022,7 @@ export class Orchestrator implements CommandHandlers {
       const firstId = `t-${now().toString(36)}-${++this.#taskCounter}`;
       this.#recoveryRound.set(firstId, round);
       const steps = plan.steps.map((step, index) => (index === 0 ? { ...step, instruction: `${step.instruction}\n\n${context}` } : step));
-      void this.#runChain(firstId, steps, task.projectId ?? this.#projects.defaultProject().id, baseTitle, round);
+      void this.#runChain(firstId, steps, task.projectId ?? this.#projects.defaultProject().id, baseTitle, round, undefined, 'review', this.#rootOf(taskId));
       return;
     }
     const target = this.#registry.get(plan.teamId ?? '');
@@ -2900,6 +3036,7 @@ export class Orchestrator implements CommandHandlers {
     this.#publishTask({
       id: followId,
       title: `[${plan.action}] ${baseTitle}`.slice(0, 60),
+      rootTaskId: this.#rootOf(taskId),
       detail: `${plan.instruction}\n\n${context}`,
       projectId: task.projectId,
       teamId: target.id,
@@ -2916,8 +3053,10 @@ export class Orchestrator implements CommandHandlers {
     this.#startOrQueue(followId, target, true);
   }
 
-  // QA verdict -> Meeting Room huddle -> [fix] task back to the source team.
-  // Fixes get re-QA'd; after two failed rounds it escalates to the owner.
+  // QA verdict -> Meeting Room huddle -> the SAME task continues, in its own
+  // conversation, with QA's findings (one window per ask): the worker that
+  // did the work fixes it, and it's re-QA'd when files changed. After two
+  // fix rounds that still fail it escalates to the owner (a stuck task).
   async #handleQaOutcome(qaTaskId: string, qaSynopsis: string): Promise<void> {
     const sourceId = this.#qaSource.get(qaTaskId);
     this.#qaSource.delete(qaTaskId);
@@ -2934,69 +3073,57 @@ export class Orchestrator implements CommandHandlers {
     const evaluation = await evaluateQaReport(this.#engine, qaSynopsis, checksModel);
     this.#recordTokens(checksModel.tier, evaluation.tokens);
     if (evaluation.verdict === 'pass') {
+      this.#qaFixRounds.delete(source.id);
       this.#activity('master', qaTaskId, `QA verdict: pass — ${source.title.slice(0, 45)}`);
       return;
     }
 
     const rootTitle = source.title.replace(/^\[fix\d*\]\s*/, '');
+    // Fix rounds so far: counted on the task itself (fixes continue it in
+    // place); a freelancer's fix is its own task titled [fix] / [fixN].
     const roundMatch = source.title.match(/^\[fix(\d*)\]/);
-    const round = roundMatch ? (roundMatch[1] ? Number(roundMatch[1]) : 1) : 0;
+    const round = roundMatch ? (roundMatch[1] ? Number(roundMatch[1]) : 1) : (this.#qaFixRounds.get(source.id) ?? 0);
     if (round >= 2) {
-      this.#activity(
-        'master',
-        qaTaskId,
-        `QA still failing after ${round} fix rounds: ${rootTitle.slice(0, 45)}`,
-      );
+      this.#qaFixRounds.delete(source.id);
+      this.#activity('master', qaTaskId, `QA still failing after ${round} fix rounds: ${rootTitle.slice(0, 45)}`);
       // Stuck: the same team already tried twice, so no plain retry.
       void this.#recoverStuck(source.id, sourceTeam, 'qa', evaluation.summary || qaSynopsis, { allowRetry: false });
       return;
     }
 
-    // The leads huddle in the meeting room while the handover happens.
+    // The leads huddle in the meeting room while the findings change hands.
     this.#holdMeeting([`${qa.id}-lead`, `${sourceTeam.id}-lead`], `QA findings on "${rootTitle.slice(0, 32)}"`);
     this.#activity('master', qaTaskId, `${qa.name} and ${sourceTeam.name} leads are meeting over QA findings`);
-
-    const fixTitle = (round === 0 ? `[fix] ${rootTitle}` : `[fix${round + 1}] ${rootTitle}`).slice(0, 60);
+    const issues = evaluation.summary || qaSynopsis;
 
     // Freelancer remediation: the fix instruction resumes the SAME session
     // (which re-enters the normal flow, so the fix gets re-QA'd too).
     if (isFreelance) {
       const freelancerId = source.agentIds[0];
       if (!freelancerId) return;
+      const fixTitle = (round === 0 ? `[fix] ${rootTitle}` : `[fix${round + 1}] ${rootTitle}`).slice(0, 60);
       this.#activity('master', qaTaskId, `remediation sent back to freelancer: ${fixTitle.slice(0, 45)}`);
       void this.#runFreelancerTask(
         freelancerId,
-        `QA found issues in your earlier work ("${rootTitle.slice(0, 50)}"). Fix them now; the work will be re-checked.\n\nIssues:\n${evaluation.summary || qaSynopsis}`,
+        `QA found issues in your earlier work ("${rootTitle.slice(0, 50)}"). Fix them now; the work will be re-checked.\n\nIssues:\n${issues}`,
         fixTitle,
+        this.#rootOf(source.id),
       );
       return;
     }
 
-    this.#taskCounter += 1;
-    const fixId = `t-${now().toString(36)}-${this.#taskCounter}`;
-    this.#publishTask({
-      id: fixId,
-      title: fixTitle,
-      detail:
-        `QA found issues in "${rootTitle}". Fix them; the work will be re-QA'd.\n\n` +
-        `Issues from QA:\n${evaluation.summary || qaSynopsis}\n\n` +
-        `Original work summary: ${source.synopsis ?? '(none)'}`,
-      projectId: source.projectId,
-      teamId: sourceTeam.id,
-      status: 'queued',
-      progressPct: 0,
-      agentIds: [],
-      synopsis: null,
-      tokensUsed: 0,
-      createdAt: now(),
-      updatedAt: now(),
+    // Back to the same task, same worker conversation.
+    this.#qaFixRounds.set(source.id, round + 1);
+    this.#qaFindings.set(source.id, issues);
+    this.#followUps.set(source.id, [...(this.#followUps.get(source.id) ?? []), issues]);
+    this.#row(source.id, {
+      role: 'master',
+      agentId: 'master',
+      kind: 'status',
+      text: `QA found issues — back to the ${sourceTeam.name} worker in this same conversation (fix round ${round + 1})`,
+      linkTaskId: qaTaskId,
     });
-    this.#activity('master', fixId, `remediation assigned to ${sourceTeam.name}: ${fixTitle.slice(0, 45)}`);
-    this.#link(source.id, fixId, `QA found issues — fix round: ${fixTitle.slice(0, 50)}`);
-    this.#link(qaTaskId, fixId, `fix round: ${fixTitle.slice(0, 50)}`);
-    this.#taskDepth.set(fixId, (this.#taskDepth.get(qaTaskId) ?? 1) + 1);
-    this.#carryRecovery(qaTaskId, fixId);
-    this.#startOrQueue(fixId, sourceTeam, true);
+    this.#continueTask(source.id);
   }
 
   // The findings themselves must reach the owner: full report to
@@ -3575,7 +3702,7 @@ export class Orchestrator implements CommandHandlers {
     void this.#runFreelancerTask(agentId, text);
   }
 
-  async #runFreelancerTask(agentId: string, text: string, titleOverride?: string): Promise<void> {
+  async #runFreelancerTask(agentId: string, text: string, titleOverride?: string, rootTaskId?: string): Promise<void> {
     const manager = this.#freelancers;
     if (!manager) return;
     const who = manager.describe(agentId);
@@ -3604,6 +3731,7 @@ export class Orchestrator implements CommandHandlers {
     this.#publishTask({
       id: taskId,
       title: (titleOverride ?? `[FL ${who.name}] ${text}`).slice(0, 60),
+      ...(rootTaskId ? { rootTaskId } : {}),
       detail: text,
       projectId: project?.id ?? null,
       teamId: null,

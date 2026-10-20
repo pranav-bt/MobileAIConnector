@@ -1,12 +1,13 @@
 import { useState } from 'react';
-import { isInternalTask, type ClientCommand, type HubState, type PermissionRequest, type Task } from '@agent-hq/shared';
+import { foldAsks, isInternalTask, type AskView, type ClientCommand, type HubState, type PermissionRequest, type Task } from '@agent-hq/shared';
 import { agentLabel, formatResetDay, formatResetTime, formatTokens, usageColor } from '../status';
+import { StepLine } from './StepLine';
 
 function teamName(state: HubState, teamId: string | null): string {
   return (teamId && state.teams[teamId]?.name) || 'Unassigned';
 }
 
-function TaskCard(props: { state: HubState; task: Task; showProgress?: boolean; onOpen: (taskId: string) => void }): JSX.Element {
+function TaskCard(props: { state: HubState; task: Task | AskView; showProgress?: boolean; onOpen: (taskId: string) => void }): JSX.Element {
   const { task } = props;
   return (
     <div
@@ -19,6 +20,7 @@ function TaskCard(props: { state: HubState; task: Task; showProgress?: boolean; 
       <div className="act" style={{ marginTop: 3 }}>
         {teamName(props.state, task.teamId)} · {task.agentIds.length > 0 ? `${task.agentIds.length} agent${task.agentIds.length > 1 ? 's' : ''}` : task.status}
       </div>
+      <StepLine state={props.state} task={task} />
       {props.showProgress && (
         <div className="track">
           <div className="fill" style={{ width: `${task.progressPct}%` }} />
@@ -107,7 +109,8 @@ export function TodayPanel(props: {
   onOpenConsole: (taskId: string) => void;
 }): JSX.Element {
   const { state, send } = props;
-  const tasks = Object.values(state.tasks).sort((a, b) => b.updatedAt - a.updatedAt);
+  // One card per ask: its steps (QA, handovers, parts…) fold into it.
+  const tasks = foldAsks(Object.values(state.tasks)).sort((a, b) => b.updatedAt - a.updatedAt);
   const pending = Object.values(state.permissions).filter((request) => request.status === 'pending');
   const inFlight = tasks.filter((task) => ['in_flight', 'awaiting_permission', 'review'].includes(task.status));
   const queued = tasks.filter((task) => ['queued', 'routing', 'intake'].includes(task.status));

@@ -58,6 +58,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.neureal.agenthq.model.Asks
 import dev.neureal.agenthq.model.Agent
 import dev.neureal.agenthq.model.PermissionRequest
 import dev.neureal.agenthq.model.Snapshot
@@ -197,19 +198,23 @@ internal fun ApprovalCard(request: PermissionRequest, snapshot: Snapshot, onResp
 }
 
 @Composable
-private fun TaskCard(task: Task, showProgress: Boolean) {
+private fun TaskCard(task: Task, showProgress: Boolean, stepLine: String? = null) {
     // Tap a task to open its console.
-    Box(Modifier.clickable { ConsoleNav.open.value = task.id }) { TaskCardBody(task, showProgress) }
+    Box(Modifier.clickable { ConsoleNav.open.value = task.id }) { TaskCardBody(task, showProgress, stepLine) }
 }
 
 @Composable
-private fun TaskCardBody(task: Task, showProgress: Boolean) {
+private fun TaskCardBody(task: Task, showProgress: Boolean, stepLine: String? = null) {
     Card {
         Text(task.title, color = HQ.text, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
         Text(
             "${task.teamId ?: "routing"} · ${task.status.replace('_', ' ')}",
             color = HQ.muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
         )
+        // One card per ask: what its steps (QA, handovers…) are doing.
+        if (stepLine != null) {
+            Text(stepLine, color = if (stepLine.startsWith("now:")) HQ.accent else HQ.faint, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+        }
         if (showProgress) {
             Box(Modifier.fillMaxWidth().height(4.dp).background(Color(0xFF1A212E), RoundedCornerShape(2.dp))) {
                 Box(
@@ -1003,10 +1008,12 @@ private fun PaListCard(name: String, items: List<String>, hub: dev.neureal.agent
 
 @Composable
 private fun TasksTab(snapshot: Snapshot, connected: Boolean, onSubmitTask: (String) -> Unit) {
-    val active = snapshot.tasks
-        .filter { it.status in listOf("routing", "queued", "in_flight", "awaiting_permission", "review") }
-        .sortedByDescending { it.updatedAt }
-    val parked = snapshot.tasks.filter { (it.status == "paused" || it.status == "failed") && it.parentTaskId == null }.sortedByDescending { it.updatedAt }.take(5)
+    // One card per ask: its steps (QA, handovers, parts…) fold into it.
+    val asks = Asks.fold(snapshot.tasks) { id -> snapshot.teams.firstOrNull { it.id == id }?.name ?: id ?: "step" }
+    val active = asks
+        .filter { it.task.status in listOf("routing", "queued", "in_flight", "awaiting_permission", "review") }
+        .sortedByDescending { it.task.updatedAt }
+    val parked = asks.filter { (it.task.status == "paused" || it.task.status == "failed") && it.task.parentTaskId == null }.sortedByDescending { it.task.updatedAt }.take(5)
     var composer by remember { mutableStateOf("") }
     var pair by remember { mutableStateOf<String?>(null) } // null | "review" | "split"
 
@@ -1085,11 +1092,11 @@ private fun TasksTab(snapshot: Snapshot, connected: Boolean, onSubmitTask: (Stri
         }
 
         item { SectionLabel(if (active.isEmpty()) "Nothing in flight" else "In flight · ${active.size}") }
-        items(active, key = { it.id }) { task -> TaskCard(task, showProgress = true) }
+        items(active, key = { it.task.id }) { ask -> TaskCard(ask.task, showProgress = true, stepLine = ask.stepLine) }
 
         if (parked.isNotEmpty()) {
             item { SectionLabel("Paused / failed") }
-            items(parked, key = { it.id }) { task -> TaskCard(task, showProgress = false) }
+            items(parked, key = { it.task.id }) { ask -> TaskCard(ask.task, showProgress = false, stepLine = ask.stepLine) }
         }
 
         item { Spacer(Modifier.height(8.dp)) }
@@ -1098,7 +1105,9 @@ private fun TasksTab(snapshot: Snapshot, connected: Boolean, onSubmitTask: (Stri
 
 @Composable
 private fun HistoryTab(snapshot: Snapshot) {
-    val done = snapshot.tasks.filter { it.status == "done" && it.parentTaskId == null }.sortedByDescending { it.updatedAt }
+    val done = Asks.fold(snapshot.tasks) { id -> snapshot.teams.firstOrNull { it.id == id }?.name ?: id ?: "step" }
+        .filter { it.task.status == "done" && it.task.parentTaskId == null }
+        .sortedByDescending { it.task.updatedAt }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().background(HQ.bg).padding(horizontal = 16.dp),
@@ -1108,7 +1117,7 @@ private fun HistoryTab(snapshot: Snapshot) {
         if (done.isEmpty()) {
             item { Text("nothing finished yet — synopses land here", color = HQ.ghost, fontSize = 11.sp, fontFamily = FontFamily.Monospace) }
         }
-        items(done, key = { it.id }) { task -> TaskCard(task, showProgress = false) }
+        items(done, key = { it.task.id }) { ask -> TaskCard(ask.task, showProgress = false, stepLine = ask.stepLine) }
         item { Spacer(Modifier.height(8.dp)) }
     }
 }

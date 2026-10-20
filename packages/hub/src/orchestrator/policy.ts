@@ -98,6 +98,16 @@ const unquote = (token: string): string => token.replace(/^["']|["']$/g, '');
 function asPath(token: string): string | null {
   const raw = unquote(token.replace(/^[<>]+/, '')).trim();
   if (!raw || raw.startsWith('-') || /^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return null;
+  // Places that swallow output: `2>/dev/null` beside a real write made
+  // "D:\dev\null" a card.
+  if (/^(\/dev\/(null|stdout|stderr|tty)|NUL|\$null)$/i.test(raw)) return null;
+  // A root-relative token that is really a pattern: an awk program
+  // ('/^\t…/{…}'), a regex ('\s*', '\n') or the bare root — real cards
+  // read these as paths ("D:\s*", "D:\n", "D:\"). Drive, UNC and Git Bash
+  // paths are still checked whatever they contain.
+  if (/^[\\/]/.test(raw) && !/^(\\\\|\/\/)[^\\/]/.test(raw) && !/^\/[A-Za-z]\//.test(raw)) {
+    if (raw.length === 1 || /[\^${}+|()[\]]/.test(raw) || /^\\[a-zA-Z]{1,2}\*?$/.test(raw)) return null;
+  }
   if (/^~($|[\\/])/.test(raw)) return join(homedir(), raw.slice(1));
   // A single short all-letter segment after a slash is a Windows switch
   // (`cmd /c`, `xcopy /E`, `robocopy /MIR`), not a path. The POSIX roots this

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   ModelOverridesSchema,
+  AccessGrantSchema,
   HubEventSchema,
   ModelTierSchema,
   PairModeSchema,
@@ -106,6 +107,9 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('permissions.set'), mode: z.enum(['auto', 'strict']) }),
   // Owner's model choices (full replace; { teams: {} } = back to defaults).
   z.object({ type: z.literal('models.set'), overrides: ModelOverridesSchema }),
+  // The folders every worker may read / write (local clients only: a device
+  // session can't open folders to agents).
+  z.object({ type: z.literal('access.set'), grants: z.array(AccessGrantSchema).max(50) }),
   // Move a file across the link. From the desktop (default) it broadcasts
   // out to the phone; from: 'phone' routes it INTO the hub's inbox on disk,
   // where workers can pick it up.

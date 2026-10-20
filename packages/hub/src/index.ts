@@ -2,7 +2,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_HUB_PORT } from '@agent-hq/shared';
+import { DEFAULT_HUB_PORT, type AccessGrant } from '@agent-hq/shared';
 import { HubBus } from './bus.js';
 import { loadPriorState, startEventLog, startSnapshotWriter } from './persist.js';
 import { ensureInboxDir, startOutboxWatcher } from './files.js';
@@ -18,7 +18,7 @@ import { ProjectRegistry } from './orchestrator/projects.js';
 import { PairingManager } from './security/pairing.js';
 import { SecurityController } from './security/controller.js';
 import { startLimitsPoller } from './usage/limits.js';
-import { loadHubConfig, saveModelOverrides, savePaEnabled, savePermissionMode, type PermissionMode, type WorkspaceRoot } from './config.js';
+import { loadHubConfig, saveModelOverrides, savePaEnabled, saveAccessGrants, savePermissionMode, type PermissionMode, type WorkspaceRoot } from './config.js';
 import type { CommandHandlers } from './commands.js';
 import { readMcpCatalog } from './engine/mcp-catalog.js';
 import { CodexEngine } from './engine/codex.js';
@@ -34,6 +34,7 @@ export interface HubOptions {
   dataDir?: string;
   cwd?: string;
   workspaceRoots?: WorkspaceRoot[]; // tests override; defaults from data/config.json
+  accessGrants?: AccessGrant[]; // tests override; defaults from data/config.json
   claudeProjectsDir?: string; // tests override; defaults to ~/.claude/projects
   // Where the owner's Codex sessions live (~/.codex). A hub whose Claude dir
   // is overridden (every test) doesn't look at Codex unless given one too.
@@ -80,6 +81,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   const workspaceRoots = options.workspaceRoots ?? config.workspaceRoots;
   const permissionPolicy: { mode: PermissionMode } = { mode: config.permissionMode };
   let modelOverrides = config.modelOverrides;
+  let accessGrants = options.accessGrants ?? config.accessGrants;
 
   const bus = new HubBus();
   const stopLog = startEventLog(bus, dataDir);
@@ -146,6 +148,15 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
       bus.publish({ type: 'hub.updated', info: makeInfo() });
     });
     orchestrator.configureMcpCatalog(() => readMcpCatalog(options.claudeConfigPath));
+    orchestrator.configureAccess(
+      accessGrants,
+      (grants) => {
+        accessGrants = grants;
+        saveAccessGrants(dataDir, grants);
+        bus.publish({ type: 'hub.updated', info: makeInfo() });
+      },
+      options.claudeProjectsDir,
+    );
     orchestrator.onInfoChange(() => bus.publish({ type: 'hub.updated', info: makeInfo() }));
     masterRules = () => orchestrator.masterRulesText();
     mcpCatalog = () => orchestrator.mcpCatalogNames();
@@ -190,6 +201,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     modelOverrides,
     masterRules: masterRules(),
     mcpCatalog: mcpCatalog(),
+    accessGrants,
   });
   bus.publish({ type: 'hub.updated', info: makeInfo() });
 

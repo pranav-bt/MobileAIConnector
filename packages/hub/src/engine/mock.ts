@@ -171,7 +171,7 @@ export class MockEngine implements OrchestratorEngine {
       // ([fix] work reviews clean, ending the loop). "handoff-test" reviews
       // into a report that explicitly hands work to the design team.
       const synopsis =
-        args.prompt.includes('remediate-me') && args.prompt.includes('[QA]') && !args.prompt.includes('[fix')
+        args.prompt.includes('remediate-me') && args.prompt.includes('[QA]') && !args.prompt.includes('[fix') && !args.prompt.includes('fixed-after-qa')
           ? 'ISSUES: QA found the remediate-me bug in the feature.'
           : args.prompt.includes('qa-stuck-test') && args.prompt.includes('[QA]')
             ? 'ISSUES: the qa-stuck-test bug is still there.'
@@ -181,7 +181,9 @@ export class MockEngine implements OrchestratorEngine {
                 ? 'Mock lead review: work checked, looks complete (with the second opinion).'
                 : args.prompt.includes('Debate: ')
                   ? 'Mock lead review: work checked, looks complete (with the debate).'
-                : 'Mock lead review: work checked, looks complete.';
+                  : args.prompt.includes('fixed-after-qa')
+                    ? 'Mock lead review: work checked, looks complete (fixed-after-qa).'
+                    : 'Mock lead review: work checked, looks complete.';
       // A worker report that says it could not finish reviews as stuck.
       const stuck = args.prompt.includes('Could not finish') ? 'the worker has no Roblox Studio connection' : null;
       return {
@@ -334,11 +336,13 @@ export class MockEngine implements OrchestratorEngine {
     memory.push(firstLine);
     const result = await this.#work(args);
     callbacks.onTranscript?.({ id: `${rowId}-tool`, kind: 'tool', tool: 'Bash', text: 'echo mock', state: 'ok', detail: 'mock' });
-    const synopsis = [result.synopsis, heard.length ? `heard: ${heard.join(' / ')}` : '', recall ? `remembered: ${recall}` : '']
+    // A fix round on QA's findings says so — and a re-check of fixed work sees it.
+    const fixed = /qa team checked this work|fixed-after-qa/.test(taskText) ? 'fixed-after-qa' : '';
+    const synopsis = [result.synopsis, heard.length ? `heard: ${heard.join(' / ')}` : '', recall ? `remembered: ${recall}` : '', fixed]
       .filter(Boolean)
       .join(' · ');
     callbacks.onTranscript?.({ id: `${rowId}-done`, kind: 'message', text: synopsis });
-    return { ...result, synopsis, sessionId, filesChanged: /edit-test|writes-files|install/.test(taskText) };
+    return { ...result, synopsis, sessionId, filesChanged: /edit-test|writes-files|install|qa team checked this work/.test(taskText) };
   }
 
   async #work(args: {
@@ -372,6 +376,10 @@ export class MockEngine implements OrchestratorEngine {
     const toolsBlock = args.prompt.split('Tools your team has')[1];
     if (toolsBlock !== undefined) callbacks.onActivity(`mock: team tools ${bullets(toolsBlock)}`);
     callbacks.onActivity(`mock: mcp [${Object.keys(args.team.mcpServers ?? {}).join('|')}]`);
+    // Makes the folders the owner opened (Settings > Hub) observable.
+    if (args.prompt.includes('Folders the owner opened to you')) {
+      callbacks.onActivity(`mock: opened folders ${(args.prompt.match(/^- (read & write|read only): /gm) ?? []).length}`);
+    }
     // A first attempt at "crash-test" fails outright; "blocked-test" reports
     // it could not finish. Work a recovery spawned carries the stuck context
     // and goes through, so the recovered task completes.

@@ -272,11 +272,13 @@ try {
     e.type === 'activity' && e.entry.message.startsWith('mock: workspace ') ? [e.entry.message] : [],
   );
   if (scopes.length === 0) fail('no worker workspace scope was reported by the mock engine');
-  const allowedExtras = [join(dataDir, 'outbox'), join(dataDir, 'inbox')];
+  // (+ the project's own Claude Code folder, as Claude Code in VS Code has it,
+  // and the folders the owner opened for writing — the scratch folder by default)
+  const allowedExtras = [join(dataDir, 'outbox'), join(dataDir, 'inbox'), join(tmpdir(), 'claude')];
   for (const scope of scopes) {
     const extras = (scope.match(/· extra \[(.*)\]$/)?.[1] ?? '').split('|').filter(Boolean);
     for (const dir of extras) {
-      if (!allowedExtras.includes(dir)) {
+      if (!allowedExtras.includes(dir) && !isInside(dir, claudeProjectsDir)) {
         fail(`worker was handed a directory outside its project: ${dir} (${scope})`);
       }
     }
@@ -369,7 +371,7 @@ try {
   // cp/mv/redirects/sed -i once reached straight into sibling projects with no
   // card at all, which is how a worker copied a file into the project next
   // door. Table first (every construct), then end-to-end through a worker.
-  const castleScope: WorkspaceScope = { cwd: 'D:\\PersonalWork\\CastleWars', extraDirs: ['D:\\hub\\data\\outbox'] };
+  const castleScope: WorkspaceScope = { cwd: 'D:\\PersonalWork\\CastleWars', extraDirs: ['D:\\hub\\data\\outbox', 'D:\\Granted\\Scratch'] };
   const shellCases: [string, boolean][] = [
     // in-project work stays silent
     ['cp src/Art.luau build/Art.luau', false],
@@ -382,6 +384,14 @@ try {
     ['cp report.md D:\\hub\\data\\outbox\\report.md', false], // the phone outbox is granted
     ['grep -r steal D:\\PersonalWork\\PancakeStack', false], // reading elsewhere stays routine
     ['ls D:\\Work\\Roblox', false],
+    // false alarms seen on real cards: discards, regexes and escapes aren't paths
+    ['cp a.txt b.txt 2>/dev/null', false],
+    ['grep -c steal src/a.luau 2>/dev/null > counts.txt', false],
+    ["awk '/^\\t\\t[A-Za-z]+ = /{k=$1} /At = cf/{c[k]++} END{for (x in c) print c[x], x}' src/data.luau > counts.txt", false],
+    ["tr '\\n' ' ' < a.txt > b.txt", false],
+    ["grep -oP '\\s*\\w+' src/a.luau > words.txt", false],
+    ['find / -maxdepth 1 > roots.txt', false],
+    ['cp report.md D:\\Granted\\Scratch\\report.md', false], // a folder the owner granted write access
     // …and every way out of the project asks
     ['cp Art.luau D:\\PersonalWork\\PancakeStack\\src\\Art.luau', true],
     ['cp Art.luau /d/PersonalWork/PancakeStack/src/Art.luau', true], // Git Bash drive form
@@ -716,13 +726,16 @@ try {
   console.log('file channel ok: desktop -> hub -> clients');
 
   // 12. QA remediation loop: QA finds real issues -> the QA and source-team
-  // leads meet in the Meeting room -> a [fix] task goes back to the source
-  // team -> the fix is re-QA'd and passes (no infinite loop).
+  // leads meet in the Meeting room -> the SAME task continues in its own
+  // conversation with QA's findings (one window per ask) -> the fix is
+  // re-QA'd and passes (no infinite loop).
+  const remediationMark = events.length;
   ws.send(encodeCommand({ type: 'task.submit', text: 'coding: remediate-me sneaky bug feature' }));
-  await waitFor(
+  const remediated = await waitFor(
     'remediate-me coding task done',
     (e) => e.type === 'task.updated' && e.task.detail.startsWith('coding: remediate-me') && e.task.status === 'done',
   );
+  const remediatedId = remediated.type === 'task.updated' ? remediated.task.id : '';
   await waitFor(
     'leads meet over QA findings',
     (e) => e.type === 'agent.updated' && e.agent.id === 'coding-lead' && e.agent.activity.startsWith('meeting:'),
@@ -732,23 +745,29 @@ try {
     (e) => e.type === 'agent.updated' && /qa|test/i.test(e.agent.id) && e.agent.activity.startsWith('meeting:'),
   );
   if (!qaLeadMeeting) fail('QA lead never joined the meeting');
-  const fixDone = await waitFor(
-    '[fix] task done on the source team',
-    (e) => e.type === 'task.updated' && e.task.title.startsWith('[fix]') && e.task.status === 'done',
+  await waitFor(
+    'the same task continues with QA findings',
+    (e) => e.type === 'activity' && e.entry.taskId === remediatedId && e.entry.message === "continuing the same conversation with QA's findings",
     15000,
+    remediationMark,
   );
-  if (fixDone.type !== 'task.updated' || fixDone.task.teamId !== 'coding') {
-    fail('the [fix] task should run on the coding team');
-  }
   await waitFor(
     're-QA passes the fix',
-    (e) => e.type === 'activity' && e.entry.message.startsWith('QA verdict: pass — [fix]'),
+    (e) => e.type === 'activity' && e.entry.message.startsWith('QA verdict: pass — coding: remediate-me'),
     15000,
+    remediationMark,
   );
-  if (events.some((e) => e.type === 'task.updated' && e.task.title.startsWith('[fix2]'))) {
-    fail('remediation looped past the first round when the fix was clean');
+  if (events.slice(remediationMark).some((e) => e.type === 'task.updated' && /^\[fix\d*\]/.test(e.task.title))) {
+    fail('a separate [fix] task was created instead of continuing the same task');
   }
-  console.log('QA remediation ok: meeting held, [fix] ran on coding, re-QA passed');
+  if (!events.slice(remediationMark).some((e) => e.type === 'activity' && e.entry.taskId === remediatedId && e.entry.message.startsWith('mock: resumed'))) {
+    fail('the fix round did not resume the same worker conversation');
+  }
+  const qaSteps = new Set(
+    events.slice(remediationMark).flatMap((e) => (e.type === 'task.updated' && e.task.title.startsWith('[QA]') && e.task.rootTaskId === remediatedId ? [e.task.id] : [])),
+  );
+  if (qaSteps.size !== 2) fail(`expected 2 QA passes as steps of the ask, got ${qaSteps.size}`);
+  console.log('QA remediation ok: meeting held, the same task fixed it in its own conversation, re-QA passed (both QA passes are steps of the ask)');
 
   // 13. Scale-up ask: a backed-up team raises an approval card; approving it
   // lifts the team's concurrent-worker cap by one.

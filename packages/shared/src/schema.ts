@@ -133,6 +133,11 @@ export const TaskSchema = z.object({
   // user-facing task they build. They show while running, but never in
   // finished lists or project history — the parent's report covers them.
   parentTaskId: z.string().nullable().optional(),
+  // One window per ask: a STEP of the owner's ask — a QA pass, a handover to
+  // another team, a recovery move, a later step of a plan, a split piece —
+  // carries the ask's task id. Clients fold steps into the ask's card, and
+  // the ask's console carries every step's rows (`stepTaskId` on them).
+  rootTaskId: z.string().nullable().optional(),
   // The owner's own words, set only on tasks the owner submitted (never on
   // QA/fix/follow-up/split tasks). Routing reads these to follow the
   // conversation thread instead of guessing a project from topic words.
@@ -235,8 +240,19 @@ export const TranscriptEntrySchema = z.object({
   state: z.enum(['running', 'ok', 'error']).optional(),
   requestId: z.string().optional(), // a card row: the PermissionRequest it shows
   linkTaskId: z.string().optional(), // a status row about another task (QA, fix, handover)
+  stepTaskId: z.string().optional(), // a row mirrored from a step of this ask (QA, a handover…)
 });
 export type TranscriptEntry = z.infer<typeof TranscriptEntrySchema>;
+
+// A folder the owner opened to every worker, in every project: 'write' =
+// read and write there without a card (Agent HQ's own data stays locked);
+// 'read' = named to workers as readable (reading never asks anyway, except
+// credential-like files).
+export const AccessGrantSchema = z.object({
+  path: z.string().min(1).max(500),
+  access: z.enum(['read', 'write']),
+});
+export type AccessGrant = z.infer<typeof AccessGrantSchema>;
 
 export function isInternalTask(task: Pick<Task, 'parentTaskId'>): boolean {
   return !!task.parentTaskId;
@@ -463,6 +479,8 @@ export const HubInfoSchema = z.object({
   // MCP servers configured on this PC (names only) — what a team can be
   // granted. Workers get exactly their team's grants, nothing else.
   mcpCatalog: z.array(z.string()).optional(),
+  // Folders the owner opened to every worker (Settings > Hub).
+  accessGrants: z.array(AccessGrantSchema).optional(),
 });
 export type HubInfo = z.infer<typeof HubInfoSchema>;
 

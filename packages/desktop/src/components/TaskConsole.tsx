@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { catalogModel, lastJsonObject, parseExchange, parseVerdict, type ClientCommand, type HubState, type Task, type TranscriptEntry } from '@agent-hq/shared';
+import { catalogModel, foldAsks, lastJsonObject, parseExchange, parseVerdict, stepKind, type AskView, type ClientCommand, type HubState, type Task, type TranscriptEntry } from '@agent-hq/shared';
 import { useTranscript } from '../hub';
 import { TASK_STATUS_LABELS, agentLabel, formatTokens } from '../status';
+import { StepLine } from './StepLine';
 import { ApprovalCard } from './TodayPanel';
 
 // A task's console: the whole story of one task in order — your ask, where
@@ -13,7 +14,21 @@ import { ApprovalCard } from './TodayPanel';
 const RUNNING = ['in_flight', 'awaiting_permission', 'review'];
 const STOPPABLE = ['routing', 'queued', 'in_flight', 'awaiting_permission', 'review'];
 
+// A row mirrored from a step of this ask (QA, a handover, a part…): which.
+const stepTag = (state: HubState, entry: TranscriptEntry): string => {
+  const step = entry.stepTaskId ? state.tasks[entry.stepTaskId] : undefined;
+  if (!entry.stepTaskId) return '';
+  const team = step?.teamId ? state.teams[step.teamId]?.name ?? step.teamId : '';
+  return step ? `${team ? `${team} · ` : ''}${stepKind(step)}` : 'step';
+};
+
 const roleLabel = (state: HubState, entry: TranscriptEntry): string => {
+  const tag = stepTag(state, entry);
+  if (tag) return `${tag} — ${roleOnly(state, entry)}`;
+  return roleOnly(state, entry);
+};
+
+const roleOnly = (state: HubState, entry: TranscriptEntry): string => {
   if (entry.role === 'owner') return 'You';
   if (entry.role === 'lead') return entry.agentId ? agentLabel(state, entry.agentId) : 'Lead';
   if (entry.role === 'master') return 'Master';
@@ -181,7 +196,7 @@ function VerdictBody(props: { text: string }): JSX.Element {
 const stateMark = (entry: TranscriptEntry) =>
   entry.state === 'running' ? { mark: '●', color: 'var(--amber)' } : entry.state === 'error' ? { mark: '✗', color: 'var(--red)' } : { mark: '✓', color: 'var(--green)' };
 
-function ToolRow(props: { entry: TranscriptEntry }): JSX.Element {
+function ToolRow(props: { entry: TranscriptEntry; tag?: string }): JSX.Element {
   const { entry } = props;
   const [open, setOpen] = useState(false);
   const { mark, color } = stateMark(entry);
@@ -194,6 +209,7 @@ function ToolRow(props: { entry: TranscriptEntry }): JSX.Element {
         title={entry.detail ? (open ? 'hide output' : 'show output') : undefined}
       >
         <span style={{ color, flexShrink: 0 }}>{mark}</span>
+        {props.tag && <span style={{ color: 'var(--ghost)', flexShrink: 0 }}>{props.tag}</span>}
         <span style={{ color: 'var(--faint)', flexShrink: 0 }}>{entry.kind === 'diff' ? 'edit' : entry.tool ?? 'tool'}</span>
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: open ? 'pre-wrap' : 'nowrap', overflowWrap: 'anywhere' }}>{entry.text}</span>
         {entry.detail && <span style={{ color: 'var(--ghost)', flexShrink: 0 }}>{open ? '▾' : '▸'}</span>}
@@ -219,7 +235,7 @@ function ToolRow(props: { entry: TranscriptEntry }): JSX.Element {
 function Row(props: { state: HubState; entry: TranscriptEntry; send: (command: ClientCommand) => void; onOpenTask: (taskId: string) => void }): JSX.Element {
   const { state, entry } = props;
   const time = new Date(entry.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  if (entry.kind === 'tool' || entry.kind === 'diff') return <ToolRow entry={entry} />;
+  if (entry.kind === 'tool' || entry.kind === 'diff') return <ToolRow entry={entry} tag={stepTag(state, entry)} />;
   if (entry.kind === 'card') {
     const request = entry.requestId ? state.permissions[entry.requestId] : undefined;
     if (request && request.status === 'pending') {
@@ -301,7 +317,8 @@ export function TaskConsole(props: {
 }): JSX.Element {
   const { state, taskId, send } = props;
   const view = useTranscript(taskId);
-  const task = state.tasks[taskId];
+  // The ask with its steps folded in: live while any step works.
+  const task = state.tasks[taskId] ? foldAsks(Object.values(state.tasks)).find((ask) => ask.id === taskId) ?? state.tasks[taskId] : undefined;
   const [draft, setDraft] = useState('');
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true); // follow new rows while scrolled to the bottom
@@ -334,11 +351,14 @@ export function TaskConsole(props: {
   const modelId = worker?.modelId ?? task.seat?.model ?? task.pair?.authorModel;
   const model = modelId ? catalogModel(modelId)?.label ?? modelId : task.session ? (task.session.engine === 'codex' ? 'Codex' : 'Claude') : null;
   const running = RUNNING.includes(task.status);
+  const currentStep = (task as Partial<AskView>).current ?? null; // a step of this ask working right now
   const canSend = !!task.teamId;
   const placeholder = !canSend
     ? 'This task never reached a team — send it as a new task instead'
     : running
-      ? 'Message the worker — it reads it at its next step'
+      ? currentStep
+        ? `Message the ${state.teams[currentStep.teamId ?? '']?.name ?? 'step'} worker — it reads it at its next step`
+        : 'Message the worker — it reads it at its next step'
       : ['done', 'failed', 'paused'].includes(task.status)
         ? task.pair
           ? 'Ask the chair (the lead) — a question gets an answer; a change goes back to the pair'
@@ -365,9 +385,10 @@ export function TaskConsole(props: {
             {model ? ` · ${model}` : ''} · {formatTokens(task.tokensUsed)} tokens
           </div>
           <PairLine task={task} authorModel={model} />
+          <StepLine state={state} task={task} />
         </div>
         {STOPPABLE.includes(task.status) && (
-          <button className="console-btn danger" onClick={() => send({ type: 'task.stop', taskId })} title="Stop — the conversation is kept; send a message to pick it up again">
+          <button className="console-btn danger" onClick={() => send({ type: 'task.stop', taskId })} title="Stop — this task and any step of it still working; the conversation is kept, send a message to pick it up again">
             Stop
           </button>
         )}

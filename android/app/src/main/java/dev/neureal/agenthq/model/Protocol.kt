@@ -54,6 +54,8 @@ data class Task(
     val updatedAt: Double = 0.0,
     // Set on internal split pieces; finished lists hide them (the parent reports).
     val parentTaskId: String? = null,
+    // A step of the owner's ask (QA, a handover…): folded into the ask's card.
+    val rootTaskId: String? = null,
     // The worker's saved conversation — the console can continue it.
     val session: TaskSession? = null,
     // Pair mode: a second model reviews the worker's result until it agrees.

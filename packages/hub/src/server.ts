@@ -107,6 +107,10 @@ export function startServer(
           case 'team.mcp.set':
             if (mode !== 'plain' || !local) return;
             break;
+          // Opening folders to every worker is the PC owner's call, never a device's.
+          case 'access.set':
+            if (mode !== 'plain' || !local) return;
+            break;
           case 'team.create':
           case 'team.update':
             if ((mode !== 'plain' || !local) && command.mcpServers) {
