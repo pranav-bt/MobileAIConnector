@@ -28,6 +28,8 @@ import {
   detectRuleConflicts,
   type RuleConflict,
   planRecovery,
+  routeThreadMessage,
+  type ThreadMessageRoute,
   type RecoveryPlan,
   type StuckContext,
 } from './master.js';
@@ -236,6 +238,8 @@ export class Orchestrator implements CommandHandlers {
   #chairing = new Set<string>();
   // Pair tasks mid-debate: the owner's messages go to both sides next round.
   #debating = new Set<string>();
+  // Messages to one task are routed one at a time, in the order sent.
+  #messageChains = new Map<string, Promise<void>>();
   // QA findings waiting for their task's fix round (it continues in place),
   // and fix rounds so far per task.
   #qaFindings = new Map<string, string>();
@@ -614,8 +618,26 @@ export class Orchestrator implements CommandHandlers {
       this.#row(taskId, { role: 'system', kind: 'status', text: 'noted — both models hear it next round' });
       return;
     }
+    // The master checks who it's for first (another team's new work becomes
+    // a step of this ask, in this same window). One task's messages in order.
+    const previous = this.#messageChains.get(taskId) ?? Promise.resolve();
+    const next = previous.then(() => this.#routeMessage(taskId, message)).catch((error: unknown) => {
+      console.warn('[orchestrator] message routing failed:', error);
+    });
+    this.#messageChains.set(taskId, next);
+    void next.then(() => {
+      if (this.#messageChains.get(taskId) === next) this.#messageChains.delete(taskId);
+    });
+  }
+
+  // Where a message goes once the master has checked it's for this work:
+  // a step of this ask that's working (unless `skipSteps`), the task's own
+  // worker, a pair's chair, or a continuation of the same conversation.
+  #deliverMessage(taskId: string, message: string, opts: { skipSteps?: boolean } = {}): void {
+    const task = this.#bus.state.tasks[taskId];
+    if (!task) return;
     // A step of this ask is working right now (QA, a handover…): it reads it.
-    const step = this.#inboxes.has(taskId)
+    const step = opts.skipSteps || this.#inboxes.has(taskId)
       ? undefined
       : Object.values(this.#bus.state.tasks).find((candidate) => candidate.rootTaskId === taskId && this.#inboxes.has(candidate.id));
     if (step && this.#inboxes.get(step.id)?.push(message)) {
@@ -2335,6 +2357,7 @@ export class Orchestrator implements CommandHandlers {
     team: Team,
     requestId: string,
     card: { summary: string; command: string; options: string[]; flag: string; reason: string },
+    holdsTask = true, // the task waits on the answer (false: asked about it, it carries on)
   ): Promise<string | 'leave' | 'stopped'> {
     this.#bus.publish({
       type: 'permission.updated',
@@ -2354,12 +2377,12 @@ export class Orchestrator implements CommandHandlers {
         resolvedAt: null,
       },
     });
-    this.#patchTask(taskId, { status: 'awaiting_permission' });
+    if (holdsTask) this.#patchTask(taskId, { status: 'awaiting_permission' });
     const { decision, choice } = await new Promise<{ decision: 'approve' | 'deny'; choice?: number }>((resolve) =>
       this.#pendingResolvers.set(requestId, (decision, choice) => resolve({ decision, choice })),
     );
     if (this.#bus.state.permissions[requestId]?.status === 'expired') return 'stopped';
-    if (this.#bus.state.tasks[taskId]?.status === 'awaiting_permission') this.#patchTask(taskId, { status: 'in_flight' });
+    if (holdsTask && this.#bus.state.tasks[taskId]?.status === 'awaiting_permission') this.#patchTask(taskId, { status: 'in_flight' });
     if (decision !== 'approve' || choice === undefined) return 'leave';
     return card.options[choice] ?? 'leave';
   }
@@ -2937,6 +2960,139 @@ export class Orchestrator implements CommandHandlers {
     }
   }
 
+  // --- messages in a task's window --------------------------------------
+  // A message typed in a task's own window skips the master's routing, so
+  // the master checks who it's for (a quick check): whoever is on the work
+  // gets follow-ups, questions and corrections as before; NEW work that
+  // clearly belongs to another team becomes a step of this ask on that team
+  // — same window, same project, with the thread so far; unclear new work
+  // gets a "which team?" card. Short nudges skip the check; if the check
+  // fails the message goes where it always did — it's never lost.
+
+  async #routeMessage(taskId: string, message: string): Promise<void> {
+    const task = this.#bus.state.tasks[taskId];
+    const rootId = this.#rootOf(taskId);
+    const root = this.#bus.state.tasks[rootId];
+    const team = task?.teamId ? this.#registry.get(task.teamId) : undefined;
+    if (!task || !root || !team || message.split(/\s+/).filter(Boolean).length <= 3) return this.#deliverMessage(taskId, message);
+    const teamName = (id: string | null | undefined) => (id && this.#registry.get(id)?.name) || id || 'unassigned';
+    const steps = Object.values(this.#bus.state.tasks)
+      .filter((candidate) => candidate.rootTaskId === rootId)
+      .sort((a, b) => a.createdAt - b.createdAt);
+    // Where the message would go without the check (a step working now, or the task).
+    const workingStep = taskId === rootId ? steps.find((step) => this.#inboxes.has(step.id)) : undefined;
+    const rootTeam = (root.teamId && this.#registry.get(root.teamId)) || team;
+    let decision: ThreadMessageRoute = { route: 'same' };
+    try {
+      const spec = this.#checksModel();
+      const result = await routeThreadMessage(
+        this.#engine,
+        this.#teamsWithRules(),
+        {
+          ask: root.ownerAsk ?? root.detail,
+          team: rootTeam,
+          status: root.status,
+          report: root.synopsis,
+          steps: steps.map((step) => ({ title: step.title, team: teamName(step.teamId), status: step.status })),
+          working: workingStep
+            ? `${teamName(workingStep.teamId)} on "${workingStep.title}"`
+            : this.#inboxes.has(taskId)
+              ? `${team.name} on this task`
+              : null,
+        },
+        message,
+        spec,
+        this.#masterRules(MASTER_SECTIONS.routing),
+      );
+      this.#recordTokens(spec.tier, result.tokens);
+      decision = result.decision;
+    } catch {
+      decision = { route: 'same' };
+    }
+    if (decision.route === 'team' && decision.teamId) {
+      const target = this.#registry.get(decision.teamId);
+      const defaultTeam = workingStep?.teamId ?? task.teamId;
+      if (!target || target.id === defaultTeam) return this.#deliverMessage(taskId, message);
+      // The thread's own team while a step of another team works: the task
+      // itself takes it (not the step).
+      if (target.id === root.teamId && taskId === rootId) return this.#deliverMessage(taskId, message, { skipSteps: true });
+      this.#handOffMessage(root, target, message, decision.title ?? message.slice(0, 60), decision.instruction ?? message, decision.why ?? '');
+      return;
+    }
+    if (decision.route === 'ask') return this.#askWhichTeam(taskId, root, rootTeam, message, decision.teamIds ?? [], decision.why ?? '');
+    return this.#deliverMessage(taskId, message);
+  }
+
+  // Another team's work from the owner's thread: a new step of the ask on
+  // that team, in the same window and project, carrying the thread so far.
+  #handOffMessage(root: Task, target: Team, message: string, title: string, instruction: string, why: string): void {
+    const teamName = (id: string | null | undefined) => (id && this.#registry.get(id)?.name) || id || 'unassigned';
+    const earlier = Object.values(this.#bus.state.tasks)
+      .filter((step) => step.rootTaskId === root.id && step.synopsis)
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .slice(-3)
+      .map((step) => `- ${step.title} (${teamName(step.teamId)}): ${(step.synopsis ?? '').replace(/\s+/g, ' ').slice(0, 300)}`);
+    this.#taskCounter += 1;
+    const stepId = `t-${now().toString(36)}-${this.#taskCounter}`;
+    this.#taskDepth.set(stepId, (this.#taskDepth.get(root.id) ?? 0) + 1);
+    this.#publishTask({
+      id: stepId,
+      title: title.slice(0, 60),
+      rootTaskId: root.id,
+      detail:
+        `${instruction}\n\n` +
+        `This comes from the owner's thread "${root.title}" (${teamName(root.teamId)}), where they said: "${message.slice(0, 1500)}"\n` +
+        `The thread so far — the owner's first ask: ${(root.ownerAsk ?? root.detail).slice(0, 1000)}\n` +
+        `Latest report: ${(root.synopsis ?? '(none yet)').replace(/\s+/g, ' ').slice(0, 1000)}` +
+        (earlier.length ? `\nEarlier steps:\n${earlier.join('\n')}` : ''),
+      projectId: root.projectId,
+      teamId: target.id,
+      status: 'queued',
+      progressPct: 0,
+      agentIds: [],
+      synopsis: null,
+      tokensUsed: 0,
+      createdAt: now(),
+      updatedAt: now(),
+    });
+    this.#link(root.id, stepId, `your message went to the ${target.name}: ${title.slice(0, 60)}${why ? ` — ${why}` : ''}`);
+    this.#bus.publish({ type: 'activity', entry: { agentId: 'master', taskId: root.id, message: `routed your message to the ${target.name}: ${title.slice(0, 50)}`, at: now() } });
+    this.#startOrQueue(stepId, target, true);
+  }
+
+  // New work, but which team? The owner picks (or holds it).
+  async #askWhichTeam(taskId: string, root: Task, rootTeam: Team, message: string, teamIds: string[], why: string): Promise<void> {
+    const candidates = [...new Set(teamIds)]
+      .map((id) => this.#registry.get(id))
+      .filter((team): team is Team => !!team && team.id !== rootTeam.id)
+      .slice(0, 3);
+    if (candidates.length === 0) return this.#deliverMessage(taskId, message);
+    const keep = `${rootTeam.name} (keep it here)`;
+    const answer = await this.#askPairCard(
+      root.id,
+      rootTeam,
+      `msg-${root.id}-${now().toString(36)}`,
+      {
+        summary:
+          `Who should take this? "${message.slice(0, 140)}" reads like new work${why ? ` — ${why}` : ''}. ` +
+          `Keep it with the ${rootTeam.name}, pick a team, or None to hold it.`,
+        command: message,
+        options: [keep, ...candidates.map((team) => team.name)],
+        flag: 'which team',
+        reason: 'The master could not tell which team this message is for.',
+      },
+      false,
+    );
+    if (answer === 'stopped') return;
+    if (answer === 'leave') {
+      this.#row(root.id, { role: 'system', kind: 'status', text: 'not sent anywhere — tell me which team, or send it as a new task' });
+      return;
+    }
+    const picked = candidates.find((team) => team.name === answer);
+    if (!picked) return this.#deliverMessage(taskId, message);
+    this.#handOffMessage(root, picked, message, message.slice(0, 60), message, 'you picked the team');
+  }
+
   // --- stuck tasks ------------------------------------------------------
   // A run failed, the lead says the worker couldn't finish, or QA still
   // fails after two fix rounds: the master proposes ONE way forward (retry /
@@ -3469,7 +3625,7 @@ export class Orchestrator implements CommandHandlers {
     // and sets the task's status and project itself), rule conflicts (the
     // run records the answer and restores the task's status), stuck tasks,
     // pair disagreements.
-    if (['route-', 'project-', 'rules-', 'stuck-', 'pair-'].some((prefix) => requestId.startsWith(prefix))) {
+    if (['route-', 'project-', 'rules-', 'stuck-', 'pair-', 'msg-'].some((prefix) => requestId.startsWith(prefix))) {
       const resolve = this.#pendingResolvers.get(requestId);
       this.#pendingResolvers.delete(requestId);
       resolve?.(decision, request.options ? choice : undefined);

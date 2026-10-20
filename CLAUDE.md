@@ -103,6 +103,23 @@ npm run typecheck      # tsc across workspaces
   the working step ("now: QA team — QA check"), a trail when done, tokens
   summed — Today, Tasks, History, and the phone. Tests: `one-window.smoke`
   (in `npm run smoke`), `tools/drive-one-window.mjs`, `AsksTest`.
+- A message typed in a task's window skips the master's routing, so the
+  master checks who it's for (`routeThreadMessage` in master.ts, the quick-
+  checks model, with the thread: first ask, latest report, steps, who's
+  working): "same" (follow-ups, questions, corrections, more of the same
+  kind of work — the default) → delivered as before (`#deliverMessage`: the
+  working step, the task's worker, a pair's chair, or a continuation);
+  "team" (new work whose DELIVERABLE is another team's craft — art, sound,
+  docs, a security review… — judged by what's produced, not the feature) →
+  `#handOffMessage`: a new step of the ask on that team, same project and
+  window, its brief carrying the thread; the thread's own team while a
+  step of another team works → the task itself (`skipSteps`); "ask" → a
+  `msg-<ask>-…` pick-one card (Keep it here / teams; None holds it; the
+  task's status is untouched). Short nudges (≤3 words) skip the check; a
+  failed check delivers as before; one task's messages are routed in order
+  (`#messageChains`). Freelancer and mid-debate messages are unchanged.
+  Tests: `message-routing.smoke` (in `npm run smoke`),
+  `message-routing.live.ts [--model …]` (classification only, real roster).
 - Folder access (Settings > Hub, `access.set`, local clients only — a device's
   is dropped; `data/config.json` `accessGrants`, default: `%TEMP%\claude`,
   Claude Code's scratch folder, read & write): 'write' folders join every

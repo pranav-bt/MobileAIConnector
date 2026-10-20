@@ -978,3 +978,80 @@ export async function planRecovery(
     return { plan: null, tokens: 0 };
   }
 }
+
+// A message the owner types in a task's own window skips the master's
+// routing — so the master checks who it is for. "same": whoever is on this
+// work (follow-ups, questions, corrections — the default when in doubt);
+// "team": new work that clearly belongs to a DIFFERENT team's charter, with
+// a self-contained instruction for it; "ask": new work but no clear team.
+export interface ThreadMessageRoute {
+  route: 'same' | 'team' | 'ask';
+  teamId?: string;
+  teamIds?: string[];
+  title?: string;
+  instruction?: string;
+  why?: string;
+}
+
+export async function routeThreadMessage(
+  engine: OrchestratorEngine,
+  teams: Team[],
+  thread: {
+    ask: string; // the owner's original ask
+    team: Team; // who the thread belongs to
+    status: string;
+    report: string | null; // the latest report on it
+    steps: { title: string; team: string; status: string }[];
+    working: string | null; // "<team> on <step>" when a step is working now
+  },
+  message: string,
+  model: ModelSpec,
+  ownerRules: string[] = [],
+): Promise<{ decision: ThreadMessageRoute; tokens: number }> {
+  const prompt = [
+    'You are the master of an AI agent company. The owner is talking in the window of one task (a thread) instead of sending you a new task, so decide who should handle their new message.',
+    '',
+    'Teams:',
+    ...teams.map((team) => `- id: ${team.id}\n  name: ${team.name}\n  charter: ${team.charter}${toolsLine(team, '  ')}`),
+    '',
+    'The thread:',
+    `- The owner's first ask: "${thread.ask.slice(0, 800)}"`,
+    `- It belongs to: ${thread.team.name} (${thread.team.id}); status: ${thread.status}`,
+    `- Latest report: ${(thread.report ?? '(none yet)').replace(/\s+/g, ' ').slice(0, 600)}`,
+    ...(thread.steps.length ? ['- Steps so far:', ...thread.steps.slice(-6).map((step) => `  - ${step.title} (${step.team}, ${step.status})`)] : []),
+    `- Working right now: ${thread.working ?? 'nobody'}`,
+    '',
+    ...ownerRulesBlock(ownerRules, "The owner's rules for picking teams (follow them):"),
+    `The owner now says: "${message.slice(0, 2000)}"`,
+    '',
+    'Decide by what the message asks to be PRODUCED, not by which feature it is about: more of the same kind of work, a question about it, or a',
+    "correction is for the team already on it; a deliverable that is another team's craft per its charter (art or icons, sounds or music,",
+    'docs or patch notes, a security review…) goes to that team even when it is about this same feature.',
+    '',
+    'Reply with ONLY JSON, one of:',
+    '{"route": "same"} — a follow-up, a question, a correction, or more of the same kind of work for whoever is already on it. If it could honestly go either way, it is "same".',
+    '{"route": "team", "teamId": "<team id>", "title": "<short imperative title, max 60 chars>", "instruction": "<what that team must do — self-contained: include the facts from the thread it needs>", "why": "<one sentence>"} — the message asks for NEW work whose deliverable is a different team\'s craft.',
+    '{"route": "ask", "teamIds": ["<team id>", "..."], "why": "<one sentence>"} — it is new work for another team but you cannot tell which one.',
+  ].join('\n');
+  const { text, tokens } = await engine.complete({ prompt, model });
+  const raw = lastJsonObject(text, (value) => typeof value['route'] === 'string');
+  const known = new Set(teams.map((team) => team.id));
+  const str = (value: unknown, max: number) => (typeof value === 'string' ? value.trim().slice(0, max) : '');
+  if (raw?.['route'] === 'team' && typeof raw['teamId'] === 'string' && known.has(raw['teamId'])) {
+    return {
+      decision: {
+        route: 'team',
+        teamId: raw['teamId'],
+        title: str(raw['title'], 60) || message.slice(0, 60),
+        instruction: str(raw['instruction'], 2000) || message,
+        why: str(raw['why'], 200),
+      },
+      tokens,
+    };
+  }
+  if (raw?.['route'] === 'ask') {
+    const teamIds = Array.isArray(raw['teamIds']) ? raw['teamIds'].filter((id): id is string => typeof id === 'string' && known.has(id)) : [];
+    return { decision: { route: 'ask', teamIds, why: str(raw['why'], 200) }, tokens };
+  }
+  return { decision: { route: 'same' }, tokens };
+}

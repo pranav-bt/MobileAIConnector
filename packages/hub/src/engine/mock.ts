@@ -7,6 +7,20 @@ import type { LockedDir } from '../orchestrator/util.js';
 // keyword, "installs" trigger a permission request, everything resolves fast.
 export class MockEngine implements OrchestratorEngine {
   async complete(args: { prompt: string; model: ModelSpec }): Promise<{ text: string; tokens: number }> {
+    // The master's check on a message in a task's window: "<team>-request"
+    // is new work for that team, "unclear-request" asks which team,
+    // "classify-fail" makes the check fail; anything else is "same".
+    if (args.prompt.includes('talking in the window of one task')) {
+      const said = args.prompt.match(/The owner now says: "([\s\S]*?)"\n/)?.[1] ?? '';
+      if (said.includes('classify-fail')) throw new Error('mock: the routing check failed');
+      const teamIds = [...args.prompt.matchAll(/^- id: ([a-z0-9-]+)/gm)].map((match) => match[1] ?? '');
+      if (said.includes('unclear-request')) return { text: JSON.stringify({ route: 'ask', teamIds: teamIds.slice(1, 3), why: 'mock: could be either' }), tokens: 3 };
+      const wanted = said.match(/\b([a-z]+)-request\b/)?.[1];
+      if (wanted && teamIds.includes(wanted)) {
+        return { text: JSON.stringify({ route: 'team', teamId: wanted, title: `Mock: ${said.slice(0, 40)}`, instruction: `Do what the owner asked: ${said}`, why: `mock: it's ${wanted} work` }), tokens: 3 };
+      }
+      return { text: JSON.stringify({ route: 'same' }), tokens: 3 };
+    }
     // A pair task's chair: a question ("…?") is answered, anything else is
     // handed to the author as work.
     if (args.prompt.includes('You chair a pair task')) {

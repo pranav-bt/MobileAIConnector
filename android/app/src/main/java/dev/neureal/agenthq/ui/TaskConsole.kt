@@ -171,8 +171,9 @@ fun TaskConsoleScreen(snapshot: Snapshot, taskId: String, onRespond: (Permission
                     Text(
                         when {
                             !canSend -> "This task never reached a team"
-                            task!!.status in RUNNING -> "Message the worker…"
-                            task.status in setOf("done", "failed", "paused") -> "Continue this task…"
+                            // another team's work is routed to that team by the master
+                            task!!.status in RUNNING -> "Message the worker (or another team)…"
+                            task.status in setOf("done", "failed", "paused") -> "Continue, or ask another team…"
                             else -> "Add to the brief…"
                         },
                         color = HQ.faint, fontSize = 12.sp,

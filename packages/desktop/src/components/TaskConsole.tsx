@@ -358,12 +358,12 @@ export function TaskConsole(props: {
     : running
       ? currentStep
         ? `Message the ${state.teams[currentStep.teamId ?? '']?.name ?? 'step'} worker — it reads it at its next step`
-        : 'Message the worker — it reads it at its next step'
+        : "Message the worker — it reads it at its next step (another team's work goes to that team)"
       : ['done', 'failed', 'paused'].includes(task.status)
         ? task.pair
           ? 'Ask the chair (the lead) — a question gets an answer; a change goes back to the pair'
           : task.session
-          ? 'Continue this task — same conversation, it remembers'
+          ? "Continue this task — same conversation, it remembers (another team's work goes to that team)"
           : 'Continue this task (starts a new run with its history)'
         : 'Add to the brief — the worker gets it when it starts';
   const sendDraft = () => {
