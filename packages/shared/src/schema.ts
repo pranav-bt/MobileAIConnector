@@ -254,6 +254,30 @@ export const AccessGrantSchema = z.object({
 });
 export type AccessGrant = z.infer<typeof AccessGrantSchema>;
 
+// A desktop app the owner added (Settings > Apps) that teams can be granted
+// like an MCP connection: Agent HQ's app bridge (packages/hub/apps) serves it
+// to the worker — open (its window) / close / run (as a command-line tool),
+// and for Blender a live Python (bpy) session, renders and a scene summary.
+// It opens when a worker needs it and closes when the worker says so, after
+// idleMinutes, or when the worker's session ends; it only ever closes what it
+// opened. The id is the connection name teams are granted.
+export const AppKindSchema = z.enum(['blender', 'generic']);
+export const AppSchema = z.object({
+  id: z.string().min(1).max(40),
+  name: z.string().min(1).max(60),
+  exePath: z.string().min(1).max(500),
+  args: z.array(z.string().max(500)).max(20).default([]), // always passed first
+  kind: AppKindSchema,
+  visible: z.boolean().default(true), // false = Blender runs in the background (-b), other apps hidden
+  idleMinutes: z.number().int().min(1).max(240).default(10),
+  notes: z.string().max(1000).default(''), // shown to the worker with the tools
+  createdAt: z.number(),
+});
+export type App = z.infer<typeof AppSchema>;
+// An install found on this PC that isn't added yet (offered with an Add button).
+export const AppSuggestionSchema = z.object({ name: z.string(), exePath: z.string(), kind: AppKindSchema });
+export type AppSuggestion = z.infer<typeof AppSuggestionSchema>;
+
 export function isInternalTask(task: Pick<Task, 'parentTaskId'>): boolean {
   return !!task.parentTaskId;
 }
@@ -481,6 +505,9 @@ export const HubInfoSchema = z.object({
   mcpCatalog: z.array(z.string()).optional(),
   // Folders the owner opened to every worker (Settings > Hub).
   accessGrants: z.array(AccessGrantSchema).optional(),
+  // Desktop apps teams can be granted (their ids are in mcpCatalog too).
+  apps: z.array(AppSchema).optional(),
+  appSuggestions: z.array(AppSuggestionSchema).optional(),
 });
 export type HubInfo = z.infer<typeof HubInfoSchema>;
 

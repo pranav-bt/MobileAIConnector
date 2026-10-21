@@ -213,6 +213,27 @@ try {
   }
   console.log('mcp ok: exactly the team grants');
 
+  // 3b. Codex asks before every MCP tool call: a granted connection runs
+  // without a card (like Claude's MCP tools), another server asks the
+  // policy (denied here), and a server's own form is declined.
+  const mcpAsked: string[] = [];
+  const mcpActivity: string[] = [];
+  const mcpRun = await engine.runWorker({
+    prompt: 'fake-mcp please',
+    team: team({ blender: { type: 'stdio', command: process.execPath, args: ['app-bridge.mjs', '--app', 'blender'] } }),
+    model,
+    cwd: project,
+    callbacks: {
+      onActivity: (line) => mcpActivity.push(line),
+      onTokens: () => {},
+      onPermission: async (request) => (mcpAsked.push(`${request.toolName}: ${request.command}`), 'deny'),
+    },
+  });
+  if (!mcpRun.synopsis.includes('blender:accept, Other:decline, blender:decline')) fail(`MCP approvals: ${mcpRun.synopsis}`);
+  if (mcpAsked.length !== 1 || !mcpAsked[0]!.startsWith('mcp__Other: Allow the Other MCP server')) fail(`MCP policy asks: ${JSON.stringify(mcpAsked)}`);
+  if (!mcpActivity.some((line) => line.startsWith("blender asked for input — declined"))) fail('a form from an MCP server was not reported');
+  console.log('mcp approvals ok: granted tools run, other servers ask, forms declined');
+
   // 4. A failed turn surfaces as an error (the stuck pass reads the message).
   const failed = await engine
     .runWorker({ prompt: 'fake-fail', team: team(), model, cwd: project, callbacks: { onActivity: () => {}, onTokens: () => {}, onPermission: async () => 'approve' } })

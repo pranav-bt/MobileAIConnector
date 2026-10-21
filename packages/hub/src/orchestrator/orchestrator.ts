@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { MODEL_DEFAULTS, PAIR_REVIEWER_DEFAULT, catalogModel, isInternalTask, isLiveStatus, stepKind, parseExchange, parseVerdict, resolveModel, rulesFor, toolName, type AccessGrant, type Agent, type EngineId, type ModelChoice, type PairMode, type PairVerdict, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
+import { MODEL_DEFAULTS, PAIR_REVIEWER_DEFAULT, catalogModel, isInternalTask, isLiveStatus, stepKind, parseExchange, parseVerdict, resolveModel, rulesFor, toolName, type AccessGrant, type Agent, type ClientCommand, type EngineId, type ModelChoice, type PairMode, type PairVerdict, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from '../engine/types.js';
@@ -41,6 +41,7 @@ import type { PermissionMode } from '../config.js';
 import { parseRules, type ParsedRules, type TeamRegistry } from './teams.js';
 import { slugify, type ProjectRegistry } from './projects.js';
 import type { TranscriptRow, TranscriptStore } from '../transcripts.js';
+import { isAppBridge, type AppRegistry } from '../apps.js';
 import { MessageInbox } from '../engine/inbox.js';
 
 // The real thing: master intake -> team lead -> worker -> lead review ->
@@ -221,6 +222,10 @@ export class Orchestrator implements CommandHandlers {
   #rulesTimer: NodeJS.Timeout | null = null;
   #onInfoChange: () => void = () => {};
   #mcpCatalog: () => Record<string, unknown> = () => ({});
+  // Desktop apps the owner added (Settings > Apps) — connections like the
+  // catalog's, served by Agent HQ's app bridge.
+  #apps: AppRegistry | null = null;
+  #onAppsChange: () => void = () => {};
   // The MCP servers set up for a project folder in Claude Code (engine-provided).
   #projectMcp: (cwd: string) => { servers: Record<string, unknown>; unapproved: string[] } = () => ({ servers: {}, unapproved: [] });
   // Stuck tasks the master already ran a recovery pass for (one per task).
@@ -404,7 +409,8 @@ export class Orchestrator implements CommandHandlers {
   // .mcp.json ones the owner approved) — so a Roblox project's workers reach
   // Studio whatever their team. The team's grant wins on a name clash.
   // `announce` says what was added (and what an unapproved .mcp.json asked for).
-  #workerTeam(team: Team, cwd: string, taskId: string | null, announce: boolean): Team {
+  #workerTeam(team: Team, cwd: string, taskId: string | null, announce: boolean, readOnly = false): Team {
+    team = this.#withApps(team, readOnly);
     let project: { servers: Record<string, unknown>; unapproved: string[] };
     try {
       project = this.#projectMcp(cwd);
@@ -421,8 +427,81 @@ export class Orchestrator implements CommandHandlers {
     return added.length ? { ...team, mcpServers: { ...project.servers, ...(team.mcpServers ?? {}) } } : team;
   }
 
+  // App grants always run the bridge for the app as it is set up NOW (the
+  // record is read when the bridge starts); a reviewer's is read-only (no
+  // Python, no command runs). A grant whose app was removed is dropped.
+  #withApps(team: Team, readOnly: boolean): Team {
+    let changed = false;
+    const mcpServers: Record<string, unknown> = {};
+    for (const [name, config] of Object.entries(team.mcpServers ?? {})) {
+      const app = this.#apps?.get(name);
+      if (app) {
+        mcpServers[name] = this.#apps!.serverConfig(app.id, readOnly);
+        changed = true;
+      } else if (isAppBridge(config)) {
+        changed = true;
+      } else {
+        mcpServers[name] = config;
+      }
+    }
+    return changed ? { ...team, mcpServers } : team;
+  }
+
+  // Everything a team can be granted: the PC's MCP servers + the apps.
+  #catalog(): Record<string, unknown> {
+    return { ...this.#mcpCatalog(), ...(this.#apps?.catalog() ?? {}) };
+  }
+
   mcpCatalogNames(): string[] {
-    return Object.keys(this.#mcpCatalog()).sort();
+    return Object.keys(this.#catalog()).sort();
+  }
+
+  configureApps(apps: AppRegistry, onChange: () => void): void {
+    this.#apps = apps;
+    this.#onAppsChange = onChange;
+  }
+
+  addApp(command: Omit<Extract<ClientCommand, { type: 'app.add' }>, 'type'>): void {
+    if (!this.#apps) return;
+    try {
+      const app = this.#apps.add(command, (id) => id in this.#mcpCatalog());
+      this.#activity('master', null, `apps: added ${app.name} — grant it to a team on the Teams page (connection "${app.id}")`);
+      this.#onAppsChange();
+    } catch (error) {
+      this.#activity('master', null, `apps: couldn't add ${command.name} — ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  updateApp(command: Omit<Extract<ClientCommand, { type: 'app.update' }>, 'type'>): void {
+    if (!this.#apps) return;
+    try {
+      const app = this.#apps.update(command);
+      this.#activity('master', null, `apps: ${app.name} updated (applies the next time a worker opens it)`);
+      this.#onAppsChange();
+    } catch (error) {
+      this.#activity('master', null, `apps: couldn't update ${command.appId} — ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  // Removing an app takes its grant off every team.
+  removeApp(ref: string): void {
+    const app = this.#apps?.remove(ref);
+    if (!app) {
+      this.#activity('master', null, `apps: no app called "${ref}"`);
+      return;
+    }
+    const teams: string[] = [];
+    for (const team of this.#registry.all()) {
+      if (!(app.id in (team.mcpServers ?? {}))) continue;
+      const { [app.id]: _removed, ...rest } = team.mcpServers;
+      const updated = this.#registry.update({ teamId: team.id, mcpServers: rest });
+      if (updated) {
+        this.#publishTeam(updated);
+        teams.push(team.name);
+      }
+    }
+    this.#activity('master', null, `apps: removed ${app.name}${teams.length ? ` (and from ${teams.join(', ')})` : ''}`);
+    this.#onAppsChange();
   }
 
   setTeamMcp(teamRef: string, names: string[]): void {
@@ -431,7 +510,7 @@ export class Orchestrator implements CommandHandlers {
       this.#activity('master', null, `no team called "${teamRef}" — connections unchanged`);
       return;
     }
-    const catalog = this.#mcpCatalog();
+    const catalog = this.#catalog();
     const wanted = [...new Set(names)];
     const unknown = wanted.filter((name) => !(name in catalog) && !(name in team.mcpServers));
     // A grant already on the record (e.g. set up by tools/setup-teams.mjs)
@@ -787,6 +866,26 @@ export class Orchestrator implements CommandHandlers {
       'Folders the owner opened to you (beyond your project):',
       ...write.map((path) => `- read & write: ${path}`),
       ...read.map((path) => `- read only: ${path}`),
+    ].join('\n');
+  }
+
+  // What workers are told about the desktop apps their team was granted.
+  #appsNote(teamId: string | null | undefined): string {
+    const team = teamId ? this.#registry.get(teamId) : undefined;
+    const apps = Object.keys(team?.mcpServers ?? {}).flatMap((name) => this.#apps?.get(name) ?? []);
+    if (apps.length === 0) return '';
+    return [
+      'Desktop apps you can use (their tools are mcp__<id>__…):',
+      ...apps.map(
+        (app) =>
+          `- ${app.name} (${app.id}): ` +
+          (app.kind === 'blender'
+            ? 'python (bpy) for modelling, materials and animation; render to look at your work; scene for what is in the file'
+            : 'open it (with a file), or run it as a command-line tool') +
+          (app.notes ? ` — the owner's notes: ${app.notes}` : ''),
+      ),
+      'An app opens when one of its tools first needs it. Close it when you are done (it also closes when idle and when your session ends). ' +
+        'Save what you make into your project (absolute paths).',
     ].join('\n');
   }
 
@@ -1231,6 +1330,8 @@ export class Orchestrator implements CommandHandlers {
     if (integrationBrief) sections.push('', integrationBrief);
     const access = this.#accessNote();
     if (access) sections.push('', access);
+    const apps = this.#appsNote(task.teamId);
+    if (apps) sections.push('', apps);
     const history = Object.values(this.#bus.state.tasks)
       .filter((t) => t.projectId === task.projectId && t.status === 'done' && t.id !== task.id && t.synopsis && !isInternalTask(t))
       .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -2286,7 +2387,7 @@ export class Orchestrator implements CommandHandlers {
       return this.#engine.runWorker({
         prompt,
         title: `${kind.toLowerCase()}: ${title}`,
-        team: this.#workerTeam(team, ctx.scope.cwd, null, false),
+        team: this.#workerTeam(team, ctx.scope.cwd, null, false, true),
         model: spec,
         cwd: ctx.scope.cwd,
         extraDirs: ctx.scope.extraDirs,

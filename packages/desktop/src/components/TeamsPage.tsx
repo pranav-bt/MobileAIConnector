@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { ClientCommand, HubState, Team } from '@agent-hq/shared';
+import type { App, ClientCommand, HubState, Team } from '@agent-hq/shared';
 import { parseRules } from '@agent-hq/shared';
 
 // The owner's RULES.md files: one per team (rules + tools, in every
@@ -157,9 +157,10 @@ function MasterRules(props: { state: HubState; send: Send }): JSX.Element {
   );
 }
 
-function Connections(props: { team: Team; catalog: string[]; send: Send }): JSX.Element {
+function Connections(props: { team: Team; catalog: string[]; apps: App[]; send: Send }): JSX.Element {
   const granted = Object.keys(props.team.mcpServers ?? {});
   const names = [...new Set([...props.catalog, ...granted])].sort();
+  const appName = (name: string): string | undefined => props.apps.find((app) => app.id === name)?.name;
   const toggle = (name: string): void => {
     const next = granted.includes(name) ? granted.filter((entry) => entry !== name) : [...granted, name];
     props.send({ type: 'team.mcp.set', teamId: props.team.id, servers: next });
@@ -168,7 +169,7 @@ function Connections(props: { team: Team; catalog: string[]; send: Send }): JSX.
     <div className="tcard" style={{ padding: 16 }}>
       <div className="sect" style={{ margin: 0 }}>Connections (MCP)</div>
       <div className="act" style={{ color: 'var(--faint)', marginTop: 4 }}>
-        servers set up for Claude Code on this PC. {props.team.name} workers get the ones ticked, in every project — plus,
+        servers set up for Claude Code on this PC, and the apps added in Settings &gt; Apps. {props.team.name} workers get the ones ticked, in every project — plus,
         like Claude Code opened in that folder, the servers set up for the project they're working in (its own, and its
         .mcp.json ones you approved).
       </div>
@@ -178,7 +179,8 @@ function Connections(props: { team: Team; catalog: string[]; send: Send }): JSX.
         names.map((name) => (
           <label key={name} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, fontSize: 12, cursor: 'pointer' }}>
             <input type="checkbox" checked={granted.includes(name)} onChange={() => toggle(name)} />
-            <span style={{ color: granted.includes(name) ? 'var(--text)' : 'var(--text-2)' }}>{name}</span>
+            <span style={{ color: granted.includes(name) ? 'var(--text)' : 'var(--text-2)' }}>{appName(name) ?? name}</span>
+            {appName(name) && <span className="act" style={{ color: 'var(--accent)' }}>app</span>}
             {!props.catalog.includes(name) && <span className="act" style={{ color: 'var(--amber)' }}>not configured on this PC</span>}
           </label>
         ))
@@ -221,7 +223,7 @@ function TeamRules(props: { team: Team; state: HubState; send: Send }): JSX.Elem
           <BulletList items={parsed.tools} empty="none listed" />
           <QuickAdd targetId={team.id} section="tools" placeholder="magick (ImageMagick CLI): resize and convert images" send={send} />
         </div>
-        <Connections team={team} catalog={props.state.info.mcpCatalog ?? []} send={send} />
+        <Connections team={team} catalog={props.state.info.mcpCatalog ?? []} apps={props.state.info.apps ?? []} send={send} />
       </div>
 
       <div className="tcard" style={{ padding: 16 }}>

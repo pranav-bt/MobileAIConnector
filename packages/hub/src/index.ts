@@ -25,6 +25,7 @@ import { CodexEngine } from './engine/codex.js';
 import { findCodexBinary } from './engine/codex-rpc.js';
 import { EngineRouter } from './engine/router.js';
 import { TranscriptStore } from './transcripts.js';
+import { AppRegistry } from './apps.js';
 
 export interface HubOptions {
   port?: number;
@@ -44,6 +45,7 @@ export interface HubOptions {
   paTickMs?: number; // tests speed up the PA desk clock
   claudeConfigPath?: string; // tests override ~/.claude.json (the MCP catalog)
   generalDir?: string; // tests override ~/AgentHQ/General (the General workspace)
+  detectApps?: () => string[]; // tests override the Blender install scan
 }
 
 export interface RunningHub {
@@ -109,6 +111,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   let transcripts: TranscriptStore | null = null;
   let masterRules = (): string => '';
   let mcpCatalog = (): string[] => [];
+  let apps: AppRegistry | null = null;
   let workerCwds: () => string[] = () => [];
   let attachFreelancers: (manager: FreelancerManager) => void = () => {};
   const mode: 'demo' | 'claude' | 'mock' =
@@ -151,6 +154,8 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
       () => readMcpCatalog(options.claudeConfigPath),
       (cwd) => projectMcpServers(cwd, options.claudeConfigPath),
     );
+    apps = new AppRegistry(dataDir, options.detectApps);
+    orchestrator.configureApps(apps, () => bus.publish({ type: 'hub.updated', info: makeInfo() }));
     orchestrator.configureAccess(
       accessGrants,
       (grants) => {
@@ -205,6 +210,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     masterRules: masterRules(),
     mcpCatalog: mcpCatalog(),
     accessGrants,
+    ...(apps ? { apps: apps.list(), appSuggestions: apps.suggestions() } : {}),
   });
   bus.publish({ type: 'hub.updated', info: makeInfo() });
 

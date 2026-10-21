@@ -84,6 +84,36 @@ npm run typecheck      # tsc across workspaces
   program the hub starts). Teams chartered for web work (`web` in allowedTools)
   browse without permission cards in auto mode. Roster setup lives in
   `tools/setup-teams.mjs` (idempotent, talks to the running hub).
+- Apps (Settings > Apps; `data/apps.json`, `AppRegistry` in apps.ts) are
+  desktop programs the owner adds (`app.add`/`app.update`/`app.remove`,
+  local clients only — an app is a program the hub starts) and grants to
+  teams like an MCP server: the app id is in `HubInfo.mcpCatalog`
+  (`team.mcp.set`), records on `HubInfo.apps`, detected Blender installs on
+  `appSuggestions` (Blender's id is always `blender`, so its tools read
+  `mcp__blender__…`). A grant runs Agent HQ's app bridge
+  (`packages/hub/apps/app-bridge.mjs`, a dependency-free MCP stdio server)
+  that reads the app's record when it starts — `#withApps` rebuilds every app
+  grant from the registry per run (edits need no re-grant; removed apps
+  drop; removing an app strips it from teams). Tools: status / open (a file)
+  / close / run (CLI mode, output captured); Blender adds python (bpy,
+  variables persist), render (PNG returned as an image; a temporary
+  camera/light when the scene has none, all restored) and scene, through
+  `apps/blender_bridge.py` inside Blender (127.0.0.1 socket + per-session
+  token; with a window a timer drains requests on the main thread, `-b` runs
+  a loop; it quits when the bridge's process dies — never `os.kill(pid, 0)`
+  on Windows). The app opens on first need and closes on `close`, after
+  `idleMinutes`, or when the worker's session ends — only what the bridge
+  opened. Reviewer seats get `--read-only` (no python, no run, no open
+  args). Workers are told their apps in the brief (`#appsNote`). App tools
+  run without cards like any MCP tool (the Settings card says so: grant
+  them to teams you'd trust with a shell). Codex asks before EVERY MCP tool
+  call (`mcpServer/elicitation/request`, `codex_approval_kind:
+  mcp_tool_call`): a granted server's call is accepted, any other server's
+  goes through the policy, a server's own form is declined. Tests:
+  `apps.smoke` (in `npm run smoke`), `blender-app.live.ts [--visible]` (real
+  Blender, no model), `apps-worker.live.ts [--model gpt-6.1-sol]` (a real Art
+  worker with no shell models, renders, saves and closes Blender),
+  `probe-codex-mcp-approval.ts`, UI driver `tools/drive-apps.mjs`.
 - Interdisciplinary flow is master-driven: after every completed report the
   master runs a coordination pass (haiku) and may dispatch follow-up tasks to
   other teams (leads huddle in the Meeting room); QA reports get a verdict

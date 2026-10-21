@@ -4,6 +4,7 @@
 // What a turn does is chosen by a keyword in its input text:
 //   fake-work  a wrapped shell command, an in-project edit, an edit outside
 //              the project, an edit into data/ — each asks for approval
+//   fake-mcp   MCP tool-call approvals (granted / other server) + a plain form
 //   fake-fail  the turn fails with a usage-limit error
 //   fake-slow  a long command that only ends when the turn is interrupted
 //   (other)    one agent message echoing the input
@@ -63,6 +64,25 @@ async function runTurn(threadId, turnId, text) {
     await item({ type: 'fileChange', id: `edit-out-${turnId}`, changes: [{ path: `${cwd}${sep}..${sep}elsewhere${sep}x.txt`, kind: 'add', diff: '+x' }], status: 'inProgress' }, 'item/fileChange/requestApproval');
     await item({ type: 'fileChange', id: `edit-data-${turnId}`, changes: [{ path: `${cwd}${sep}data${sep}secret.txt`, kind: 'add', diff: '+x' }], status: 'inProgress' }, 'item/fileChange/requestApproval');
     finish('completed', null, `fake work done: ${decisions.join(', ')}`);
+    return;
+  }
+  // "fake-mcp": Codex asks before MCP tool calls (as the real one does for
+  // a worker): a granted server's call, another server's, then a plain form.
+  if (text.includes('fake-mcp')) {
+    const actions = [];
+    for (const [server, approval] of [['blender', true], ['Other', true], ['blender', false]]) {
+      const answer = await ask('mcpServer/elicitation/request', {
+        threadId,
+        turnId,
+        serverName: server,
+        mode: 'form',
+        message: approval ? `Allow the ${server} MCP server to run tool "python"?` : 'Pick a colour',
+        requestedSchema: { type: 'object', properties: {} },
+        ...(approval ? { _meta: { codex_approval_kind: 'mcp_tool_call', tool_params: {} } } : {}),
+      });
+      actions.push(`${server}:${answer.action}`);
+    }
+    finish('completed', null, `fake mcp done: ${actions.join(', ')}`);
     return;
   }
   if (text.includes('fake-fail')) {

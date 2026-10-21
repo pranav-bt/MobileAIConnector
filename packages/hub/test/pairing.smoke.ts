@@ -240,6 +240,16 @@ try {
   }
   console.log('device folder access refused: only the PC can open folders to workers');
 
+  // 4e. Same for apps: a device can't add a program for the hub to start.
+  const appUpdatesBefore = events.filter((e) => e.type === 'hub.updated').length;
+  phone.send(sealed.seal(encodeCommand({ type: 'app.add', name: 'Phone app', exePath: process.execPath })));
+  phone.send(sealed.seal(encodeCommand({ type: 'app.remove', appId: 'anything' })));
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  if (events.filter((e) => e.type === 'hub.updated').slice(appUpdatesBefore).some((e) => e.type === 'hub.updated' && (e.info.apps?.length ?? 0) > 0)) {
+    fail('a paired device added an app');
+  }
+  console.log('device apps refused: only the PC can add apps for workers');
+
   // 5. Kill switch: session drops, device unpinned, reconnect refused.
   local.send(encodeCommand({ type: 'device.revoke' }));
   await phoneClosed;

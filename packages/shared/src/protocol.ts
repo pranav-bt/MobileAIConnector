@@ -110,6 +110,28 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
   // The folders every worker may read / write (local clients only: a device
   // session can't open folders to agents).
   z.object({ type: z.literal('access.set'), grants: z.array(AccessGrantSchema).max(50) }),
+  // Desktop apps teams can use (Settings > Apps). Local clients only — an
+  // app is a program the hub starts. A team gets one with team.mcp.set (its id).
+  z.object({
+    type: z.literal('app.add'),
+    name: z.string().min(1).max(60),
+    exePath: z.string().min(1).max(500),
+    args: z.array(z.string().max(500)).max(20).optional(),
+    visible: z.boolean().optional(),
+    idleMinutes: z.number().int().min(1).max(240).optional(),
+    notes: z.string().max(1000).optional(),
+  }),
+  z.object({
+    type: z.literal('app.update'),
+    appId: z.string().min(1),
+    name: z.string().min(1).max(60).optional(),
+    exePath: z.string().min(1).max(500).optional(),
+    args: z.array(z.string().max(500)).max(20).optional(),
+    visible: z.boolean().optional(),
+    idleMinutes: z.number().int().min(1).max(240).optional(),
+    notes: z.string().max(1000).optional(),
+  }),
+  z.object({ type: z.literal('app.remove'), appId: z.string().min(1) }),
   // Move a file across the link. From the desktop (default) it broadcasts
   // out to the phone; from: 'phone' routes it INTO the hub's inbox on disk,
   // where workers can pick it up.

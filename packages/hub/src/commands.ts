@@ -49,6 +49,9 @@ export interface CommandHandlers {
   setModels(overrides: ModelOverrides): void;
   // Folders every worker may read / write (the demo hub has no workers).
   setAccessGrants?(grants: AccessGrant[]): void;
+  addApp?(command: Omit<Extract<ClientCommand, { type: 'app.add' }>, 'type'>): void;
+  updateApp?(command: Omit<Extract<ClientCommand, { type: 'app.update' }>, 'type'>): void;
+  removeApp?(appId: string): void;
 }
 
 export function dispatchCommand(handlers: CommandHandlers, command: ClientCommand): void {
@@ -108,6 +111,16 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
       return handlers.setModels(command.overrides);
     case 'access.set':
       return handlers.setAccessGrants?.(command.grants);
+    case 'app.add': {
+      const { type: _type, ...rest } = command;
+      return handlers.addApp?.(rest);
+    }
+    case 'app.update': {
+      const { type: _type, ...rest } = command;
+      return handlers.updateApp?.(rest);
+    }
+    case 'app.remove':
+      return handlers.removeApp?.(command.appId);
     case 'pairing.start':
     case 'pairing.cancel':
     case 'device.revoke':

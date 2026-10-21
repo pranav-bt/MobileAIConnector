@@ -111,6 +111,12 @@ export function startServer(
           case 'access.set':
             if (mode !== 'plain' || !local) return;
             break;
+          // An app is a program the hub starts for workers — added from the PC only.
+          case 'app.add':
+          case 'app.update':
+          case 'app.remove':
+            if (mode !== 'plain' || !local) return;
+            break;
           case 'team.create':
           case 'team.update':
             if ((mode !== 'plain' || !local) && command.mcpServers) {

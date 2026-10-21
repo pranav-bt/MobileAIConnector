@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import type { ModelSpec, Team } from '@agent-hq/shared';
 import type { OrchestratorEngine, WorkerInbox, WorkerRunCallbacks, WorkerRunResult } from './types.js';
 import type { LockedDir } from '../orchestrator/util.js';
+import { isAppBridge } from '../apps.js';
 
 // Deterministic engine for tests and offline development: routes by team-id
 // keyword, "installs" trigger a permission request, everything resolves fast.
@@ -213,6 +214,16 @@ export class MockEngine implements OrchestratorEngine {
   #sessions = new Map<string, string[]>();
   #sessionCounter = 0;
 
+  // Makes app grants observable: which run the app bridge, and read-only ones.
+  #appsLine(args: { team: Team; prompt: string; callbacks: WorkerRunCallbacks }): void {
+    const bridges = Object.entries(args.team.mcpServers ?? {}).filter(([, config]) => isAppBridge(config));
+    if (bridges.length === 0) return;
+    args.callbacks.onActivity(
+      `mock: apps [${bridges.map(([name, config]) => `${name}${(config as { args: string[] }).args.includes('--read-only') ? ' read-only' : ''}`).join('|')}]` +
+        (args.prompt.includes('Desktop apps you can use') ? ' · told' : ''),
+    );
+  }
+
   async runWorker(args: {
     prompt: string;
     team: Team;
@@ -317,6 +328,7 @@ export class MockEngine implements OrchestratorEngine {
     }
     if (args.readOnly) {
       callbacks.onActivity(`mock: read-only review · engine ${args.model.engine}${args.resumeSessionId ? ' · resumed' : ''}`);
+      this.#appsLine(args);
       const reviewsBefore = memory.filter((line) => line === 'REVIEW').length;
       memory.push('REVIEW');
       const lower = args.prompt.toLowerCase();
@@ -390,6 +402,7 @@ export class MockEngine implements OrchestratorEngine {
     const toolsBlock = args.prompt.split('Tools your team has')[1];
     if (toolsBlock !== undefined) callbacks.onActivity(`mock: team tools ${bullets(toolsBlock)}`);
     callbacks.onActivity(`mock: mcp [${Object.keys(args.team.mcpServers ?? {}).join('|')}]`);
+    this.#appsLine(args);
     // Makes the folders the owner opened (Settings > Hub) observable.
     if (args.prompt.includes('Folders the owner opened to you')) {
       callbacks.onActivity(`mock: opened folders ${(args.prompt.match(/^- (read & write|read only): /gm) ?? []).length}`);

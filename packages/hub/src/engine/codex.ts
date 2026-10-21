@@ -405,6 +405,25 @@ export class CodexEngine implements OrchestratorEngine {
           callbacks.onActivity('asked a question mid-task — answered "decide yourself and say so in your report"');
           return { answers: {} };
         }
+        if (method === 'mcpServer/elicitation/request') {
+          const server = String(request['serverName'] ?? '');
+          if ((request['_meta'] as JsonObject | undefined)?.['codex_approval_kind'] === 'mcp_tool_call') {
+            // Codex asks before every MCP tool call. A connection the team
+            // was granted runs without a card, as Claude workers' MCP tools
+            // do (an app's bridge enforces its own read-only mode); any other
+            // server (an owner thread's own) goes through the policy.
+            if (!foreign && server in (args.team.mcpServers ?? {})) return { action: 'accept', content: {} };
+            const decision = await callbacks.onPermission({
+              toolName: `mcp__${server}`,
+              command: String(request['message'] ?? `${server} tool call`),
+              reason: `Requested while working in ${args.cwd}`,
+            });
+            return decision === 'approve' ? { action: 'accept', content: {} } : { action: 'decline' };
+          }
+          callbacks.onActivity(`${server} asked for input — declined (a worker can't fill in an MCP server's form)`);
+          return { action: 'decline' };
+        }
+        if (process.env['AGENT_HQ_CODEX_DEBUG']) console.error(`[codex] unanswered ${method}: ${JSON.stringify(request).slice(0, 3000)}`);
         return {};
       },
     };

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { ClientCommand, HubState } from '@agent-hq/shared';
 import { DEFAULT_HUB_PORT } from '@agent-hq/shared';
 import { HUB_URL_STORAGE_KEY, currentHubUrl } from '../hub';
+import { AppsCard } from './AppsCard';
 import { FolderAccess } from './FolderAccess';
 import { ModelsCard } from './ModelsCard';
 
@@ -59,6 +60,8 @@ export function SettingsPage(props: { state: HubState; send: (command: ClientCom
           </div>
         )}
       </div>
+
+      {info.mode !== 'demo' && <AppsCard state={props.state} send={props.send} />}
 
       <div className="tcard" style={{ padding: 16 }}>
         <div className="sect">This client</div>
