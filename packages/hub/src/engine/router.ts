@@ -18,6 +18,10 @@ export class EngineRouter implements OrchestratorEngine {
     return this.#available[engine] ?? true;
   }
 
+  observeUsage(onCacheRead: (tokens: number) => void): void {
+    for (const engine of new Set(Object.values(this.#engines))) engine.observeUsage?.(onCacheRead);
+  }
+
   engine(id: EngineId): OrchestratorEngine {
     return this.#engines[id];
   }

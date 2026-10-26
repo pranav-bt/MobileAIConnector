@@ -210,6 +210,7 @@ export class Orchestrator implements CommandHandlers {
   #runningCwds = new Map<string, string>();
   #routingCount = 0;
   #tokensByModel: Record<ModelTier, number> = { opus: 0, sonnet: 0, haiku: 0, codex: 0 };
+  #cachedTokens = 0;
   // Owner's model choices (a layer over defaults; see ModelOverridesSchema).
   #models: ModelOverrides = { teams: {} };
   #onModelsChange: (overrides: ModelOverrides) => void = () => {};
@@ -277,6 +278,7 @@ export class Orchestrator implements CommandHandlers {
   ) {
     this.#bus = bus;
     this.#engine = engine;
+    engine.observeUsage?.((tokens) => this.#recordCacheReads(tokens));
     this.#registry = registry;
     this.#projects = projects;
     this.#workspaceDir = workspaceDir;
@@ -577,6 +579,7 @@ export class Orchestrator implements CommandHandlers {
   // reconstructed from the mix percentages — close enough for meters).
   seedUsage(usage: Usage): void {
     const total = usage.tokensToday;
+    this.#cachedTokens = usage.cachedTokensToday ?? 0;
     this.#tokensByModel = {
       opus: Math.round((total * usage.modelMixPct.opus) / 100),
       sonnet: Math.round((total * usage.modelMixPct.sonnet) / 100),
@@ -747,6 +750,13 @@ export class Orchestrator implements CommandHandlers {
       return;
     }
     this.#continueTask(taskId);
+  }
+
+  // Cache reads, as the engines see them (already inside every token count).
+  #recordCacheReads(tokens: number): void {
+    if (tokens <= 0) return;
+    this.#cachedTokens += tokens;
+    this.#bus.publish({ type: 'usage.updated', usage: { ...this.#bus.state.usage, cachedTokensToday: this.#cachedTokens } });
   }
 
   #recordTokens(model: ModelTier, tokens: number): void {

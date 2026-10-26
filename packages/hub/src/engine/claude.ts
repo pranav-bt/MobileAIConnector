@@ -48,7 +48,24 @@ function describeAssistantMessage(message: Record<string, unknown>): string | nu
   return null;
 }
 
+// Every token the model processed — fresh input, cache writes, cache reads
+// and output (what Codex's totalTokens counts too) — and the cache reads
+// among them. Counting only fresh input + output showed ~1% of the context
+// a run actually pushed through the model.
+export function usageTokens(usage: unknown): { total: number; cacheRead: number } {
+  if (!isRecord(usage)) return { total: 0, cacheRead: 0 };
+  const count = (key: string) => (typeof usage[key] === 'number' ? (usage[key] as number) : 0);
+  const cacheRead = count('cache_read_input_tokens');
+  return { total: count('input_tokens') + count('cache_creation_input_tokens') + cacheRead + count('output_tokens'), cacheRead };
+}
+
 export class ClaudeEngine implements OrchestratorEngine {
+  #onCacheRead: ((tokens: number) => void) | null = null;
+
+  observeUsage(onCacheRead: (tokens: number) => void): void {
+    this.#onCacheRead = onCacheRead;
+  }
+
   async complete(args: { prompt: string; model: ModelSpec }): Promise<{ text: string; tokens: number }> {
     let text = '';
     let tokens = 0;
@@ -58,19 +75,23 @@ export class ClaudeEngine implements OrchestratorEngine {
         model: args.model.id,
         ...(args.model.effort && args.model.effort !== 'ultra' ? { effort: args.model.effort } : {}),
         maxTurns: 1,
+        // A quick check answers from the text it's given. Without these it
+        // carried Claude Code's tool definitions, every MCP server set up on
+        // the PC (each one started per call) and the settings + CLAUDE.md —
+        // ~38k of the ~39k tokens it sent (test/probe-quick-check.ts).
+        tools: [],
         allowedTools: [],
+        strictMcpConfig: true,
+        settingSources: [],
       },
     });
     for await (const message of stream) {
       const m = message as unknown as Record<string, unknown>;
       if (m['type'] === 'result') {
         if (typeof m['result'] === 'string') text = m['result'];
-        const usage = m['usage'];
-        if (isRecord(usage)) {
-          const inputTokens = typeof usage['input_tokens'] === 'number' ? usage['input_tokens'] : 0;
-          const outputTokens = typeof usage['output_tokens'] === 'number' ? usage['output_tokens'] : 0;
-          tokens = inputTokens + outputTokens;
-        }
+        const usage = usageTokens(m['usage']);
+        tokens = usage.total;
+        if (usage.cacheRead) this.#onCacheRead?.(usage.cacheRead);
       }
     }
     return { text, tokens };
@@ -241,13 +262,13 @@ export class ClaudeEngine implements OrchestratorEngine {
           }
         } else if (m['type'] === 'result') {
           if (typeof m['result'] === 'string') synopsis = m['result'];
-          const usage = m['usage'];
-          if (isRecord(usage)) {
-            const inputTokens = typeof usage['input_tokens'] === 'number' ? usage['input_tokens'] : 0;
-            const outputTokens = typeof usage['output_tokens'] === 'number' ? usage['output_tokens'] : 0;
-            tokens += inputTokens + outputTokens;
+          // Each result covers its own turn (a streamed-in message starts another).
+          const usage = usageTokens(m['usage']);
+          if (usage.total) {
+            tokens += usage.total;
             callbacks.onTokens(tokens);
           }
+          if (usage.cacheRead) this.#onCacheRead?.(usage.cacheRead);
           // A turn finished. Messages already streamed in mid-turn were folded
           // into it (verified: test/probe-claude-steer.ts); with nothing
           // still waiting the run is done — closing the inbox ends the input

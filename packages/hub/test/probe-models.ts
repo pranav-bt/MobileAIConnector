@@ -26,6 +26,7 @@ if (process.argv.includes('--live')) {
     { id: 'claude-opus-5[1m]', effort: 'low' },
     { id: 'claude-fable-5-1', effort: 'low' },
     { id: 'claude-sonnet-5', effort: 'low' },
+    { id: 'claude-haiku-5-5', effort: 'low' },
     { id: 'claude-haiku-4-5-20251001' },
   ];
   for (const candidate of candidates) {

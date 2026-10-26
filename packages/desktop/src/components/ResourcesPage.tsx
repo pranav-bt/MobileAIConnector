@@ -104,6 +104,12 @@ export function ResourcesPage(props: { state: HubState }): JSX.Element {
           <span className="mono" style={{ fontSize: 24, fontWeight: 600 }}>{formatTokens(usage.tokensToday)}</span>
           <span className="act">HQ's own share of the meters above (persists over restarts)</span>
         </div>
+        {usage.tokensToday > 0 && (usage.cachedTokensToday ?? 0) > 0 && (
+          <div className="act" style={{ marginTop: 6 }}>
+            {Math.round((100 * Math.min(usage.cachedTokensToday ?? 0, usage.tokensToday)) / usage.tokensToday)}% re-read from the prompt cache — the
+            same context read again on each step, far cheaper than fresh tokens
+          </div>
+        )}
       </div>
 
       <div className="tcard" style={{ padding: 16, gridColumn: '1 / -1' }}>

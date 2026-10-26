@@ -53,6 +53,19 @@ npm run typecheck      # tsc across workspaces
   to emit it). Engine-specific code lives only under `packages/hub/src/engine/`.
 - Usage is measured in tokens/percent of subscription limits, never dollars;
   dollars appear only around the overage toggle.
+- A token count is everything the model processed: fresh input + cache
+  writes + cache reads + output (`usageTokens` in engine/claude.ts; Codex's
+  `totalTokens` already counts cached input). Engines also report cache reads
+  as they happen (`observeUsage` → `Usage.cachedTokensToday`, shown as a share
+  on the Resources page). Counting only fresh input + output showed ~1% of
+  what a run pushed through the model. Project quotas default to 250M (old
+  untouched 5M defaults are migrated on load; quotas only raise the 75% line).
+- Quick checks (`engine.complete`: routing, reviews, card explanations,
+  coordination, split/rules/message checks) answer from the prompt alone, so
+  they run with `tools: []`, `strictMcpConfig: true` and `settingSources: []`
+  — without them each one carried Claude Code's tool definitions, every MCP
+  server on the PC (started per call) and the settings + CLAUDE.md: ~39k
+  tokens for a ~1k job. Live check: `npx tsx test/probe-quick-check.ts`.
 - Transport policy: loopback clients speak plaintext; anything else must be
   the paired device over the encrypted session (X25519 static+ephemeral →
   HKDF → ChaCha20-Poly1305 frames, `security/session.ts`). Clients speak
@@ -293,6 +306,11 @@ npm run typecheck      # tsc across workspaces
 - Model choices (Settings > Models, `models.set`) are an override LAYER in
   `data/config.json` (`modelOverrides`) over the built-in defaults (master
   opus, quick checks haiku) and each team record's `leadModel`/`workerModel`.
+  Tiers map to ids in `MODEL_IDS`: opus = Opus 5.5, haiku = Haiku 5.5 (both
+  checked on the decision live tests — routing-ask, message-routing,
+  permission-explain, rules-conflict, stuck — before becoming defaults;
+  `--model`/`--effort` on routing-ask and message-routing compare models),
+  sonnet = Sonnet 5.
   Never write overrides into team records — keeping them untouched is what
   makes "Reset all to defaults" exact. Each choice sets `model` (a catalog
   id) and `effort` independently; precedence per field: per-team >

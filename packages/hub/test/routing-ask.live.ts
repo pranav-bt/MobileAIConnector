@@ -15,7 +15,8 @@ import { loadHubConfig } from '../src/config.js';
 import { CodexEngine } from '../src/engine/codex.js';
 import { EngineRouter } from '../src/engine/router.js';
 
-// --model <id> runs these decisions on any catalog model (Claude or Codex).
+// --model <id> runs these decisions on any catalog model (Claude or Codex);
+// --effort <level> sets the effort.
 const modelArgIndex = process.argv.indexOf('--model');
 const pickedModel = modelArgIndex > 0 ? process.argv[modelArgIndex + 1] : undefined;
 const codexEngine = new CodexEngine();
@@ -26,7 +27,11 @@ const realData = 'D:\\PersonalWork\\MobileAIConnector\\data';
 const dataDir = mkdtempSync(join(tmpdir(), 'agent-hq-routing-live-'));
 for (const file of ['teams.json', 'projects.json', 'config.json']) copyFileSync(join(realData, file), join(dataDir, file));
 const engine = new EngineRouter({ claude: new ClaudeEngine(), codex: codexEngine });
-const model = resolveModel('opus', pickedModel ? { model: pickedModel } : undefined);
+const effortArgIndex = process.argv.indexOf('--effort');
+const model = resolveModel('opus', {
+  ...(pickedModel ? { model: pickedModel } : {}),
+  ...(effortArgIndex > 0 ? { effort: process.argv[effortArgIndex + 1] as 'high' } : {}),
+});
 const teams = JSON.parse(readFileSync(join(dataDir, 'teams.json'), 'utf8')) as Team[];
 const config = loadHubConfig(dataDir) as { workspaceRoots: { key: string; path: string; label: string }[] };
 const registry = new ProjectRegistry(dataDir, config.workspaceRoots);
@@ -128,13 +133,18 @@ const cases: { label: string; text: string; thread: RoutingThread; expect: Expec
 ];
 
 let pass = true;
+let tokens = 0;
+const started = Date.now();
+console.log(`master model ${model.id}${model.effort ? ` · effort ${model.effort}` : ' · its default effort'}`);
 for (const testCase of cases) {
   const decision = await routeTask(engine, teams, projects, 'general', testCase.text, null, model, testCase.thread, [], folders);
   const ok = testCase.expect(decision);
   pass &&= ok;
+  tokens += decision.tokens;
   const got = `${decision.projectBasis}${decision.projectId ? ` → ${decision.projectId}` : ''}${decision.question ? ` · options: ${optionNames(decision).join(', ') || '(none)'}` : ''} · team ${decision.teamId}`;
   console.log(`[${ok ? 'ok' : 'FAIL'}] ${testCase.label}\n     want: ${testCase.want}\n     got:  ${got}${decision.question ? `\n     why:  ${decision.question.reason}` : ''}`);
 }
+console.log(`\n${tokens} tokens · ${((Date.now() - started) / 1000).toFixed(0)} s for ${cases.length} routings`);
 console.log(pass ? '\nROUTING-ASK LIVE PASS' : '\nROUTING-ASK LIVE FAIL');
 codexEngine.close();
 process.exit(pass ? 0 : 1);

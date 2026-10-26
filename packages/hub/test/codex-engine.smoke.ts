@@ -33,6 +33,8 @@ const requests = () =>
 
 const fake = fileURLToPath(new URL('./fixtures/fake-codex-app-server.mjs', import.meta.url));
 const engine = new CodexEngine({ command: process.execPath, args: [fake] });
+let cacheReads = 0;
+engine.observeUsage((tokens) => (cacheReads += tokens));
 const model = resolveModel('sonnet', { model: 'gpt-6.1-sol', effort: 'ultra' });
 if (model.engine !== 'codex' || model.effort !== 'ultra') fail(`gpt-6.1-sol did not resolve to codex/ultra: ${JSON.stringify(model)}`);
 if (resolveModel('opus', { effort: 'ultra' }).effort) fail('a Claude model accepted Codex-only effort "ultra"');
@@ -112,6 +114,7 @@ try {
   if (!activity.some((line) => line.startsWith('blocked: write outside this project'))) fail('outside edit not reported');
   if (!activity.some((line) => line.startsWith("blocked: write into Agent HQ's own data"))) fail('data/ edit not reported');
   if (tokens !== 1234 || result.tokens !== 1234) fail(`tokens not reported: ${tokens}/${result.tokens}`);
+  if (cacheReads < 1000) fail(`cache reads not reported: ${cacheReads}`);
   if (!result.sessionId?.startsWith('thread-')) fail(`no session id: ${String(result.sessionId)}`);
   const workerThread = requests().filter((r) => r.method === 'thread/start').at(-1)!;
   const workerConfig = workerThread.params['config'] as Record<string, unknown>;

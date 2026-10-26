@@ -1,7 +1,7 @@
 // LIVE: the master's check on messages typed in a task's window, against
 // the owner's real team roster (data/teams.json, read-only) — classification
 // calls only, no work runs. Run it per quick-check model:
-//   npx tsx test/message-routing.live.ts [--model claude-haiku-4-5-20251001]
+//   npx tsx test/message-routing.live.ts [--model claude-haiku-4-5-20251001] [--effort low]
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveModel, type Team } from '@agent-hq/shared';
@@ -9,7 +9,11 @@ import { ClaudeEngine } from '../src/engine/claude.js';
 import { routeThreadMessage } from '../src/orchestrator/master.js';
 
 const modelArg = process.argv.indexOf('--model');
-const model = resolveModel('haiku', modelArg > 0 ? { model: process.argv[modelArg + 1]! } : undefined);
+const effortArg = process.argv.indexOf('--effort');
+const model = resolveModel('haiku', {
+  ...(modelArg > 0 ? { model: process.argv[modelArg + 1]! } : {}),
+  ...(effortArg > 0 ? { effort: process.argv[effortArg + 1] as 'low' } : {}),
+});
 const raw = JSON.parse(readFileSync(join(process.cwd(), '..', '..', 'data', 'teams.json'), 'utf8')) as Team[] | { teams: Team[] };
 const teams = (Array.isArray(raw) ? raw : raw.teams).map((team) => ({ ...team, mcpServers: team.mcpServers ?? {} }));
 const coding = teams.find((team) => team.id === 'coding')!;
@@ -52,13 +56,17 @@ const artCases: typeof cases = [
 
 const engine = new ClaudeEngine();
 let failures = 0;
-console.log(`model ${model.id} · ${teams.length} teams`);
+let tokens = 0;
+const started = Date.now();
+console.log(`model ${model.id}${model.effort ? ` · effort ${model.effort}` : ''} · ${teams.length} teams`);
 for (const [{ message, expect, want }, onThread] of [...cases.map((c) => [c, thread] as const), ...artCases.map((c) => [c, artThread] as const)]) {
-  const { decision } = await routeThreadMessage(engine, teams, onThread, message, model);
+  const { decision, tokens: used } = await routeThreadMessage(engine, teams, onThread, message, model);
+  tokens += used;
   const ok = expect(decision);
   if (!ok) failures += 1;
   const got = decision.route === 'team' ? `team ${decision.teamId}` : decision.route === 'ask' ? `ask [${(decision.teamIds ?? []).join(', ')}]` : 'same';
   console.log(`${ok ? 'ok  ' : 'FAIL'}  ${want.padEnd(24)} ← ${got.padEnd(18)} "${message.slice(0, 70)}"${decision.instruction ? `\n        → ${decision.instruction.slice(0, 160)}` : ''}`);
 }
+console.log(`${tokens} tokens · ${((Date.now() - started) / 1000).toFixed(0)} s for ${cases.length + artCases.length} checks`);
 console.log(failures === 0 ? `MESSAGE ROUTING LIVE PASS (${cases.length + artCases.length})` : `MESSAGE ROUTING LIVE FAIL (${failures}/${cases.length + artCases.length})`);
 process.exit(failures === 0 ? 0 : 1);

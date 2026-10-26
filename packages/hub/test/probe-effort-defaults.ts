@@ -4,7 +4,7 @@
 //   npx tsx test/probe-effort-defaults.ts
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
-const ids = ['claude-opus-5-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-sonnet-5-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'];
+const ids = ['claude-opus-5-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-sonnet-5-5', 'claude-sonnet-5', 'claude-haiku-5-5', 'claude-haiku-4-5-20251001'];
 const runs: { id: string; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' }[] = [
   ...ids.map((id) => ({ id })),
   { id: 'claude-sonnet-5', effort: 'max' }, // explicit override is honored?

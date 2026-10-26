@@ -18,7 +18,12 @@ const SKIP_FOLDER = /^(\.|node_modules$|venv$|backups?$|temp$|tmp$|libraries$)/i
 // worker runs inside plus a token ledger. The hub's own workspace is always
 // registered as the default project, so single-project use needs no setup.
 
-const DEFAULT_QUOTA_TOKENS = 5_000_000;
+// Tokens count everything the model processed, cache reads included (a
+// worker run is a few million), so the default is sized for that. Projects
+// still on the old 5M default (from when only fresh input + output counted)
+// move to the new one; a quota the owner set stays.
+const DEFAULT_QUOTA_TOKENS = 250_000_000;
+const OLD_DEFAULT_QUOTA_TOKENS = 5_000_000;
 export const GENERAL_ID = 'general';
 
 export function slugify(name: string): string {
@@ -56,7 +61,16 @@ export class ProjectRegistry {
   init(defaultWorkspaceDir: string, generalWorkspaceDir?: string): void {
     if (existsSync(this.#filePath)) {
       const stored = JSON.parse(readFileSync(this.#filePath, 'utf8')) as Project[];
-      for (const project of stored) this.#projects.set(project.id, project);
+      let migrated = false;
+      for (const project of stored) {
+        if (project.quotaTokens === OLD_DEFAULT_QUOTA_TOKENS) {
+          migrated = true;
+          this.#projects.set(project.id, { ...project, quotaTokens: DEFAULT_QUOTA_TOKENS, alerted75: project.usedTokens >= DEFAULT_QUOTA_TOKENS * 0.75 });
+        } else {
+          this.#projects.set(project.id, project);
+        }
+      }
+      if (migrated) this.#save();
     }
     // "General" is where work that isn't about any project runs (errands,
     // setup, generic files) — its own folder, outside every repo, so nothing

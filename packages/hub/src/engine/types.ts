@@ -57,6 +57,9 @@ export interface WorkerInbox {
 }
 
 export interface OrchestratorEngine {
+  // Cache reads as they happen (they're part of every token count, and
+  // the Resources page shows their share).
+  observeUsage?(onCacheRead: (tokens: number) => void): void;
   // Whether an engine can run on this PC at all (Codex needs its CLI).
   // Absent = every engine is.
   available?(engine: EngineId): boolean;

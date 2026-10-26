@@ -11,9 +11,9 @@ export type ModelTier = z.infer<typeof ModelTierSchema>;
 
 // Tier -> concrete model id. Only the engine layer reads this.
 export const MODEL_IDS: Record<ModelTier, string> = {
-  opus: 'claude-opus-5',
+  opus: 'claude-opus-5-5',
   sonnet: 'claude-sonnet-5',
-  haiku: 'claude-haiku-4-5-20251001',
+  haiku: 'claude-haiku-5-5',
   codex: 'gpt-6.1-sol',
 };
 
@@ -329,6 +329,8 @@ export const UsageSchema = z.object({
   weeklyPct: z.number(),
   weeklyResetsAt: z.number(),
   tokensToday: z.number(),
+  // Of those, tokens re-read from the prompt cache (counted in tokensToday too).
+  cachedTokensToday: z.number().default(0),
   modelMixPct: z.object({
     opus: z.number(),
     sonnet: z.number(),
@@ -397,7 +399,7 @@ export type WorkspaceRoot = z.infer<typeof WorkspaceRootSchema>;
 // The models Settings > Models offers. Every id was verified to run through
 // the hub's Agent SDK (packages/hub/test/probe-models.ts --live), and
 // defaultEffort is the level Claude Code actually applied when the hub sent
-// none (packages/hub/test/probe-effort-defaults.ts, measured 2026-09-28 on
+// none (packages/hub/test/probe-effort-defaults.ts, re-measured 2026-10-26 on
 // SDK 0.3.284) — re-run both after an SDK update. 'tier' is the family
 // bucket the usage meters and office chips use (Fable counts as top tier).
 export interface CatalogModel {
@@ -412,11 +414,12 @@ export interface CatalogModel {
 const ALL_EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 const CODEX_EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 export const MODEL_CATALOG: CatalogModel[] = [
-  { id: 'claude-opus-5-5', label: 'Opus 5.5', engine: 'claude', tier: 'opus', description: 'Best for everyday, complex tasks', efforts: ALL_EFFORTS, defaultEffort: 'high' },
+  { id: 'claude-opus-5-5', label: 'Opus 5.5', engine: 'claude', tier: 'opus', description: 'Best for everyday, complex tasks', efforts: ALL_EFFORTS, defaultEffort: 'xhigh' },
   { id: 'claude-opus-5', label: 'Opus 5', engine: 'claude', tier: 'opus', description: 'Best for everyday, complex tasks', efforts: ALL_EFFORTS, defaultEffort: 'high' },
   { id: 'claude-fable-5-1', label: 'Fable 5.1', engine: 'claude', tier: 'opus', description: 'Most capable, for the hardest and longest-running tasks; heaviest on usage limits', efforts: ALL_EFFORTS, defaultEffort: 'medium' },
   { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', engine: 'claude', tier: 'sonnet', description: 'Efficient for routine tasks', efforts: ALL_EFFORTS, defaultEffort: 'medium' },
   { id: 'claude-sonnet-5', label: 'Sonnet 5', engine: 'claude', tier: 'sonnet', description: 'Efficient for routine tasks', efforts: ALL_EFFORTS, defaultEffort: 'xhigh' },
+  { id: 'claude-haiku-5-5', label: 'Haiku 5.5', engine: 'claude', tier: 'haiku', description: 'Fastest for quick answers', efforts: ALL_EFFORTS, defaultEffort: 'high' },
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', engine: 'claude', tier: 'haiku', description: 'Fastest for quick answers; no effort control', efforts: [], defaultEffort: null },
   // Codex (ChatGPT plan): ids, efforts and defaults from the account's
   // model/list, each verified to run a turn (test/probe-codex-models.ts

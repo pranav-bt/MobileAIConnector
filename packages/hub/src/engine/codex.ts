@@ -128,9 +128,16 @@ export class CodexEngine implements OrchestratorEngine {
   #starting: Promise<AppServerClient> | null = null;
   #configuredServers: string[] = [];
   #checksDir = join(tmpdir(), 'agent-hq-codex-checks');
+  #onCacheRead: ((tokens: number) => void) | null = null;
 
   constructor(options: CodexEngineOptions = {}) {
     this.#options = options;
+  }
+
+  // Codex's totalTokens already counts cached input; the cached part is
+  // reported separately, as for Claude.
+  observeUsage(onCacheRead: (tokens: number) => void): void {
+    this.#onCacheRead = onCacheRead;
   }
 
   // Started lazily: nothing runs until a Codex model is actually used.
@@ -215,8 +222,12 @@ export class CodexEngine implements OrchestratorEngine {
         if (item.type === 'agentMessage') text = String(item['text'] ?? '');
         hooks.onItemDone?.(item);
       } else if (note.method === 'thread/tokenUsage/updated') {
-        const usage = note.params['tokenUsage'] as { total?: { totalTokens?: number }; last?: { totalTokens?: number } } | undefined;
+        const usage = note.params['tokenUsage'] as
+          | { total?: { totalTokens?: number }; last?: { totalTokens?: number; cachedInputTokens?: number } }
+          | undefined;
         tokens = usage?.total?.totalTokens ?? tokens;
+        const cached = usage?.last?.cachedInputTokens ?? 0;
+        if (cached > 0) this.#onCacheRead?.(cached);
         hooks.onTokens?.(tokens, usage?.last?.totalTokens ?? 0);
       } else if (note.method === 'turn/completed' && (note.params['turn'] as { id?: string } | undefined)?.id === turnId) {
         finish(note);

@@ -51,7 +51,7 @@ async function runTurn(threadId, turnId, text) {
     if (message !== null) {
       notify('item/completed', { threadId, turnId, item: { type: 'agentMessage', id: `msg-${turnId}`, text: message }, completedAtMs: Date.now() });
     }
-    notify('thread/tokenUsage/updated', { threadId, turnId, tokenUsage: { total: { totalTokens: 1234 }, last: { totalTokens: 1234 } } });
+    notify('thread/tokenUsage/updated', { threadId, turnId, tokenUsage: { total: { totalTokens: 1234, cachedInputTokens: 1000 }, last: { totalTokens: 1234, cachedInputTokens: 1000 } } });
     notify('turn/completed', { threadId, turn: { id: turnId, status, items: [], error } });
   };
 
