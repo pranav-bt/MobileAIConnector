@@ -151,6 +151,9 @@ export const TaskSchema = z.object({
   // The model this task's worker runs on, when it isn't the team's worker
   // seat (a pair split's part runs on the engine that agreed to build it).
   seat: ModelChoiceSchema.nullable().optional(),
+  // The owner asked for a QA pass on this ask ("/qa …", or `qa` on
+  // task.submit), whatever the "## QA" rules say for its team.
+  qa: z.boolean().optional(),
   // Pair mode: two workers on two engines. 'review' = second opinion — the
   // author does the work, the reviewer (read-only) checks the actual result,
   // rounds repeat until the reviewer agrees (or the round cap asks the owner).

@@ -1,7 +1,7 @@
 import { query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { ModelSpec } from '@agent-hq/shared';
 import type { LockedDir } from '../orchestrator/util.js';
-import { DEFAULT_MAX_SUBAGENTS, refusalMessage, refusedWrite, workerInstructions } from './instructions.js';
+import { DEFAULT_MAX_SUBAGENTS, mcpMayChange, refusalMessage, refusedWrite, workerInstructions } from './instructions.js';
 
 export { refusedWrite };
 import type { EngineRow, OrchestratorEngine, WorkerInbox, WorkerRunCallbacks, WorkerRunResult } from './types.js';
@@ -233,7 +233,11 @@ export class ClaudeEngine implements OrchestratorEngine {
             } else if (block['type'] === 'tool_use' && typeof block['name'] === 'string' && typeof block['id'] === 'string') {
               const input = isRecord(block['input']) ? block['input'] : {};
               const name = block['name'];
-              if (WRITING_TOOLS.has(name) || (name === 'Bash' && typeof input['command'] === 'string' && shellWrites(input['command']))) {
+              if (
+                WRITING_TOOLS.has(name) ||
+                (name === 'Bash' && typeof input['command'] === 'string' && shellWrites(input['command'])) ||
+                (name.startsWith('mcp__') && mcpMayChange(name))
+              ) {
                 filesChanged = true;
               }
               const row: EngineRow = WRITING_TOOLS.has(name)

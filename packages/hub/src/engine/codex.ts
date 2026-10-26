@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { ModelSpec, Team, Usage } from '@agent-hq/shared';
 import type { LockedDir } from '../orchestrator/util.js';
 import { AppServerClient, findCodexBinary, type JsonObject, type Notification } from './codex-rpc.js';
-import { DEFAULT_MAX_SUBAGENTS, refusalMessage, refusedWrite, workerInstructions } from './instructions.js';
+import { DEFAULT_MAX_SUBAGENTS, mcpMayChange, refusalMessage, refusedWrite, workerInstructions } from './instructions.js';
 import type { EngineRow, OrchestratorEngine, WorkerInbox, WorkerRunCallbacks, WorkerRunResult } from './types.js';
 import { shellWrites } from '../orchestrator/policy.js';
 
@@ -370,6 +370,7 @@ export class CodexEngine implements OrchestratorEngine {
       },
       onItemDone: (item: Item) => {
         if (item.type === 'fileChange') filesChanged = true;
+        if (item.type === 'mcpToolCall' && mcpMayChange(String(item['tool'] ?? ''))) filesChanged = true;
         if (item.type === 'commandExecution' && shellWrites(unwrapShellCommand(String(item['command'] ?? '')))) filesChanged = true;
         const row = itemRow(item, 'done');
         if (row) emit(row);

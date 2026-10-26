@@ -7,7 +7,10 @@ import {
   ensureRulesFile,
   ensureTeamRules,
   masterRulesTemplate,
-  legacyMasterTemplate,
+  legacyMasterTemplates,
+  hasSection,
+  MASTER_SECTIONS,
+  DEFAULT_QA_RULE,
   readRulesFile,
   resolveSection,
   rulesFileStamp,
@@ -90,7 +93,10 @@ export class TeamRegistry {
       this.#save();
     }
     for (const team of this.#teams.values()) this.#ensureMemoryDir(team);
-    ensureRulesFile(this.#masterRulesPath, masterRulesTemplate(), legacyMasterTemplate());
+    ensureRulesFile(this.#masterRulesPath, masterRulesTemplate(), legacyMasterTemplates());
+    // QA by default for the Coding team only: an older rules file without a
+    // "## QA" section gets one (an empty section the owner keeps = no QA).
+    if (!hasSection(this.#masterRulesPath, MASTER_SECTIONS.qa)) appendToSection(this.#masterRulesPath, MASTER_SECTIONS.qa, DEFAULT_QA_RULE);
   }
 
   #ensureMemoryDir(team: Team): void {
@@ -135,7 +141,7 @@ export class TeamRegistry {
     if (!path || !text) return false;
     const team = this.#teams.get(teamId);
     if (team) this.#ensureMemoryDir(team);
-    else ensureRulesFile(path, masterRulesTemplate(), legacyMasterTemplate());
+    else ensureRulesFile(path, masterRulesTemplate(), legacyMasterTemplates());
     appendToSection(path, section ? resolveSection(readRulesFile(path), section) : RULES_HEADING, text);
     return true;
   }

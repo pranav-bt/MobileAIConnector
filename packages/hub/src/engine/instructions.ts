@@ -18,6 +18,15 @@ export function workerInstructions(charter: string, maxSubagents: number): strin
   );
 }
 
+// MCP tools change things outside the project's files (a Studio place, a
+// .blend): any call that isn't clearly a read counts as a change, so work
+// done through MCP still gets its QA pass. `tool` is "mcp__server__tool" or
+// just the tool's name.
+const MCP_READ = /^(get|list|read|search|find|inspect|status|scene|query|describe|view|screen_?capture|capture|grep|ping|wait|check|http_get|script_read|script_grep|script_search)/i;
+export function mcpMayChange(tool: string): boolean {
+  return !MCP_READ.test(tool.split('__').pop() ?? tool);
+}
+
 // The path a file write would refuse to touch, or null. realPath on both
 // sides (inside writableBy): a junction planted in the workspace must not
 // read as "inside" while pointing at a sibling project. `config` = inside

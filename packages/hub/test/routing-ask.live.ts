@@ -67,6 +67,22 @@ const noThread: RoutingThread = { projectId: null, recent: [], recentWork: ['Enh
 type Expect = (d: RoutingDecision) => boolean;
 const optionNames = (d: RoutingDecision) => (d.question?.options ?? []).map((option) => option.name);
 const cases: { label: string; text: string; thread: RoutingThread; expect: Expect; want: string }[] = [
+  // "team:" fixes the team by rule; the master still judges the project
+  // (a smaller prompt: no roster, no plans) — the thread is never assumed.
+  {
+    label: 'team: prefix — follow-up still judged into the thread',
+    text: 'coding: make the stacked pancakes wobble less when they land',
+    thread: pancakeThread,
+    expect: (d) => d.teamId === 'coding' && !!d.byRule && d.tokens > 0 && d.projectBasis === 'thread' && d.projectId === 'pancakestack',
+    want: 'coding (rule) · thread → PancakeStack',
+  },
+  {
+    label: 'team: prefix — an errand is still general, not the thread',
+    text: "research: what are good gift ideas for my mom's birthday",
+    thread: pancakeThread,
+    expect: (d) => d.teamId === 'research-team' && !!d.byRule && d.projectBasis === 'general',
+    want: 'research (rule) · general',
+  },
   {
     label: 'follow-up stays in the thread',
     text: 'make them jiggle a bit less when they land, it looks floaty',

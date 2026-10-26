@@ -128,7 +128,7 @@ try {
   send({ type: 'task.submit', text: '@onewin coding: remediate-me one-window check' });
   const ask = await created('remediate-me one-window');
   send({ type: 'task.watch', taskId: ask });
-  await waitFor('re-QA passes', (e) => e.type === 'activity' && e.entry.message.startsWith('QA verdict: pass — coding: remediate-me one-window'), 30000, mark);
+  await waitFor('re-QA passes', (e) => e.type === 'activity' && e.entry.message.startsWith('QA verdict: pass — remediate-me one-window'), 30000, mark);
   await settle();
   const qaSteps = stepsOf(ask).filter((task) => task.title.startsWith('[QA]'));
   if (qaSteps.length !== 2) fail(`expected 2 QA steps of the ask, got ${qaSteps.length}`);

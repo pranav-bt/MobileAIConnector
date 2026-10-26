@@ -145,12 +145,31 @@ function MasterRules(props: { state: HubState; send: Send }): JSX.Element {
         <QuickAdd targetId="master" placeholder="add a rule for every master decision… (Enter)" send={props.send} />
         <QuickAdd targetId="master" section="stuck" placeholder="add a rule for when a task is stuck… (Enter)" send={props.send} />
       </div>
+      <div className="tcard" style={{ padding: 16 }}>
+        <div className="sect" style={{ margin: 0 }}>Rules that skip a model call</div>
+        <div className="act" style={{ color: 'var(--faint)', marginTop: 4, lineHeight: 1.5 }}>
+          A routing rule "keywords → Team" (optionally "@project") sends an ask containing one of the words straight to
+          that team; starting an ask with "team:" does the same. When the project needs judgment the master still picks
+          it, and anything a rule doesn't settle is routed by the master as before. "## QA" lists the teams whose work gets
+          a QA pass (default: Coding team) — work that changed nothing never does, and "/qa &lt;task&gt;" asks for one.
+        </div>
+        <QuickAdd targetId="master" section="routing" placeholder="icons, sprites, blender → Art team (Enter)" send={props.send} />
+        <QuickAdd targetId="master" section="qa" placeholder="a team whose work gets a QA pass, e.g. Game Engine team (Enter)" send={props.send} />
+        <button
+          className="console-btn"
+          style={{ marginTop: 10 }}
+          title="The master reads the asks it already routed and suggests routing rules; a card asks before adding them"
+          onClick={() => props.send({ type: 'rules.suggest' })}
+        >
+          Suggest routing rules from my history
+        </button>
+      </div>
       <RulesEditor
         key="master"
         targetId="master"
         path={`${props.state.info.dataDir}\\master\\RULES.md`}
         saved={saved}
-        hint='one rule per "- " line, under ## Rules (every decision), ## Routing, ## Handover, ## Splitting or ## When a task is stuck · /rule master/stuck: <text> from the composer'
+        hint='one rule per "- " line, under ## Rules (every decision), ## Routing, ## Handover, ## Splitting, ## When a task is stuck, ## Pairing or ## QA · /rule master/stuck: <text> from the composer'
         send={props.send}
       />
     </div>

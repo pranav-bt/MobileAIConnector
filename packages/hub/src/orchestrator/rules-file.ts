@@ -69,9 +69,76 @@ export const MASTER_SECTIONS = {
   splitting: 'Splitting',
   stuck: 'When a task is stuck',
   pairing: 'Pairing',
+  qa: 'QA',
 } as const;
 
+// Who gets an automatic QA pass by default: the Coding team only. More teams
+// are added under "## QA" (one team per bullet, or a rule in your words for
+// the master to judge); "/qa <task>" asks for one on a single task.
+export const DEFAULT_QA_RULE = 'Coding team';
+
 export function masterRulesTemplate(): string {
+  return [
+    '# Master — rules',
+    '',
+    '<!--',
+    'Your rules for the master: how it picks teams, hands work between them,',
+    'splits big tasks, what it does when a task gets stuck, and when two models',
+    '(Claude + Codex) should work a task together.',
+    '- One rule per line, starting with "- ". Rules under "## Rules" apply to',
+    '  every decision; the others only to their kind of decision.',
+    '- A task is stuck when its run fails, when the lead says the worker',
+    '  could not finish it, or when QA still fails after two fix rounds. The',
+    '  master then proposes a retry, a handover or a split and ASKS you —',
+    '  unless a rule under "When a task is stuck" lets it act on its own.',
+    '- "## Pairing" rules let the master put a task in pair mode on its own:',
+    '  review (a second model checks the finished work), split (the two plan',
+    '  together and split a big build) or debate (both draft, then converge).',
+    '  Without them it never pairs on its own; /pair, /solo and the Pair',
+    '  button always win.',
+    '- "## Routing" lines in the form  keywords → Team  (optionally  @project)',
+    '  route an ask containing one of the words straight to that team, with',
+    '  no routing call: "icons, sprites, blender → Art team". An ask matching',
+    '  two teams, or none, is routed by the master as before. Starting an ask',
+    '  with a team name and a colon ("art: …") does the same.',
+    '- "## QA" lists the teams whose finished work gets a QA pass, one per',
+    '  line (work that changed nothing is never QA-checked); a line in your',
+    '  own words is judged by the master. "/qa <task>" asks for one on any task.',
+    '- These never override the project rules: a task stays in the project',
+    '  you named or the one your conversation is in.',
+    'Examples:',
+    '## Routing',
+    '- icons, sprites, textures, blender → Art team',
+    '- flights, hotels, reminders → Personal Assistant team @general',
+    '## Handover',
+    '- Anything that needs Roblox Studio goes to the Game Engine team.',
+    '## When a task is stuck',
+    '- Retry once on the same team without asking; ask me after that.',
+    '## Pairing',
+    '- Debate any architecture or API design decision.',
+    '- Pair-review anything touching auth, payments or data migrations.',
+    '-->',
+    '',
+    `## ${RULES_HEADING}`,
+    '',
+    `## ${MASTER_SECTIONS.routing}`,
+    '',
+    `## ${MASTER_SECTIONS.handover}`,
+    '',
+    `## ${MASTER_SECTIONS.splitting}`,
+    '',
+    `## ${MASTER_SECTIONS.stuck}`,
+    '',
+    `## ${MASTER_SECTIONS.pairing}`,
+    '',
+    `## ${MASTER_SECTIONS.qa}`,
+    `- ${DEFAULT_QA_RULE}`,
+    '',
+  ].join('\n');
+}
+
+// The master template before "## QA"; an untouched copy is upgraded.
+function preQaMasterTemplate(): string {
   return [
     '# Master — rules',
     '',
@@ -178,9 +245,20 @@ export function writeRulesFile(path: string, markdown: string): void {
 
 // Writes the template when the file is missing, or upgrades an untouched
 // legacy template. Never touches a file the owner has edited.
-export function ensureRulesFile(path: string, template: string, legacy?: string): void {
+export function ensureRulesFile(path: string, template: string, legacy?: string | string[]): void {
   const current = readRulesFile(path);
-  if (!existsSync(path) || (legacy !== undefined && current === legacy)) writeRulesFile(path, template);
+  const old = legacy === undefined ? [] : Array.isArray(legacy) ? legacy : [legacy];
+  if (!existsSync(path) || old.includes(current)) writeRulesFile(path, template);
+}
+
+// Untouched copies of earlier master templates (upgraded in place).
+export function legacyMasterTemplates(): string[] {
+  return [legacyMasterTemplate(), preQaMasterTemplate()];
+}
+
+// Whether a rules file has a "## <heading>" section (outside the help text).
+export function hasSection(path: string, heading: string): boolean {
+  return headings(readRulesFile(path).split(/\r?\n/)).some((entry) => entry.name.toLowerCase() === heading.toLowerCase());
 }
 
 export function ensureTeamRules(path: string, teamName: string): void {

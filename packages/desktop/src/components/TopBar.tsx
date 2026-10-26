@@ -3,7 +3,7 @@ import type { ClientCommand, HubState, PairMode, WorkspaceRoot } from '@agent-hq
 import { isActive } from '../status';
 
 const HELP =
-  '/pair <task> · /pair split <task> · /pair debate <task> · /solo <task> · /project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /rule <team>[/<section>]: <rule> · /rule master/stuck: <rule> · /permissions auto|strict · /todo <text> · /note <text> · /remind <when> <text> · /event <when> <title> · /pa on|off · /tasks pause|resume|killall';
+  '/pair <task> · /pair split <task> · /pair debate <task> · /solo <task> · /qa <task> · /routing suggest · /project new <name> [personal|work|ai] · /project add|remove · /team add <name>: <charter> · /team workers <team> <n> · /team remove <team> · /rule <team>[/<section>]: <rule> · /rule master/stuck: <rule> · /permissions auto|strict · /todo <text> · /note <text> · /remind <when> <text> · /event <when> <title> · /pa on|off · /tasks pause|resume|killall';
 
 export const WHEN_HELP = '<when>: "in 20m|2h|3d", "17:30", "tomorrow 09:00", or "2026-09-14 18:00"';
 
@@ -71,6 +71,14 @@ function parseSlashCommand(
       };
     }
     return { command: { type: 'task.submit', text: pairMatch[2].trim(), pair }, note: pair ? 'sent in pair mode' : 'sent solo' };
+  }
+  // "/qa <task>": a QA pass for this ask whatever the master's "## QA" rules
+  // say. (The hub reads the same prefix, so "/qa /pair …" works too.)
+  const qaMatch = text.match(/^\/qa\s+([\s\S]+)$/i);
+  if (qaMatch?.[1]) return { command: { type: 'task.submit', text: qaMatch[1].trim(), qa: true }, note: 'sent — with a QA pass' };
+  // "/routing suggest": the master drafts routing rules from your history.
+  if (/^\/routing\s+suggest$/i.test(text)) {
+    return { command: { type: 'rules.suggest' }, note: 'the master is drafting routing rules from your history — a card will ask' };
   }
   // "/project new BeatBox personal" creates the folder under the right root.
   const projNew = text.match(/^\/project new (\S+)(?:\s+(\S+))?$/i);

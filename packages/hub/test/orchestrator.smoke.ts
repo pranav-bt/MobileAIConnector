@@ -1010,6 +1010,9 @@ try {
   // the session's project is auto-registered, the freelance desk lead
   // reviews the reply, auto-QA runs in that project, and QA failures send a
   // [fix] instruction back to the SAME session, re-QA'd until it passes.
+  // QA is for the Coding team by default; the owner opts the desk in.
+  ws.send(encodeCommand({ type: 'team.rules.add', teamId: 'master', rule: 'Freelance desk', section: 'qa' }));
+  await waitFor('desk under ## QA', (e) => e.type === 'hub.updated' && /## QA[\s\S]*- Freelance desk/.test(e.info.masterRules ?? ''));
   ws.send(
     encodeCommand({ type: 'freelancer.send', agentId: 'fl-sess-castle-1', text: 'remediate-me tweak the tower HUD' }),
   );

@@ -38,7 +38,14 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     // With pair: 'review' (default) or 'split' (plan together, then split
     // the parts between the two engines). "/pair split …" does the same.
     pairMode: PairModeSchema.optional(),
+    // A QA pass for this ask even if its team isn't under "## QA" in the
+    // master's rules ("/qa …" on the text does the same).
+    qa: z.boolean().optional(),
   }),
+  // The master drafts routing-table rules ("keywords → Team") from the asks
+  // it has routed; you get a card to add them (a match then routes with no
+  // model call).
+  z.object({ type: z.literal('rules.suggest') }),
   z.object({
     type: z.literal('task.stop'),
     taskId: z.string(),

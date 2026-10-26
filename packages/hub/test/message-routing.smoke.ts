@@ -83,7 +83,7 @@ try {
   // A finished coding task (its QA pass done too).
   let mark = events.length;
   const ask = await submit('@routeproj coding: build the shop screen with prices', 'build the shop screen');
-  await waitFor('QA done', (e) => e.type === 'activity' && e.entry.message.startsWith('QA verdict: pass — coding: build the shop screen'), 30000, mark);
+  await waitFor('QA done', (e) => e.type === 'activity' && e.entry.message.startsWith('QA verdict: pass — build the shop screen'), 30000, mark);
   await settle();
 
   // 1. Another team's new work → a step of the ask on that team, carrying the thread.

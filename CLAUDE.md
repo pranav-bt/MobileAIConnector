@@ -136,6 +136,40 @@ npm run typecheck      # tsc across workspaces
   two rounds (`#qaFixRounds`) before escalating to the owner (a freelancer's
   fix is still a `[fix]` task on its same session). Both are depth-capped so
   follow-ups can't cascade.
+- Rules first, the model as the backup: the hub decides from fixed rules
+  where they clearly apply and leaves everything else to the model exactly as
+  before, so no work stops for want of a rule.
+  - Report lines: every worker (not split parts) ends its report with
+    `STATUS: done | blocked — why`, `HAND-OFFS: none | <team>: …; …` and, for
+    QA, `VERDICT: pass | issues — …` (`reportLinesInstruction` in master.ts;
+    `parseReportLines` in shared). A short report (≤900 chars, ≤12 lines, no
+    rule conflict, no pair note) with a STATUS line skips the lead review
+    (`reportAsWritten`; blocked → stuck as before); the QA verdict comes from
+    VERDICT; `HAND-OFFS: none` skips the coordination pass only when the
+    master has no general or handover rules (only the model can apply those).
+    A missing line → the model, as before.
+  - Routing (`routeByRules`): a `team:` prefix or a "## Routing" table line
+    `keywords → Team [@project]` (`parseRoutingTable`; other bullets stay
+    guidance for the model) fixes the team when exactly one team matches. If
+    the project is certain too (@pin, the rule's @project, one named project)
+    the ask routes with no model call; otherwise the master still judges the
+    project with a smaller prompt (`fixedTeam`: no roster, no plans) — the
+    thread is never assumed. Several teams, no match, or "## Pairing" rules to
+    apply (passed only when the owner didn't pick /pair or /solo) → the
+    master as before. The routed line says which rule decided.
+    `rules.suggest` (Teams page button, `/routing suggest`) is the one-time
+    tool: the master drafts table lines from the asks it routed and a
+    `rules-suggest-…` card adds them under "## Routing".
+  - QA (`#qaWanted`): `/qa` on the ask (`Task.qa`, `qa` on task.submit) > the
+    run changed nothing (`filesChanged`; any non-read MCP call counts as a
+    change, `mcpMayChange`) → no QA > a team named under "## QA" in the
+    master's rules (default `- Coding team`, appended to older rules files;
+    an emptied section = no automatic QA; the freelance desk can be named) >
+    a QA rule in words → the checks model (`checkQaRules`; an unreadable
+    answer runs QA). Every skip says why in the task's console.
+  Tests: `rules-first.smoke` (in `npm run smoke`), `rules-first.live.ts
+  [--model gpt-6.1-sol]` (real workers write the lines; Claude and Codex),
+  the `team:` cases in `routing-ask.live.ts`.
 - One window per ask: QA passes, handovers to other teams, recovery moves,
   later plan steps and split pieces carry `Task.rootTaskId` = the owner's ask.
   `#row` mirrors every step row into the ask's transcript (id
@@ -288,7 +322,8 @@ npm run typecheck      # tsc across workspaces
   command still goes through `evaluatePermission`. The master has its own
   `data/master/RULES.md` (teamId "master"; on `HubInfo.masterRules`):
   "## Rules" applies everywhere, "## Routing" / "## Handover" /
-  "## Splitting" / "## When a task is stuck" feed only that pass
+  "## Splitting" / "## When a task is stuck" feed only that pass ("## QA"
+  and the "## Routing" table are read by the hub itself, see Rules first)
   (`rulesFor`). Master rules never move a task's project. Rules files live in
   the hub's data dir, which workers can't write (below).
 - Agent HQ's own data dir (pairing keys, secrets, config, every RULES.md) is

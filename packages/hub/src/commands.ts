@@ -6,7 +6,8 @@ import type { AccessGrant, ClientCommand, ModelOverrides, ModelTier, PairMode } 
 // these handlers — the server routes them to the SecurityController.
 export interface CommandHandlers {
   // pair: true/false forces pair mode on/off; omitted = the team's default.
-  submitTask(text: string, projectId: string | null, pair?: boolean, pairMode?: PairMode): void;
+  submitTask(text: string, projectId: string | null, pair?: boolean, pairMode?: PairMode, qa?: boolean): void;
+  suggestRoutingRules?(): void;
   stopTask(taskId: string): void;
   // Task console: talk to a task (the demo hub has no consoles).
   messageTask?(taskId: string, text: string): void;
@@ -59,7 +60,9 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
     case 'hello':
       return; // connection bookkeeping happens in the server
     case 'task.submit':
-      return handlers.submitTask(command.text, command.projectId ?? null, command.pair, command.pairMode);
+      return handlers.submitTask(command.text, command.projectId ?? null, command.pair, command.pairMode, command.qa);
+    case 'rules.suggest':
+      return handlers.suggestRoutingRules?.();
     case 'task.stop':
       return handlers.stopTask(command.taskId);
     case 'task.message':

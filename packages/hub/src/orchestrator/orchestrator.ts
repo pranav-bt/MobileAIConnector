@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { MODEL_DEFAULTS, PAIR_REVIEWER_DEFAULT, catalogModel, isInternalTask, isLiveStatus, stepKind, parseExchange, parseVerdict, resolveModel, rulesFor, toolName, type AccessGrant, type Agent, type ClientCommand, type EngineId, type ModelChoice, type PairMode, type PairVerdict, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
+import { MODEL_DEFAULTS, PAIR_REVIEWER_DEFAULT, catalogModel, isInternalTask, isLiveStatus, stepKind, parseExchange, parseVerdict, resolveModel, rulesFor, toolName, parseReportLines, type AccessGrant, type Agent, type ClientCommand, type EngineId, type ModelChoice, type PairMode, type PairVerdict, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from '../engine/types.js';
@@ -32,8 +32,14 @@ import {
   type ThreadMessageRoute,
   type RecoveryPlan,
   type StuckContext,
+  reportLinesInstruction,
+  reportAsWritten,
+  qaRulesFrom,
+  checkQaRules,
+  parseRoutingTable,
+  suggestRoutingTable,
 } from './master.js';
-import { MASTER_SECTIONS } from './rules-file.js';
+import { DEFAULT_QA_RULE, MASTER_SECTIONS, hasSection } from './rules-file.js';
 import { capturePcScreen, saveIncomingFile, shareFile } from '../files.js';
 import { evaluatePermission } from './policy.js';
 import { delay, isInside, type LockedDir } from './util.js';
@@ -397,6 +403,55 @@ export class Orchestrator implements CommandHandlers {
     }
     this.#publishRules(target);
     this.#activity('master', null, `${section ? `${section} ` : ''}rule added for ${target.name}: ${rule.slice(0, 80)}`);
+  }
+
+  // The one-time routing tool: the master drafts "keywords → Team" rules from
+  // the asks it already routed, and a card asks to add them under "## Routing".
+  // Afterwards a matching ask routes with no model call.
+  async suggestRoutingRules(): Promise<void> {
+    const teams = this.#registry.all();
+    const history = Object.values(this.#bus.state.tasks)
+      .filter((task) => task.teamId && !task.rootTaskId && !task.parentTaskId && !/^\[(QA|fix)/i.test(task.title))
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((task) => ({ ask: task.ownerAsk ?? task.detail, teamId: task.teamId! }));
+    const existing = parseRoutingTable(this.#masterRules(MASTER_SECTIONS.routing), teams);
+    this.#patchAgent('master', { status: 'working', activity: 'drafting routing rules from your history' });
+    const model = this.#masterModel();
+    const { rules, tokens } = await suggestRoutingTable(this.#engine, teams, history, existing, model);
+    this.#recordTokens(model.tier, tokens);
+    this.#masterStatus();
+    if (rules.length === 0) {
+      this.#activity('master', null, history.length < 3 ? 'routing rules: not enough routed asks yet to suggest any' : 'routing rules: nothing clear enough to suggest');
+      return;
+    }
+    const requestId = `rules-suggest-${now().toString(36)}`;
+    this.#bus.publish({
+      type: 'permission.updated',
+      request: {
+        id: requestId,
+        taskId: '',
+        agentId: 'master',
+        teamId: null,
+        command: rules.map((rule) => `- ${rule}`).join('\n'),
+        summary:
+          `From the ${history.length} asks routed so far, the master suggests ${rules.length} routing rule${rules.length === 1 ? '' : 's'}: ` +
+          `${rules.join(' · ')}. An ask containing those words would go straight to that team with no routing call (anything else is routed as now).`,
+        choices: ['Add them', 'Not now'],
+        flags: ['routing rules'],
+        reason: "Approve = added under \"## Routing\" in the master's rules (edit or delete them there any time).",
+        status: 'pending',
+        scope: 'once',
+        requestedAt: now(),
+        resolvedAt: null,
+      },
+    });
+    this.#activity('master', null, `routing rules: ${rules.length} suggested from your history — see the card`);
+    const decision = await new Promise<'approve' | 'deny'>((resolve) => this.#pendingResolvers.set(requestId, resolve));
+    if (decision !== 'approve' || this.#bus.state.permissions[requestId]?.status === 'expired') return;
+    for (const rule of rules) this.#registry.addRule('master', rule, MASTER_SECTIONS.routing);
+    const target = this.#rulesTarget('master');
+    if (target) this.#publishRules(target);
+    this.#activity('master', null, `routing rules added: ${rules.join(' · ').slice(0, 160)}`);
   }
 
   // MCP connections by name from the PC's catalog (engine-provided). A team
@@ -916,8 +971,8 @@ export class Orchestrator implements CommandHandlers {
 
   // --- commands ----------------------------------------------------------
 
-  submitTask(text: string, _projectId?: string | null, pair?: boolean, pairMode?: PairMode): void {
-    void this.#intake(text, pair, pairMode);
+  submitTask(text: string, _projectId?: string | null, pair?: boolean, pairMode?: PairMode, qa?: boolean): void {
+    void this.#intake(text, pair, pairMode, qa);
   }
 
   activeWorkerCwds(): string[] {
@@ -1050,8 +1105,15 @@ export class Orchestrator implements CommandHandlers {
     }
   }
 
-  async #intake(rawText: string, pairChoice?: boolean, pairMode: PairMode = 'review'): Promise<void> {
+  async #intake(rawText: string, pairChoice?: boolean, pairMode: PairMode = 'review', qa = false): Promise<void> {
     let text = rawText.trim();
+    // "/qa …" asks for a QA pass on this ask whatever the "## QA" rules say
+    // (it combines with /pair and /solo, either order).
+    const qaFirst = text.match(/^\/qa\s+([\s\S]+)$/i);
+    if (qaFirst?.[1]) {
+      qa = true;
+      text = qaFirst[1].trim();
+    }
     // "/pair …" / "/solo …" turn pair mode on/off for this task (the
     // composer's toggle sends the same as a flag; neither = the team's default).
     const modeMatch = text.match(/^\/(pair|solo)\s+([\s\S]+)$/i);
@@ -1065,6 +1127,11 @@ export class Orchestrator implements CommandHandlers {
         pairMode = sub[1].toLowerCase() as PairMode;
         text = sub[2].trim();
       }
+    }
+    const qaAfter = text.match(/^\/qa\s+([\s\S]+)$/i);
+    if (qaAfter?.[1]) {
+      qa = true;
+      text = qaAfter[1].trim();
     }
     // "@<project> do something" pins the task to a project explicitly.
     let forcedProjectId: string | null = null;
@@ -1132,6 +1199,7 @@ export class Orchestrator implements CommandHandlers {
       projectId: forcedProjectId,
       teamId: null,
       ownerAsk: text,
+      ...(qa ? { qa: true } : {}),
       status: 'routing',
       progressPct: 0,
       agentIds: [],
@@ -1158,8 +1226,9 @@ export class Orchestrator implements CommandHandlers {
       thread,
       this.#masterRules(MASTER_SECTIONS.routing, 'plan'),
       this.#projects.discoverFolders(),
-      // only rules filed under "## Pairing" (not the general ones)
-      this.#masterRules(MASTER_SECTIONS.pairing).filter((rule) => /^\[[^\]]*pair/i.test(rule)),
+      // only rules filed under "## Pairing" (not the general ones), and only
+      // when you didn't choose yourself (/pair, /solo, the button win anyway)
+      pairChoice === undefined ? this.#masterRules(MASTER_SECTIONS.pairing).filter((rule) => /^\[[^\]]*pair/i.test(rule)) : [],
     );
     this.#recordTokens(masterModel.tier, decision.tokens);
     this.#routingCount -= 1;
@@ -1259,7 +1328,7 @@ export class Orchestrator implements CommandHandlers {
     this.#activity(
       'master',
       taskId,
-      `routed "${decision.title}" → ${team.name} · ${project.name} (${basis})${decision.fallback ? ' (keyword fallback)' : ''}${pair ? (pair.mode === 'review' ? ' · pair mode' : ` · pair mode, ${pair.mode}`) + pairBasis : ''}`,
+      `routed "${decision.title}" → ${team.name} · ${project.name} (${basis})${decision.fallback ? ' (keyword fallback)' : ''}${decision.byRule ? ` — ${decision.byRule}${decision.tokens === 0 ? ', no routing call' : ', project by the master'}` : ''}${pair ? (pair.mode === 'review' ? ' · pair mode' : ` · pair mode, ${pair.mode}`) + pairBasis : ''}${qa ? ' · QA asked' : ''}`,
     );
 
     this.#startOrQueue(taskId, team, true);
@@ -1447,6 +1516,10 @@ export class Orchestrator implements CommandHandlers {
         );
       }
     }
+    // Fixed closing lines the hub reads instead of asking a model (a missing
+    // line only means the model decides, as before). Split parts report raw
+    // to their integration worker, so they skip them.
+    if (!task.parentTaskId) sections.push('', reportLinesInstruction(task.title.startsWith('[QA]')));
     return sections.join('\n');
   }
 
@@ -1685,16 +1758,30 @@ export class Orchestrator implements CommandHandlers {
       this.#patchTask(taskId, { status: 'review', progressPct: 95 });
       this.#patchAgent(workerId, { status: 'reporting', activity: 'reporting to lead' });
       this.#patchAgent(`${team.id}-lead`, { status: 'working', activity: `reviewing: ${task.title.slice(0, 40)}` });
-      const review = await reviewWorkerReport(
-        this.#engine,
-        team,
-        task.title,
-        // The chair folds both sides into one synopsis.
-        pairNote ? `${report}\n\n${pairNote}` : report,
-        leadSpec,
-        parseRules(this.#registry.readRules(team.id)).rules,
-      );
+      // Rules first: a short report that ends "STATUS: done" (or "blocked —
+      // why") is taken as written; anything else gets the lead's review.
+      const lines = parseReportLines(report);
+      const asWritten = reportAsWritten(lines, !!pairNote);
+      const review = asWritten
+        ? { synopsis: asWritten.synopsis, memoryNote: null, stuck: asWritten.stuck, tokens: 0 }
+        : await reviewWorkerReport(
+            this.#engine,
+            team,
+            task.title,
+            // The chair folds both sides into one synopsis.
+            pairNote ? `${report}\n\n${pairNote}` : report,
+            leadSpec,
+            parseRules(this.#registry.readRules(team.id)).rules,
+          );
       this.#recordTokens(leadSpec.tier, review.tokens);
+      if (asWritten) {
+        this.#row(taskId, {
+          role: 'lead',
+          agentId: `${team.id}-lead`,
+          kind: 'status',
+          text: `report taken as written (short, STATUS: ${lines.status}) — no review call`,
+        });
+      }
       if (review.synopsis) this.#row(taskId, { role: 'lead', agentId: `${team.id}-lead`, kind: 'message', text: review.synopsis });
       if (review.memoryNote) {
         this.#registry.appendMemory(team.id, review.memoryNote);
@@ -1725,12 +1812,12 @@ export class Orchestrator implements CommandHandlers {
       }
 
       // A console follow-up that changed no files needs no new QA pass.
-      if (autoQa && (!continuing || filesChanged)) this.#enqueueQa(taskId, team, review.synopsis);
+      if (autoQa && (!continuing || filesChanged)) void this.#enqueueQa(taskId, team, review.synopsis, filesChanged);
       // A finished QA task gets a verdict: pass, or a remediation round.
       // Everything else gets the master's coordination pass: does the report
       // hand work to a different team?
-      if (task.title.startsWith('[QA]')) void this.#handleQaOutcome(taskId, review.synopsis);
-      else if (autoQa && !qaRound) void this.#coordinate(taskId, team, review.synopsis);
+      if (task.title.startsWith('[QA]')) void this.#handleQaOutcome(taskId, review.synopsis, report);
+      else if (autoQa && !qaRound) void this.#coordinate(taskId, team, review.synopsis, report);
     } catch (error) {
       if (this.#stopping.has(taskId)) {
         this.#patchTask(taskId, { status: 'paused', synopsis: 'Stopped by you.' });
@@ -2090,15 +2177,39 @@ export class Orchestrator implements CommandHandlers {
 
   // Completed code work always gets a QA pass: real tests, the real app in
   // its real environment, correctness AND performance.
-  #enqueueQa(sourceTaskId: string, sourceTeam: Team, synopsis: string): void {
+  // Who gets a QA pass: the owner asked for one (/qa) > the work changed
+  // nothing (no QA) > a team listed under "## QA" in the master's rules
+  // (default: the Coding team) > a QA rule in the owner's own words, which
+  // the checks model judges. `changed` null = unknown (counts as changed).
+  async #qaWanted(source: Task, sourceTeam: Team, synopsis: string, changed: boolean | null): Promise<{ qa: boolean; why: string }> {
+    const root = this.#bus.state.tasks[this.#rootOf(source.id)];
+    if (source.qa || root?.qa) return { qa: true, why: 'you asked for QA' };
+    if (changed === false) return { qa: false, why: 'nothing was changed' };
+    const masterPath = this.#registry.rulesPath('master');
+    const rules = this.#masterRules(MASTER_SECTIONS.qa).filter((rule) => /^\[qa\]/i.test(rule));
+    const known = [...this.#registry.all(), FREELANCE_DESK];
+    const listed =
+      masterPath && !hasSection(masterPath, MASTER_SECTIONS.qa) ? qaRulesFrom([DEFAULT_QA_RULE], known) : qaRulesFrom(rules, known);
+    if (listed.teamIds.has(sourceTeam.id)) return { qa: true, why: 'your QA rules' };
+    if (listed.freeText.length > 0) {
+      const checksModel = this.#checksModel();
+      const check = await checkQaRules(this.#engine, listed.freeText, { team: sourceTeam.name, title: source.title, synopsis }, checksModel);
+      this.#recordTokens(checksModel.tier, check.tokens);
+      return { qa: check.qa, why: check.why || 'your QA rules' };
+    }
+    return { qa: false, why: `${sourceTeam.name} isn't under "## QA" in the master's rules` };
+  }
+
+  async #enqueueQa(sourceTaskId: string, sourceTeam: Team, synopsis: string, changed: boolean | null): Promise<void> {
     const qa = this.#qaTeam();
     const source = this.#bus.state.tasks[sourceTaskId];
     if (!qa || !source) return;
     if (sourceTeam.id === qa.id || source.title.startsWith('[QA]')) return;
-    // QA runs REAL tests in a real environment — that only makes sense for
-    // teams that build/run things (bash). Research, docs, and assistant work
-    // (read/edit/web) produces text, not testable systems: no QA follow-up.
-    if (!sourceTeam.allowedTools.includes('bash')) return;
+    const wanted = await this.#qaWanted(source, sourceTeam, synopsis, changed);
+    if (!wanted.qa) {
+      this.#row(sourceTaskId, { role: 'master', agentId: 'master', kind: 'status', text: `no QA pass — ${wanted.why}` });
+      return;
+    }
 
     this.#taskCounter += 1;
     const taskId = `t-${now().toString(36)}-${this.#taskCounter}`;
@@ -2110,7 +2221,7 @@ export class Orchestrator implements CommandHandlers {
         `QA the completed task "${source.title}" in this project. What was reported done: ${synopsis || '(no synopsis)'}\n\n` +
         "Run the project's REAL tests, and where applicable actually run the app in its proper environment " +
         '(build it, launch it, exercise the changed feature). Verify correctness and edge cases, hunt for bugs, ' +
-        'and ALWAYS check performance. Report pass/fail with concrete findings.',
+        'and ALWAYS check performance. Report pass/fail with concrete findings, ending with the STATUS and VERDICT lines.',
       projectId: source.projectId,
       teamId: qa.id,
       status: 'queued',
@@ -2121,7 +2232,7 @@ export class Orchestrator implements CommandHandlers {
       createdAt: now(),
       updatedAt: now(),
     });
-    this.#activity('master', taskId, `QA follow-up queued for: ${source.title.slice(0, 45)}`);
+    this.#activity('master', taskId, `QA follow-up queued for: ${source.title.slice(0, 45)} (${wanted.why})`);
     this.#link(sourceTaskId, taskId, `QA follow-up: ${source.title.slice(0, 50)}`);
 
     this.#qaSource.set(taskId, sourceTaskId);
@@ -2163,22 +2274,30 @@ export class Orchestrator implements CommandHandlers {
   // if the report explicitly hands work to a different team, the two leads
   // meet and the master dispatches a follow-up task there. Depth-capped so
   // follow-ups of follow-ups can't cascade forever.
-  async #coordinate(taskId: string, team: Team, synopsis: string): Promise<void> {
+  async #coordinate(taskId: string, team: Team, synopsis: string, report = ''): Promise<void> {
     if (!synopsis) return;
     const depth = this.#taskDepth.get(taskId) ?? 0;
     if (depth >= 2) return;
     const task = this.#bus.state.tasks[taskId];
     if (!task) return;
 
+    // Rules first: "HAND-OFFS: none" skips the pass — unless the master has
+    // rules (general or handover) only the model can apply to this work.
+    const handoverRules = this.#masterRules(MASTER_SECTIONS.handover);
+    const handoffs = report ? parseReportLines(report).handoffs : null;
+    if (handoffs && handoffs.length === 0 && handoverRules.length === 0) {
+      this.#row(taskId, { role: 'master', agentId: 'master', kind: 'status', text: 'no hand-offs listed — no coordination call' });
+      return;
+    }
     const checksModel = this.#checksModel();
     const { dispatch, tokens } = await coordinateFollowUp(
       this.#engine,
       this.#teamsWithRules(),
       team,
       task.title,
-      synopsis,
+      handoffs && handoffs.length > 0 ? `${synopsis}\nHand-offs the worker listed: ${handoffs.join('; ')}` : synopsis,
       checksModel,
-      this.#masterRules(MASTER_SECTIONS.handover),
+      handoverRules,
     );
     this.#recordTokens(checksModel.tier, tokens);
 
@@ -3351,7 +3470,7 @@ export class Orchestrator implements CommandHandlers {
   // conversation, with QA's findings (one window per ask): the worker that
   // did the work fixes it, and it's re-QA'd when files changed. After two
   // fix rounds that still fail it escalates to the owner (a stuck task).
-  async #handleQaOutcome(qaTaskId: string, qaSynopsis: string): Promise<void> {
+  async #handleQaOutcome(qaTaskId: string, qaSynopsis: string, report = ''): Promise<void> {
     const sourceId = this.#qaSource.get(qaTaskId);
     this.#qaSource.delete(qaTaskId);
     const source = sourceId ? this.#bus.state.tasks[sourceId] : undefined;
@@ -3363,9 +3482,18 @@ export class Orchestrator implements CommandHandlers {
     const qa = this.#qaTeam();
     if (!sourceTeam || !qa) return;
 
-    const checksModel = this.#checksModel();
-    const evaluation = await evaluateQaReport(this.#engine, qaSynopsis, checksModel);
-    this.#recordTokens(checksModel.tier, evaluation.tokens);
+    // Rules first: the QA worker's "VERDICT: pass | issues — …" line decides;
+    // without one the checks model reads the report, as before.
+    const lines = report ? parseReportLines(report) : null;
+    let evaluation: { verdict: 'pass' | 'issues'; summary: string; tokens: number };
+    if (lines?.verdict) {
+      evaluation = { verdict: lines.verdict, summary: lines.verdict === 'issues' ? lines.issues || lines.body : '', tokens: 0 };
+      this.#row(qaTaskId, { role: 'master', agentId: 'master', kind: 'status', text: `QA verdict read from the report (${lines.verdict}) — no evaluation call` });
+    } else {
+      const checksModel = this.#checksModel();
+      evaluation = await evaluateQaReport(this.#engine, qaSynopsis, checksModel);
+      this.#recordTokens(checksModel.tier, evaluation.tokens);
+    }
     if (evaluation.verdict === 'pass') {
       this.#qaFixRounds.delete(source.id);
       this.#activity('master', qaTaskId, `QA verdict: pass — ${source.title.slice(0, 45)}`);
@@ -4059,7 +4187,7 @@ export class Orchestrator implements CommandHandlers {
     this.#activity(agentId, taskId, `freelancer ${result.name} replied — full reply sent to your phone`);
 
     if (project) {
-      this.#enqueueQa(taskId, FREELANCE_DESK, review.synopsis || result.reply.slice(0, 400));
+      void this.#enqueueQa(taskId, FREELANCE_DESK, review.synopsis || result.reply.slice(0, 400), null);
     } else {
       this.#activity('master', taskId, `QA skipped — ${who.cwd || 'this session'} is outside the workspace roots`);
     }

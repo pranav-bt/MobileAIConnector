@@ -8,6 +8,14 @@ import { isAppBridge } from '../apps.js';
 // keyword, "installs" trigger a permission request, everything resolves fast.
 export class MockEngine implements OrchestratorEngine {
   async complete(args: { prompt: string; model: ModelSpec }): Promise<{ text: string; tokens: number }> {
+    // An owner QA rule in words: "qa-yes" in the work says it applies.
+    if (args.prompt.includes('decides which finished work gets a QA pass')) {
+      return { text: JSON.stringify({ qa: args.prompt.includes('qa-yes'), why: 'mock: QA rule check' }), tokens: 2 };
+    }
+    // The one-time routing tool: one usable rule, one naming no team.
+    if (args.prompt.includes('Write routing rules so that future asks')) {
+      return { text: JSON.stringify({ rules: ['storyboards, mockups → Design team', 'wireframes → Design team', 'gizmos → Nonexistent team'] }), tokens: 4 };
+    }
     // The master's check on a message in a task's window: "<team>-request"
     // is new work for that team, "unclear-request" asks which team,
     // "classify-fail" makes the check fail; anything else is "same".
@@ -367,8 +375,32 @@ export class MockEngine implements OrchestratorEngine {
     const synopsis = [result.synopsis, heard.length ? `heard: ${heard.join(' / ')}` : '', recall ? `remembered: ${recall}` : '', fixed]
       .filter(Boolean)
       .join(' · ');
-    callbacks.onTranscript?.({ id: `${rowId}-done`, kind: 'message', text: synopsis });
-    return { ...result, synopsis, sessionId, filesChanged: /edit-test|writes-files|install|qa team checked this work/.test(taskText) };
+    // "lines-…" tasks end with the fixed report lines (STATUS / HAND-OFFS /
+    // VERDICT): lines-blocked, lines-long (too long to take as written),
+    // lines-handoff, lines-qa-issues (their QA pass finds issues).
+    let report = synopsis;
+    if (taskText.includes('lines-')) {
+      const qaTask = taskText.startsWith('qa the completed task');
+      const body = taskText.includes('lines-long') && !qaTask ? `${synopsis}\n${'- a long finding about the work that goes on and on\n'.repeat(30)}` : synopsis;
+      report = [
+        body,
+        taskText.includes('lines-blocked') && !qaTask ? 'STATUS: blocked — mock: no access to the build server' : 'STATUS: done',
+        qaTask
+          ? taskText.includes('lines-qa-issues') && !taskText.includes('fixed-after-qa') && !/qa team checked this work/.test(taskText)
+            ? 'VERDICT: issues — mock: the save button does nothing'
+            : 'VERDICT: pass'
+          : taskText.includes('lines-handoff')
+            ? 'HAND-OFFS: design: draw the new icons'
+            : 'HAND-OFFS: none',
+      ].join('\n');
+    }
+    callbacks.onTranscript?.({ id: `${rowId}-done`, kind: 'message', text: report });
+    // First runs change files unless told not to ("no-changes"); a continued
+    // conversation only when its text says so.
+    const changed = args.resumeSessionId
+      ? /edit-test|writes-files|install|qa team checked this work/.test(taskText)
+      : !taskText.includes('no-changes');
+    return { ...result, synopsis: report, sessionId, filesChanged: changed };
   }
 
   async #work(args: {
