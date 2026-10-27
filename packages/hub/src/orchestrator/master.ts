@@ -1232,7 +1232,7 @@ export async function routeThreadMessage(
 
 // The fixed lines every worker ends its report with (parseReportLines in
 // shared reads them). A missing line only means the model decides as before.
-export function reportLinesInstruction(qaTask: boolean): string {
+export function reportLinesInstruction(qaTask: boolean, kitDir = ''): string {
   return [
     'End your final report with these lines, exactly in this form (Agent HQ reads them):',
     'STATUS: done   — or —   STATUS: blocked — <one sentence: what stopped you>',
@@ -1246,19 +1246,30 @@ export function reportLinesInstruction(qaTask: boolean): string {
           'HAND-OFFS: none   — or —   HAND-OFFS: <team>: <what they must do>; <team>: <what they must do>',
           '  (work another team must pick up because of yours — not ideas or nice-to-haves)',
         ]),
-    ...LEARNED_LINES,
+    ...learnedLines(kitDir),
     'Before those lines, write the report itself: a one-sentence headline of the outcome, then short "- " bullets.',
   ].join('\n');
 }
 
 // What a worker had to work out the hard way goes into its team's notes
-// (MEMORY.md), which every later worker on the team gets in its brief.
-const LEARNED_LINES = [
-  'LEARNED: none   — or —   LEARNED: <the problem you hit> → <what worked>   (one line per lesson, at most 3)',
-  "  (only what you had to work out the hard way and a teammate would otherwise have to work out again — a tool or app quirk, a workaround, a command or setting that works. Not what you did, not this project's own facts, never keys or passwords. Most tasks: none.)",
-];
-export function learnedLineInstruction(): string {
-  return ['End your report with this line (Agent HQ reads it):', ...LEARNED_LINES].join('\n');
+// (MEMORY.md), which every later worker on the team gets in its brief. With
+// a full-access folder, a reusable script or file behind a lesson goes into
+// the team's kit there, and the lesson names it.
+function learnedLines(kitDir: string): string[] {
+  return [
+    'LEARNED: none   — or —   LEARNED: <the problem you hit> → <what worked>   (one line per lesson, at most 3)',
+    "  (only what you had to work out the hard way and a teammate would otherwise have to work out again — a tool or app quirk, a workaround, a command or setting that works. Not what you did, not this project's own facts, never keys or passwords. Most tasks: none.)",
+    ...(kitDir
+      ? [
+          `  If a script or file you made is what made it work and would save the next worker rebuilding it, save it in your team's kit, ${kitDir}`,
+          '  (small, general, a comment on top saying what it does and how to run it; no keys or project secrets), and name it in the lesson:',
+          `  LEARNED: <problem> → run ${kitDir}\\<file> (<what it does>). Improve a kit file rather than adding a near-copy; never delete one.`,
+        ]
+      : []),
+  ];
+}
+export function learnedLineInstruction(kitDir = ''): string {
+  return ['End your report with this line (Agent HQ reads it):', ...learnedLines(kitDir)].join('\n');
 }
 
 // A short report that says how it went needs no lead review: it becomes the

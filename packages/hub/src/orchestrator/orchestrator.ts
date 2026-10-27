@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -910,6 +910,31 @@ export class Orchestrator implements CommandHandlers {
     return this.#accessGrants.filter((grant) => grant.access === 'full' && existsSync(grant.path)).map((grant) => grant.path);
   }
 
+  // A team's kit: reusable scripts/files its workers saved in the first
+  // full-access folder (<Bots>\kit\<team>), named by their LEARNED lines.
+  #kitDir(teamId: string | null | undefined): string {
+    const full = this.#freeDirs()[0];
+    return full && teamId ? join(full, 'kit', teamId) : '';
+  }
+
+  // What the brief says about the kit: its newest files by name (no
+  // contents — a worker opens the one it needs).
+  #kitNote(teamId: string | null | undefined): string {
+    const dir = this.#kitDir(teamId);
+    if (!dir) return '';
+    let files: { name: string; at: number }[] = [];
+    try {
+      files = readdirSync(dir, { withFileTypes: true })
+        .filter((entry) => entry.isFile())
+        .map((entry) => ({ name: entry.name, at: statSync(join(dir, entry.name)).mtimeMs }));
+    } catch {
+      return '';
+    }
+    if (files.length === 0) return '';
+    const names = files.sort((a, b) => b.at - a.at).slice(0, 25).map((file) => file.name);
+    return `Your team's kit — scripts and files earlier workers saved for reuse (${dir}): ${names.join(', ')}${files.length > 25 ? `, and ${files.length - 25} more` : ''}. Check it before building the same thing again.`;
+  }
+
   accessGrantsList(): AccessGrant[] {
     return this.#accessGrants;
   }
@@ -1484,7 +1509,8 @@ export class Orchestrator implements CommandHandlers {
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, 3);
     const teamMemory = task.teamId ? this.#registry.readMemory(task.teamId) : '';
-    if (history.length > 0 || teamMemory) {
+    const kit = this.#kitNote(task.teamId);
+    if (history.length > 0 || teamMemory || kit) {
       sections.push('---', 'Background context (not part of the task itself):');
       if (history.length > 0) {
         sections.push(
@@ -1498,13 +1524,14 @@ export class Orchestrator implements CommandHandlers {
           teamMemory,
         );
       }
+      if (kit) sections.push(kit);
     }
     // The owner's standing rules for this team; the project's CLAUDE.md (the
     // SDK loads it for the worker) adds on top. Only this project's decided
     // conflicts are shown — never another project's.
     if (task.teamId) {
       const { rules, tools, resolutions } = parseRules(this.#registry.readRules(task.teamId));
-      if ((rules.length > 0 || tools.length > 0) && history.length === 0 && !teamMemory) sections.push('---');
+      if ((rules.length > 0 || tools.length > 0) && history.length === 0 && !teamMemory && !kit) sections.push('---');
       // The team's tools: what to reach for, for which job. Guidance only —
       // every command still goes through the normal permission checks.
       if (tools.length > 0) {
@@ -1592,7 +1619,8 @@ export class Orchestrator implements CommandHandlers {
     // Fixed closing lines the hub reads instead of asking a model (a missing
     // line only means the model decides, as before). Split parts report raw
     // to their integration worker, so they only add what they learned.
-    sections.push('', task.parentTaskId ? learnedLineInstruction() : reportLinesInstruction(task.title.startsWith('[QA]')));
+    const kitDir = this.#kitDir(task.teamId);
+    sections.push('', task.parentTaskId ? learnedLineInstruction(kitDir) : reportLinesInstruction(task.title.startsWith('[QA]'), kitDir));
     return sections.join('\n');
   }
 

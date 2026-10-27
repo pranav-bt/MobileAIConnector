@@ -168,6 +168,29 @@ try {
   if (!brief.includes(`full access: ${hubBots}`) || !/destructive or churny/i.test(brief) || !brief.includes(join(hubBots, '<team>'))) fail(`brief: ${brief.slice(0, 600)}`);
   console.log('brief ok: the full-access folder is named with the scratch-space guidance');
 
+  // The team's kit: the LEARNED instruction names it; once it holds files the
+  // brief lists them (names only, newest first).
+  const kitDir = join(hubBots, 'kit', 'design');
+  if (!brief.includes(`save it in your team's kit, ${kitDir}`) || brief.includes("Your team's kit —")) fail(`kit instruction: ${brief.slice(-900)}`);
+  mkdirSync(kitDir, { recursive: true });
+  writeFileSync(join(kitDir, 'older_helper.py'), '# older\n');
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  writeFileSync(join(kitDir, 'export_svg.py'), '# exports an icon sheet to SVG\n');
+  from = events.length;
+  send({ type: 'task.submit', text: '@game design: lines-done brief-echo draw an icon' });
+  const second = await waitFor('task 2', (e) => e.type === 'task.updated' && e.task.detail.includes('draw an icon') && !e.task.rootTaskId, 30000, from);
+  const id2 = second.type === 'task.updated' ? second.task.id : '';
+  send({ type: 'task.watch', taskId: id2 });
+  await waitFor('done 2', (e) => e.type === 'task.updated' && e.task.id === id2 && e.task.status === 'done', 30000, from);
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  const brief2 = events
+    .slice(from)
+    .flatMap((e) => (e.type === 'task.transcript' && e.taskId === id2 ? e.entries : []))
+    .map((row) => row.text)
+    .find((text) => text.includes('BRIEF:')) ?? '';
+  if (!brief2.includes(`Your team's kit — scripts and files earlier workers saved for reuse (${kitDir}): export_svg.py, older_helper.py.`)) fail(`kit listing: ${brief2.slice(0, 1500)}`);
+  console.log("kit ok: the LEARNED instruction names the team's kit; the brief lists its files, newest first");
+
   // Never offered as a project folder (it sits under a workspace root).
   from = events.length;
   send({ type: 'task.submit', text: '@bots design: draw a badge' });

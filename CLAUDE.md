@@ -187,6 +187,11 @@ npm run typecheck      # tsc across workspaces
   lists them newest first with × to remove and "Edit as text" (MEMORY.md),
   `team.notes.set`. Tests: `team-notes.smoke` (in `npm run smoke`), UI
   driver `tools/drive-team-notes.mjs` (with `test/ui-mock-hub.ts 4665`).
+  With a 'full' folder granted (Bots), each team also has a kit,
+  `<full>\kit\<team id>` (`#kitDir`): the LEARNED instruction tells a worker
+  to save a reusable script/file behind a lesson there and name it in the
+  line, and the brief lists the kit's newest 25 file names (`#kitNote`,
+  names only). Tested in `bots-folder.smoke`.
 - One window per ask: QA passes, handovers to other teams, recovery moves,
   later plan steps and split pieces carry `Task.rootTaskId` = the owner's ask.
   `#row` mirrors every step row into the ask's transcript (id
