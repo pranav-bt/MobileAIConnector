@@ -404,6 +404,8 @@ export class MockEngine implements OrchestratorEngine {
           : 'Blender -b render came out black with no camera → add a temporary camera and light first';
       report = `${report}\nLEARNED: ${lesson}`;
     }
+    // "brief-echo" shows the whole brief the worker got, as a console row.
+    if (taskText.includes('brief-echo')) callbacks.onTranscript?.({ id: `${rowId}-brief`, kind: 'message', text: `BRIEF: ${args.prompt}` });
     const notesCheck = /notes-check:(\w+)/.exec(taskText);
     if (notesCheck) {
       const at = args.prompt.indexOf('Team notes — lessons');

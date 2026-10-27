@@ -227,6 +227,23 @@ npm run typecheck      # tsc across workspaces
   targets (they were most of the false "writes outside this project" cards).
   Workers already load the project's CLAUDE.md and `.claude/settings*.json`
   (settingSources default = all).
+  A 'full' grant (the owner's `D:\Work\Bots`) is a scratch + hand-over
+  space: writable like 'write', AND deletes there need no card
+  (`deletesOnlyInFreeDirs` in policy.ts, scope `freeDirs`) — only when every
+  target is plainly inside it (a full path, or a plain name after a `cd`
+  into it in the same command; piped deletes need a source there; git needs
+  `-C` there or a cd in). A `..`, a variable, a bare name with no cd, a
+  junction out, the folder itself, a shell-in-a-shell or any other
+  destructive command alongside still asks. Refused for full: a project, a
+  folder holding one, a workspace root. Granted folders are never offered as
+  projects (`ProjectRegistry.hideFolders`). The brief names it and tells
+  workers to judge up front whether work is destructive/churny and do that
+  part in `<full>\<team>\<task>`, hand-overs in `<full>\shared`, only
+  finished results into the project (`#accessNote`). The shell policy also
+  no longer reads the program a command RUNS (`"C:\…\python.exe" x.py >
+  out`) or a heredoc's script body (unless fed to a shell) as write targets,
+  and `Format-Table` is no longer "destructive" (`Format-Volume` is). Tests:
+  `bots-folder.smoke` (in `npm run smoke`).
 - Project MCP: besides its team's grants, a worker gets the MCP servers set
   up for its project folder, as Claude Code opened there loads them
   (`projectMcpServers` in engine/mcp-catalog.ts): the folder's own servers

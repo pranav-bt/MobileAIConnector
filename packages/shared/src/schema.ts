@@ -256,7 +256,9 @@ export type TranscriptEntry = z.infer<typeof TranscriptEntrySchema>;
 // credential-like files).
 export const AccessGrantSchema = z.object({
   path: z.string().min(1).max(500),
-  access: z.enum(['read', 'write']),
+  // full = read & write + deleting there needs no card (the owner's scratch
+  // and hand-over space for workers, e.g. D:\Work\Bots).
+  access: z.enum(['read', 'write', 'full']),
 });
 export type AccessGrant = z.infer<typeof AccessGrantSchema>;
 

@@ -875,7 +875,7 @@ export class Orchestrator implements CommandHandlers {
     } catch {
       // can't create it — it just isn't offered
     }
-    const granted = this.#accessGrants.filter((grant) => grant.access === 'write').map((grant) => grant.path);
+    const granted = this.#accessGrants.filter((grant) => grant.access !== 'read').map((grant) => grant.path);
     const extras = [this.#outboxDir, this.#inboxDir, paDir, claudeCode, ...granted].filter(Boolean);
     return [...new Set(extras)].filter((dir) => existsSync(dir) && !isInside(dir, cwd));
   }
@@ -894,12 +894,20 @@ export class Orchestrator implements CommandHandlers {
   // Folders the owner opened to every worker (Settings > Hub, local only):
   // 'write' ones join every worker's writable scope (Claude's directory
   // grants, the shell policy, Codex's sandbox), 'read' ones are named to
-  // workers as readable. Agent HQ's own data stays locked whatever is here.
+  // workers as readable, 'full' ones are writable AND deleting there needs no
+  // card (the owner's scratch space, D:\Work\Bots). Agent HQ's own data stays
+  // locked whatever is here.
 
   configureAccess(grants: AccessGrant[], onChange: (grants: AccessGrant[]) => void, claudeProjectsDir?: string): void {
     this.#accessGrants = grants;
     this.#onAccessChange = onChange;
     if (claudeProjectsDir) this.#claudeProjectsDir = claudeProjectsDir;
+    this.#projects.hideFolders(grants.map((grant) => grant.path));
+  }
+
+  // The full-access folders, for the shell policy.
+  #freeDirs(): string[] {
+    return this.#accessGrants.filter((grant) => grant.access === 'full' && existsSync(grant.path)).map((grant) => grant.path);
   }
 
   accessGrantsList(): AccessGrant[] {
@@ -923,22 +931,39 @@ export class Orchestrator implements CommandHandlers {
         refuse("that folder doesn't exist");
         continue;
       }
-      if (grant.access === 'write' && /^([A-Za-z]:\\?|\\\\[^\\]+\\[^\\]+\\?)$/.test(full)) {
+      if (grant.access !== 'read' && /^([A-Za-z]:\\?|\\\\[^\\]+\\[^\\]+\\?)$/.test(full)) {
         refuse('a whole drive is too broad to open for writing — pick a folder');
         continue;
       }
-      if (grant.access === 'write' && (isInside(full, dataDir) || isInside(dataDir, full))) {
+      if (grant.access !== 'read' && (isInside(full, dataDir) || isInside(dataDir, full))) {
         refuse("Agent HQ's own data folder stays locked for workers");
         continue;
+      }
+      // Deleting without a card is for a scratch folder, never for real work:
+      // not a project, not a folder holding one, not a workspace root.
+      if (grant.access === 'full') {
+        const project = this.#projects
+          .all()
+          .find((candidate) => candidate.workspaceDir && (isInside(full, candidate.workspaceDir) || isInside(candidate.workspaceDir, full)));
+        if (project) {
+          refuse(`full access is for a scratch folder — ${project.name}'s project folder is ${isInside(full, project.workspaceDir) ? 'it' : 'inside it'}`);
+          continue;
+        }
+        if (this.#projects.roots.some((root) => isInside(root.path, full))) {
+          refuse('full access is for a scratch folder — this holds a whole workspace root');
+          continue;
+        }
       }
       seen.add(full.toLowerCase());
       kept.push({ path: full, access: grant.access });
     }
     const before = new Map(this.#accessGrants.map((grant) => [grant.path.toLowerCase(), grant.access]));
     this.#accessGrants = kept;
+    this.#projects.hideFolders(kept.map((grant) => grant.path));
     this.#onAccessChange(kept);
+    const label = { read: 'read', write: 'read & write', full: 'full (deletes without asking)' } as const;
     const changes = [
-      ...kept.filter((grant) => before.get(grant.path.toLowerCase()) !== grant.access).map((grant) => `${grant.access === 'write' ? 'read & write' : 'read'}: ${grant.path}`),
+      ...kept.filter((grant) => before.get(grant.path.toLowerCase()) !== grant.access).map((grant) => `${label[grant.access]}: ${grant.path}`),
       ...[...before.keys()].filter((path) => !seen.has(path)).map((path) => `removed: ${path}`),
     ];
     if (changes.length) this.#activity('master', null, `folder access updated — ${changes.join(' · ')} (applies to work that starts from now)`);
@@ -953,13 +978,27 @@ export class Orchestrator implements CommandHandlers {
 
   // What workers are told about the folders the owner opened.
   #accessNote(): string {
+    const full = this.#accessGrants.filter((grant) => grant.access === 'full').map((grant) => grant.path);
     const write = this.#accessGrants.filter((grant) => grant.access === 'write').map((grant) => grant.path);
     const read = this.#accessGrants.filter((grant) => grant.access === 'read').map((grant) => grant.path);
-    if (write.length === 0 && read.length === 0) return '';
+    if (full.length === 0 && write.length === 0 && read.length === 0) return '';
+    const scratch = full[0];
     return [
       'Folders the owner opened to you (beyond your project):',
+      ...full.map((path) => `- full access: ${path} — your scratch and hand-over space: create, overwrite and delete freely, no approval needed`),
       ...write.map((path) => `- read & write: ${path}`),
       ...read.map((path) => `- read only: ${path}`),
+      ...(scratch
+        ? [
+            'Before you start, decide whether the work is destructive or churny — repeated build-and-tear-down (animation passes, render',
+            'frames, test scenes or places), experiments that could break things, bulk deletes, Roblox Studio temp places and exports.',
+            `If so, do that part in ${join(scratch, '<team>', '<short task name>')} (your team's id), then copy only the finished`,
+            'result into your project — deleting there never needs the owner, so a long job can run through the night. Use FULL paths',
+            `when you delete (or \`cd\` into that folder first in the same command); a delete anywhere else still waits for approval.`,
+            `Files meant for another team or a later task go in ${join(scratch, 'shared')}. Remove your own scratch when the task is`,
+            "done unless the owner may want to look at it (say where it is in your report).",
+          ]
+        : []),
     ].join('\n');
   }
 
@@ -1708,7 +1747,7 @@ export class Orchestrator implements CommandHandlers {
         onPermission: ({ toolName, command, reason }) => {
           // The shell is not confined by the SDK's directory grants, so the
           // policy gets the worker's scope and gates writes that leave it.
-          const verdict = evaluatePermission(toolName, command, this.#policy.mode, scope);
+          const verdict = evaluatePermission(toolName, command, this.#policy.mode, { ...scope, freeDirs: this.#freeDirs() });
           if (verdict.decision === 'allow') return Promise.resolve('approve' as const);
           return this.#raisePermission(taskId, workerId, team, toolName, command, reason, verdict.flags);
         },
@@ -2584,7 +2623,7 @@ export class Orchestrator implements CommandHandlers {
             if (ledger) this.#bus.publish({ type: 'project.updated', project: ledger.project });
           },
           onPermission: ({ toolName, command, reason }) => {
-            const verdict = evaluatePermission(toolName, command, this.#policy.mode, ctx.scope);
+            const verdict = evaluatePermission(toolName, command, this.#policy.mode, { ...ctx.scope, freeDirs: this.#freeDirs() });
             if (verdict.decision === 'allow') return Promise.resolve('approve' as const);
             return this.#raisePermission(taskId, id, team, toolName, command, reason, verdict.flags);
           },

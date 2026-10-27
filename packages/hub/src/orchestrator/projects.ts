@@ -36,6 +36,9 @@ export class ProjectRegistry {
   #defaultId = '';
   #roots: WorkspaceRoot[];
   #folderCache: { at: number; folders: ProjectFolder[] } | null = null;
+  // Folders never offered as projects: the owner's folder grants (the Bots
+  // scratch space sits under a workspace root but is nobody's project).
+  #hidden = new Set<string>();
 
   constructor(dataDir: string, workspaceRoots: WorkspaceRoot[]) {
     this.#filePath = join(dataDir, 'projects.json');
@@ -148,6 +151,11 @@ export class ProjectRegistry {
   // project markers is a project; one without is a container (D:\Work\Roblox)
   // and is looked into once. Bounded (readdir budget, newest first, 30 max)
   // and cached for a minute: routing calls this on every ask.
+  hideFolders(paths: string[]): void {
+    this.#hidden = new Set(paths.map((path) => resolve(path).toLowerCase()));
+    this.#folderCache = null;
+  }
+
   discoverFolders(): ProjectFolder[] {
     if (this.#folderCache && Date.now() - this.#folderCache.at < 60_000) return this.#folderCache.folders;
     const registered = new Set([...this.#projects.values()].map((project) => resolve(project.workspaceDir).toLowerCase()));
@@ -175,6 +183,7 @@ export class ProjectRegistry {
     for (const root of this.#roots) {
       for (const entry of list(root.path).filter(usable)) {
         const path = join(root.path, entry.name);
+        if (this.#hidden.has(resolve(path).toLowerCase())) continue;
         const inside = list(path);
         const subfolders = inside.filter(usable);
         // A container (D:\Work\Roblox): no project markers and several
@@ -184,7 +193,7 @@ export class ProjectRegistry {
           add(path, entry.name);
           continue;
         }
-        for (const child of subfolders) add(join(path, child.name), child.name);
+        for (const child of subfolders) if (!this.#hidden.has(resolve(path, child.name).toLowerCase())) add(join(path, child.name), child.name);
       }
     }
     const folders = found.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 30);

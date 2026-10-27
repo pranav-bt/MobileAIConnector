@@ -3,8 +3,10 @@ import type { AccessGrant, ClientCommand, HubState } from '@agent-hq/shared';
 
 // Folders the owner opens to every worker, in every project (this PC only —
 // a paired phone can't change them). Read & write: workers create and change
-// files there without a card. Read: named to workers as readable (reading
-// never asks anyway, except credential-like files).
+// files there without a card. Full: the same, and deleting there needs no
+// card either (a scratch folder like D:\Work\Bots — never a project). Read:
+// named to workers as readable (reading never asks anyway, except
+// credential-like files).
 export function FolderAccess(props: { state: HubState; send: (command: ClientCommand) => void }): JSX.Element {
   const grants = props.state.info.accessGrants ?? [];
   const [path, setPath] = useState('');
@@ -53,6 +55,7 @@ export function FolderAccess(props: { state: HubState; send: (command: ClientCom
             style={select}
             onChange={(event) => save(grants.map((entry) => (entry.path === grant.path ? { ...entry, access: event.target.value as AccessGrant['access'] } : entry)))}
           >
+            <option value="full">Full — deletes without asking</option>
             <option value="write">Read &amp; write</option>
             <option value="read">Read only</option>
           </select>
@@ -88,6 +91,7 @@ export function FolderAccess(props: { state: HubState; send: (command: ClientCom
           }}
         />
         <select value={access} aria-label="Access for the new folder" style={select} onChange={(event) => setAccess(event.target.value as AccessGrant['access'])}>
+          <option value="full">Full — deletes without asking</option>
           <option value="write">Read &amp; write</option>
           <option value="read">Read only</option>
         </select>
@@ -96,8 +100,10 @@ export function FolderAccess(props: { state: HubState; send: (command: ClientCom
         </button>
       </div>
       <div className="act" style={{ color: 'var(--faint)', marginTop: 6 }}>
-        Applies to work that starts from now. A whole drive can't be opened for writing; folders that don't exist are refused (the
-        activity feed says why).
+        Applies to work that starts from now. Full is for a scratch folder: workers do churny or destructive work there (render
+        frames, test builds, temp places) and delete without asking — a project, a folder holding projects or a whole workspace
+        root can't be made Full. A whole drive can't be opened for writing; folders that don't exist are refused (the activity
+        feed says why).
       </div>
     </div>
   );
