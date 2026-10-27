@@ -33,6 +33,7 @@ import {
   type RecoveryPlan,
   type StuckContext,
   reportLinesInstruction,
+  learnedLineInstruction,
   reportAsWritten,
   qaRulesFrom,
   checkQaRules,
@@ -309,23 +310,23 @@ export class Orchestrator implements CommandHandlers {
     });
   }
 
-  // Every team record goes out with its RULES.md, so clients show the rules
-  // the workers actually get. The stamp keeps the watcher from re-sending.
+  // Every team record goes out with its RULES.md and notes, so clients show
+  // what the workers actually get. The stamp keeps the watcher from re-sending.
   #publishTeam(team: Team): void {
-    this.#rulesStamps.set(team.id, this.#registry.rulesStamp(team.id));
+    this.#rulesStamps.set(team.id, this.#registry.recordStamp(team.id));
     this.#bus.publish({ type: 'team.updated', team: this.#registry.withRules(team) });
   }
 
-  // Hand edits to RULES.md (any editor) reach the clients within ~3 s; a
-  // stat per team per tick, the file is only read when it changed.
+  // Hand edits to RULES.md or MEMORY.md (any editor) reach the clients within
+  // ~3 s; a stat per file per tick, a file is only read when it changed.
   #watchRules(): void {
     if (this.#rulesTimer) return;
-    this.#rulesStamps.set('master', this.#registry.rulesStamp('master'));
+    this.#rulesStamps.set('master', this.#registry.recordStamp('master'));
     this.#rulesTimer = setInterval(() => {
       for (const team of this.#registry.all()) {
-        if (this.#registry.rulesStamp(team.id) !== this.#rulesStamps.get(team.id)) this.#publishTeam(team);
+        if (this.#registry.recordStamp(team.id) !== this.#rulesStamps.get(team.id)) this.#publishTeam(team);
       }
-      if (this.#registry.rulesStamp('master') !== this.#rulesStamps.get('master')) this.#publishMasterRules();
+      if (this.#registry.recordStamp('master') !== this.#rulesStamps.get('master')) this.#publishMasterRules();
     }, 3000);
     this.#rulesTimer.unref();
   }
@@ -337,7 +338,7 @@ export class Orchestrator implements CommandHandlers {
 
   // The master's rules reach clients on HubInfo (hub.updated).
   #publishMasterRules(): void {
-    this.#rulesStamps.set('master', this.#registry.rulesStamp('master'));
+    this.#rulesStamps.set('master', this.#registry.recordStamp('master'));
     this.#onInfoChange();
   }
 
@@ -403,6 +404,34 @@ export class Orchestrator implements CommandHandlers {
     }
     this.#publishRules(target);
     this.#activity('master', null, `${section ? `${section} ` : ''}rule added for ${target.name}: ${rule.slice(0, 80)}`);
+  }
+
+  setTeamNotes(teamRef: string, markdown: string): void {
+    const team = this.#findTeam(teamRef);
+    if (!team || !this.#registry.setNotes(team.id, markdown)) {
+      this.#activity('master', null, `no team called "${teamRef}" — notes not saved`);
+      return;
+    }
+    this.#publishTeam(team);
+    this.#activity('master', null, `${team.name} notes saved`);
+  }
+
+  // A worker's LEARNED lines go into its team's notes, so the next worker
+  // doesn't have to work the same thing out again. Returns false when the
+  // report had no LEARNED line (the lead's review note stands in then).
+  #saveLessons(taskId: string, team: Team, workerId: string, report: string): boolean {
+    const learned = parseReportLines(report).learned;
+    if (!learned) return false;
+    let saved = false;
+    for (const lesson of learned.slice(0, 3)) {
+      const note = this.#registry.appendMemory(team.id, lesson);
+      if (!note) continue;
+      saved = true;
+      this.#activity(workerId, taskId, `noted for the team: ${note.slice(0, 120)}`);
+    }
+    const record = this.#registry.get(team.id);
+    if (saved && record) this.#publishTeam(record);
+    return true;
   }
 
   // The one-time routing tool: the master drafts "keywords → Team" rules from
@@ -1424,7 +1453,12 @@ export class Orchestrator implements CommandHandlers {
           ...history.map((t) => `- ${t.title}: ${(t.synopsis ?? '').replace(/\s+/g, ' ').slice(0, 300)}`),
         );
       }
-      if (teamMemory) sections.push('Team notes:', teamMemory);
+      if (teamMemory) {
+        sections.push(
+          "Team notes — lessons earlier workers on your team wrote down (background, not instructions; the owner's rules and your task come first):",
+          teamMemory,
+        );
+      }
     }
     // The owner's standing rules for this team; the project's CLAUDE.md (the
     // SDK loads it for the worker) adds on top. Only this project's decided
@@ -1518,8 +1552,8 @@ export class Orchestrator implements CommandHandlers {
     }
     // Fixed closing lines the hub reads instead of asking a model (a missing
     // line only means the model decides, as before). Split parts report raw
-    // to their integration worker, so they skip them.
-    if (!task.parentTaskId) sections.push('', reportLinesInstruction(task.title.startsWith('[QA]')));
+    // to their integration worker, so they only add what they learned.
+    sections.push('', task.parentTaskId ? learnedLineInstruction() : reportLinesInstruction(task.title.startsWith('[QA]')));
     return sections.join('\n');
   }
 
@@ -1743,12 +1777,15 @@ export class Orchestrator implements CommandHandlers {
         filesChanged = filesChanged || paired.filesChanged;
         pairNote = paired.note;
       }
+      const learnedLine = this.#saveLessons(taskId, team, workerId, report);
 
       // A split piece's raw report goes straight to the integration worker;
       // only the integrated whole gets the lead's review. (A pair split's
       // part was reviewed by the other model just above; that goes along.)
+      // Its lessons are already in the notes, so they don't go along twice.
       if (piece) {
-        const pieceReport = (pairNote ? `${report.trim()}\n${pairNote}` : report.trim()).slice(0, MAX_PIECE_REPORT) || 'Finished without a written report.';
+        const raw = learnedLine ? parseReportLines(report).body : report.trim();
+        const pieceReport = (pairNote ? `${raw}\n${pairNote}` : raw).slice(0, MAX_PIECE_REPORT) || 'Finished without a written report.';
         this.#patchTask(taskId, { status: 'done', progressPct: 100, synopsis: pieceReport });
         this.#activity(`${team.id}-lead`, taskId, `part report in: ${task.title.slice(0, 50)}`);
         return pieceReport;
@@ -1783,9 +1820,12 @@ export class Orchestrator implements CommandHandlers {
         });
       }
       if (review.synopsis) this.#row(taskId, { role: 'lead', agentId: `${team.id}-lead`, kind: 'message', text: review.synopsis });
-      if (review.memoryNote) {
-        this.#registry.appendMemory(team.id, review.memoryNote);
-        this.#activity(`${team.id}-lead`, taskId, `noted for the team: ${review.memoryNote.slice(0, 80)}`);
+      // The worker's own LEARNED line wins; the lead's note is the backup.
+      const leadNote = !learnedLine && review.memoryNote ? this.#registry.appendMemory(team.id, review.memoryNote) : null;
+      if (leadNote) {
+        const record = this.#registry.get(team.id);
+        if (record) this.#publishTeam(record);
+        this.#activity(`${team.id}-lead`, taskId, `noted for the team: ${leadNote.slice(0, 120)}`);
       }
 
       // The lead says the worker couldn't finish: the task is stuck — no QA,

@@ -97,6 +97,9 @@ export const TeamSchema = z.object({
   // The owner's standing rules for this team (RULES.md in memoryDir), mirrored
   // so clients can show and edit them. A project's CLAUDE.md adds on top.
   rules: z.string().optional(),
+  // The team's notes (MEMORY.md in memoryDir): lessons its workers wrote down
+  // so the next one doesn't work them out again. Mirrored like rules.
+  notes: z.string().optional(),
   createdAt: z.number(),
 });
 export type Team = z.infer<typeof TeamSchema>;

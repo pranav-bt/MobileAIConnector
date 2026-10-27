@@ -65,8 +65,17 @@ function BulletList(props: { items: string[]; empty: string }): JSX.Element {
 }
 
 // The whole file, editable. Follows the file while not editing; mid-edit it
-// keeps the draft and says when the file changed underneath.
-function RulesEditor(props: { targetId: string; path: string; saved: string; hint: string; send: Send }): JSX.Element {
+// keeps the draft and says when the file changed underneath. RULES.md by
+// default; `file` + `save` reuse it for a team's MEMORY.md.
+function RulesEditor(props: {
+  targetId: string;
+  path: string;
+  saved: string;
+  hint: string;
+  send: Send;
+  file?: string;
+  save?: (markdown: string) => void;
+}): JSX.Element {
   const { saved } = props;
   const [draft, setDraft] = useState(saved);
   const [base, setBase] = useState(saved);
@@ -82,7 +91,7 @@ function RulesEditor(props: { targetId: string; path: string; saved: string; hin
   return (
     <div className="tcard" style={{ padding: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <div className="sect" style={{ margin: 0 }}>RULES.md</div>
+        <div className="sect" style={{ margin: 0 }}>{props.file ?? 'RULES.md'}</div>
         <span className="act mono" style={{ color: 'var(--faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {props.path}
         </span>
@@ -104,7 +113,8 @@ function RulesEditor(props: { targetId: string; path: string; saved: string; hin
           disabled={!dirty}
           style={{ ...smallBtn(dirty), flexGrow: 0 }}
           onClick={() => {
-            props.send({ type: 'team.rules.set', teamId: props.targetId, markdown: draft });
+            if (props.save) props.save(draft);
+            else props.send({ type: 'team.rules.set', teamId: props.targetId, markdown: draft });
             setBase(draft);
           }}
         >
@@ -208,6 +218,73 @@ function Connections(props: { team: Team; catalog: string[]; apps: App[]; send: 
   );
 }
 
+// What the team's workers had to work out (their LEARNED lines, or the lead's
+// note from a report). The newest go into every later worker's brief.
+function TeamNotes(props: { team: Team; send: Send }): JSX.Element {
+  const { team, send } = props;
+  const saved = team.notes ?? '';
+  const [editing, setEditing] = useState(false);
+  const save = (markdown: string) => send({ type: 'team.notes.set', teamId: team.id, markdown });
+  const lines = saved.split(/\r?\n/);
+  const notes = lines
+    .map((line, index) => ({ match: /^\s*[-*]\s+(?:(\d{4}-\d\d-\d\d):\s*)?(.*)$/.exec(line), index }))
+    .filter((note) => note.match)
+    .reverse();
+
+  return (
+    <>
+      <div className="tcard" style={{ padding: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+          <div className="sect" style={{ margin: 0 }}>Team notes</div>
+          <span className="act" style={{ color: notes.length > 0 ? 'var(--accent)' : 'var(--faint)' }}>
+            {notes.length > 0 ? plural(notes.length, 'note') : 'none yet'}
+          </span>
+          <div style={{ flexGrow: 1 }} />
+          <button className="btn" style={{ ...smallBtn(true), flexGrow: 0 }} onClick={() => setEditing(!editing)}>
+            {editing ? 'Close editor' : 'Edit as text'}
+          </button>
+        </div>
+        <div className="act" style={{ color: 'var(--faint)', marginTop: 4 }}>
+          lessons workers wrote down when they had to work something out — the newest go into every later worker's
+          brief so it doesn't solve the same thing again. Remove what's wrong or stale; edit the text to improve one.
+        </div>
+        {notes.length === 0 ? (
+          <span className="empty-note" style={{ display: 'block', marginTop: 8 }}>none yet</span>
+        ) : (
+          <div style={{ marginTop: 8, maxHeight: 320, overflowY: 'auto' }}>
+            {notes.map(({ match, index }) => (
+              <div key={index} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12, lineHeight: 1.5, padding: '3px 0' }}>
+                <span className="mono" style={{ color: 'var(--faint)', flexShrink: 0, fontSize: 11 }}>{match![1] ?? '—'}</span>
+                <span style={{ color: 'var(--text)', flexGrow: 1, minWidth: 0 }}>{match![2]}</span>
+                <button
+                  className="btn"
+                  title="Remove this note"
+                  style={{ ...smallBtn(true), flexGrow: 0, padding: '0 7px' }}
+                  onClick={() => save(lines.filter((_, i) => i !== index).join('\n'))}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      {editing && (
+        <RulesEditor
+          key={`${team.id}-notes`}
+          targetId={team.id}
+          file="MEMORY.md"
+          path={`${team.memoryDir}\\MEMORY.md`}
+          saved={saved}
+          hint='one note per "- " line (a date is optional) · lines that are not bullets are shown to workers first · also editable in any editor (picked up within a few seconds)'
+          send={send}
+          save={save}
+        />
+      )}
+    </>
+  );
+}
+
 function TeamRules(props: { team: Team; state: HubState; send: Send }): JSX.Element {
   const { team, send } = props;
   const saved = team.rules ?? '';
@@ -244,6 +321,8 @@ function TeamRules(props: { team: Team; state: HubState; send: Send }): JSX.Elem
         </div>
         <Connections team={team} catalog={props.state.info.mcpCatalog ?? []} apps={props.state.info.apps ?? []} send={send} />
       </div>
+
+      <TeamNotes key={`${team.id}-notes`} team={team} send={send} />
 
       <div className="tcard" style={{ padding: 16 }}>
         <div className="sect" style={{ margin: 0 }}>Decided conflicts</div>

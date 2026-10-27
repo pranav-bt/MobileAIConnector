@@ -394,6 +394,22 @@ export class MockEngine implements OrchestratorEngine {
             : 'HAND-OFFS: none',
       ].join('\n');
     }
+    // "learned-lesson" / "learned-other" end with a LEARNED line (learned-none:
+    // "none"); "notes-check:<word>" says whether the brief's team notes carry <word>.
+    if (taskText.includes('learned-')) {
+      const lesson = taskText.includes('learned-none')
+        ? 'none'
+        : taskText.includes('learned-other')
+          ? 'Roblox Studio upload stalls on big meshes → split them under 10k triangles first'
+          : 'Blender -b render came out black with no camera → add a temporary camera and light first';
+      report = `${report}\nLEARNED: ${lesson}`;
+    }
+    const notesCheck = /notes-check:(\w+)/.exec(taskText);
+    if (notesCheck) {
+      const at = args.prompt.indexOf('Team notes — lessons');
+      const notes = at < 0 ? '' : args.prompt.slice(at);
+      report = `notes-check ${notesCheck[1]}: ${notes.toLowerCase().includes(notesCheck[1]!) ? 'yes' : 'no'}\n${report}`;
+    }
     callbacks.onTranscript?.({ id: `${rowId}-done`, kind: 'message', text: report });
     // First runs change files unless told not to ("no-changes"); a continued
     // conversation only when its text says so.

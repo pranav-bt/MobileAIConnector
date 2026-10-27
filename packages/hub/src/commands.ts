@@ -33,6 +33,7 @@ export interface CommandHandlers {
   // Per-team RULES.md (the demo hub has none, so these are optional).
   setTeamRules?(teamRef: string, markdown: string): void;
   addTeamRule?(teamRef: string, rule: string, section?: string): void;
+  setTeamNotes?(teamRef: string, markdown: string): void;
   setTeamMcp?(teamRef: string, servers: string[]): void;
   registerProject(input: { name: string; workspaceDir: string; description?: string; quotaTokens?: number }): void;
   removeProject(projectId: string): void;
@@ -82,6 +83,8 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
       return handlers.setTeamRules?.(command.teamId, command.markdown);
     case 'team.rules.add':
       return handlers.addTeamRule?.(command.teamId, command.rule, command.section);
+    case 'team.notes.set':
+      return handlers.setTeamNotes?.(command.teamId, command.markdown);
     case 'team.mcp.set':
       return handlers.setTeamMcp?.(command.teamId, command.servers);
     case 'project.register':

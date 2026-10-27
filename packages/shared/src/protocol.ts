@@ -99,6 +99,8 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     rule: z.string().min(1).max(500),
     section: z.string().min(1).max(40).optional(),
   }),
+  // Replace a team's notes (MEMORY.md) from the Teams page editor.
+  z.object({ type: z.literal('team.notes.set'), teamId: z.string().min(1), markdown: z.string().max(40000) }),
   // Grant a team MCP connections by name, from the servers configured on
   // this PC (HubInfo.mcpCatalog). Full replace; [] removes them all. Local
   // clients only — a connection is a program the hub will start.

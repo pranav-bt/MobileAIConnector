@@ -1246,8 +1246,19 @@ export function reportLinesInstruction(qaTask: boolean): string {
           'HAND-OFFS: none   — or —   HAND-OFFS: <team>: <what they must do>; <team>: <what they must do>',
           '  (work another team must pick up because of yours — not ideas or nice-to-haves)',
         ]),
+    ...LEARNED_LINES,
     'Before those lines, write the report itself: a one-sentence headline of the outcome, then short "- " bullets.',
   ].join('\n');
+}
+
+// What a worker had to work out the hard way goes into its team's notes
+// (MEMORY.md), which every later worker on the team gets in its brief.
+const LEARNED_LINES = [
+  'LEARNED: none   — or —   LEARNED: <the problem you hit> → <what worked>   (one line per lesson, at most 3)',
+  "  (only what you had to work out the hard way and a teammate would otherwise have to work out again — a tool or app quirk, a workaround, a command or setting that works. Not what you did, not this project's own facts, never keys or passwords. Most tasks: none.)",
+];
+export function learnedLineInstruction(): string {
+  return ['End your report with this line (Agent HQ reads it):', ...LEARNED_LINES].join('\n');
 }
 
 // A short report that says how it went needs no lead review: it becomes the

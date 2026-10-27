@@ -110,6 +110,7 @@ try {
   const report = parseReportLines(lastReport(coding.id));
   record('coding report ends with STATUS', report.status === 'done', `status ${report.status} · body ${report.body.length} chars`);
   record('coding report lists HAND-OFFS', report.handoffs !== null, JSON.stringify(report.handoffs));
+  record('coding report has a LEARNED line', report.learned !== null, JSON.stringify(report.learned));
   record(
     'lead review: skipped when short, reviewed when long',
     coding.said(/report taken as written/) === (report.body.length <= 900 && report.body.split('\n').length <= 12 && !/\bconflict/i.test(report.body)),

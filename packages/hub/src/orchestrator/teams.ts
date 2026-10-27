@@ -19,6 +19,38 @@ import {
 
 export { parseRules, type ParsedRules };
 
+// Team notes: dated bullets kept in MEMORY.md, and how much of them goes into
+// a worker's brief (~1.5k tokens).
+const NOTES_KEPT = 60;
+const NOTES_BRIEF_CHARS = 6000;
+const NOTE_MAX_CHARS = 400;
+const isNote = (line: string) => /^\s*[-*]\s/.test(line);
+const noteKey = (text: string) =>
+  text
+    .replace(/^\s*[-*]\s+(\d{4}-\d\d-\d\d:\s*)?/, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+
+// One line, capped at a word, with anything key-like (a long run mixing
+// letters AND digits) blanked out — notes reach every later worker on the team.
+export function cleanNote(note: string): string {
+  let text = note
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[-*]\s+/, '')
+    .replace(/[A-Za-z0-9_-]{32,}/g, (run) => (/\d/.test(run) && /[A-Za-z]/.test(run) ? '[redacted]' : run));
+  if (text.length > NOTE_MAX_CHARS) text = `${text.slice(0, NOTE_MAX_CHARS).replace(/\s+\S*$/, '')}…`;
+  return text.length >= 12 ? text : '';
+}
+
+// The same lesson again: equal, or one holds the other (letters and digits only).
+function sameNote(line: string, note: string): boolean {
+  const a = noteKey(line);
+  const b = noteKey(note);
+  if (!a || !b) return false;
+  return a === b || (Math.min(a.length, b.length) >= 40 && (a.includes(b) || b.includes(a)));
+}
+
 // Teams are config records, persisted as data/teams.json. Creating a team is
 // inserting a record here — the office UI adds the room on the team.updated
 // event, nothing else needs to change. Each team also has the owner's
@@ -121,9 +153,12 @@ export class TeamRegistry {
     return path ? readRulesFile(path) : '';
   }
 
-  rulesStamp(teamId: string): string {
+  // Changes when the record clients see changes: RULES.md, and a team's notes.
+  recordStamp(teamId: string): string {
     const path = this.rulesPath(teamId);
-    return path ? rulesFileStamp(path) : '';
+    if (!path) return '';
+    const team = this.#teams.get(teamId);
+    return team ? `${rulesFileStamp(path)}|${rulesFileStamp(this.#notesPath(team))}` : rulesFileStamp(path);
   }
 
   setRules(teamId: string, markdown: string): boolean {
@@ -153,14 +188,15 @@ export class TeamRegistry {
     return true;
   }
 
-  // The record as clients see it: config + the owner's rules file.
+  // The record as clients see it: config + the owner's rules file + the
+  // team's notes.
   withRules(team: Team): Team {
-    return { ...team, rules: this.readRules(team.id) };
+    return { ...team, rules: this.readRules(team.id), notes: this.readNotes(team.id) };
   }
 
   #save(): void {
-    // Rules live in RULES.md, never in teams.json.
-    const records = [...this.#teams.values()].map(({ rules: _rules, ...team }) => team);
+    // Rules and notes live in their files, never in teams.json.
+    const records = [...this.#teams.values()].map(({ rules: _rules, notes: _notes, ...team }) => team);
     writeFileSync(this.#filePath, JSON.stringify(records, null, 2));
   }
 
@@ -201,26 +237,57 @@ export class TeamRegistry {
     return removed;
   }
 
-  // Durable lessons per team, appended by leads after reviews.
-  appendMemory(teamId: string, note: string): void {
-    const team = this.#teams.get(teamId);
-    if (!team) return;
-    const memoryPath = join(team.memoryDir, 'MEMORY.md');
-    const existing = existsSync(memoryPath) ? readFileSync(memoryPath, 'utf8') : `# ${team.name} — notes\n`;
-    const lines = existing.split('\n').filter((line) => line.trim().length > 0);
-    lines.push(`- ${new Date().toISOString().slice(0, 10)}: ${note.replace(/\s+/g, ' ').trim().slice(0, 240)}`);
-    // Header + the most recent 40 notes.
-    const header = lines[0]?.startsWith('#') ? [lines[0]] : [`# ${team.name} — notes`];
-    const notes = lines.filter((line) => line.startsWith('- ')).slice(-40);
-    writeFileSync(memoryPath, [...header, ...notes].join('\n') + '\n');
+  #notesPath(team: Team): string {
+    return join(team.memoryDir, 'MEMORY.md');
   }
 
-  readMemory(teamId: string): string {
+  // Team notes (MEMORY.md): lessons workers wrote down (their LEARNED lines)
+  // or the lead took from a report. The owner reads and edits the same file.
+  readNotes(teamId: string): string {
     const team = this.#teams.get(teamId);
     if (!team) return '';
-    const memoryPath = join(team.memoryDir, 'MEMORY.md');
-    if (!existsSync(memoryPath)) return '';
-    return readFileSync(memoryPath, 'utf8').slice(0, 1500);
+    const path = this.#notesPath(team);
+    return existsSync(path) ? readFileSync(path, 'utf8') : '';
+  }
+
+  setNotes(teamId: string, markdown: string): boolean {
+    const team = this.#teams.get(teamId);
+    if (!team) return false;
+    mkdirSync(team.memoryDir, { recursive: true });
+    writeFileSync(this.#notesPath(team), markdown.replace(/\r\n/g, '\n').trimEnd() + '\n');
+    return true;
+  }
+
+  // One lesson, dated, at the end of the notes. Returns the note as saved,
+  // or null when the team already has it (or there's nothing to save). Past
+  // NOTES_KEPT the oldest dated bullets go; anything else the owner wrote stays.
+  appendMemory(teamId: string, note: string): string | null {
+    const team = this.#teams.get(teamId);
+    const clean = cleanNote(note);
+    if (!team || !clean) return null;
+    const existing = this.readNotes(teamId) || `# ${team.name} — notes`;
+    const lines = existing.replace(/\r\n/g, '\n').trimEnd().split('\n');
+    if (lines.some((line) => isNote(line) && sameNote(line, clean))) return null;
+    lines.push(`- ${new Date().toISOString().slice(0, 10)}: ${clean}`);
+    let excess = lines.filter(isNote).length - NOTES_KEPT;
+    const kept = lines.filter((line) => !(/^- \d{4}-\d\d-\d\d: /.test(line) && excess-- > 0));
+    this.setNotes(teamId, kept.join('\n'));
+    return clean;
+  }
+
+  // What a worker's brief carries: the owner's own lines, then the newest
+  // notes that fit NOTES_BRIEF_CHARS (kept in file order), so the brief stays
+  // the same size however long the notes grow.
+  readMemory(teamId: string): string {
+    const lines = this.readNotes(teamId)
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .split(/\r?\n/)
+      .filter((line) => line.trim() && !line.startsWith('#'));
+    let budget = NOTES_BRIEF_CHARS;
+    const fits = (line: string) => (line.length < budget ? ((budget -= line.length + 1), true) : false);
+    const prose = lines.filter((line) => !isNote(line)).filter(fits);
+    const notes = lines.filter(isNote).reverse().filter(fits).reverse();
+    return [...prose, ...notes].join('\n');
   }
 
   add(input: {

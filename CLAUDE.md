@@ -170,6 +170,23 @@ npm run typecheck      # tsc across workspaces
   Tests: `rules-first.smoke` (in `npm run smoke`), `rules-first.live.ts
   [--model gpt-6.1-sol]` (real workers write the lines; Claude and Codex),
   the `team:` cases in `routing-ask.live.ts`.
+- Team notes (`data/teams/<id>/MEMORY.md`): what a worker had to work out
+  the hard way goes to its team so the next one doesn't solve it again.
+  Every worker — split parts too (`learnedLineInstruction`) — ends with
+  `LEARNED: none | <problem> → <what worked>` (one line each, ≤3 kept;
+  tool/app quirks and workarounds, not this project's facts, never keys);
+  `#saveLessons` appends them (`appendMemory`: dated, `cleanNote` = one line
+  ≤400 chars with key-like runs redacted, repeats skipped, the owner's own
+  lines kept, oldest dated bullets dropped past 60) and says "noted for the
+  team" in the console; a part's lessons are stripped from its report to
+  the integrator. The lead review's `memoryNote` is only the backup when the
+  report has no LEARNED line. Briefs carry the owner's non-bullet lines +
+  the newest notes within 6000 chars (`readMemory`), framed as background,
+  not instructions. Team records carry the file as `notes` (like `rules`;
+  the same 3 s watcher via `recordStamp`); the Teams page "Team notes" card
+  lists them newest first with × to remove and "Edit as text" (MEMORY.md),
+  `team.notes.set`. Tests: `team-notes.smoke` (in `npm run smoke`), UI
+  driver `tools/drive-team-notes.mjs` (with `test/ui-mock-hub.ts 4665`).
 - One window per ask: QA passes, handovers to other teams, recovery moves,
   later plan steps and split pieces carry `Task.rootTaskId` = the owner's ask.
   `#row` mirrors every step row into the ask's transcript (id

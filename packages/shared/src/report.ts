@@ -3,6 +3,7 @@
 //   STATUS: done            |  STATUS: blocked — <what stopped it>
 //   HAND-OFFS: none         |  HAND-OFFS: <team>: <what they must do>; …
 //   VERDICT: pass           |  VERDICT: issues — <what must be fixed>   (QA reports)
+//   LEARNED: none           |  LEARNED: <problem> → <what worked>   (one line per lesson)
 // A missing or unreadable line is simply null: the model decides, as before.
 
 export interface ReportLines {
@@ -11,15 +12,17 @@ export interface ReportLines {
   handoffs: string[] | null; // [] = "none"; null = no line
   verdict: 'pass' | 'issues' | null;
   issues: string; // what QA wants fixed, when the verdict is issues
+  learned: string[] | null; // lessons for the team notes; [] = "none"; null = no line
   body: string; // the report without these lines
 }
 
 // "STATUS: done", "**Status:** done", "- `VERDICT: pass`", "> Hand-offs: none"
-const LINE = /^\s*(?:[-*>]\s+)?[*_`]*\s*(status|hand-?offs?|verdict)\s*[*_`]*\s*:\s*[*_`]*\s*(.*?)\s*[*_`]*\s*$/i;
+const LINE = /^\s*(?:[-*>]\s+)?[*_`]*\s*(status|hand-?offs?|verdict|learned)\s*[*_`]*\s*:\s*[*_`]*\s*(.*?)\s*[*_`]*\s*$/i;
 const DASH = /^[\s—–:-]+/;
+const NONE = /^(none|no|nothing|n\/a|-)\.?$/i;
 
 export function parseReportLines(report: string): ReportLines {
-  const result: ReportLines = { status: null, blocked: '', handoffs: null, verdict: null, issues: '', body: '' };
+  const result: ReportLines = { status: null, blocked: '', handoffs: null, verdict: null, issues: '', learned: null, body: '' };
   const kept: string[] = [];
   for (const line of report.split(/\r?\n/)) {
     const match = LINE.exec(line);
@@ -51,8 +54,12 @@ export function parseReportLines(report: string): ReportLines {
       } else {
         kept.push(line);
       }
+    } else if (key === 'learned') {
+      // Every LEARNED line adds one lesson; "none" only says there was none.
+      result.learned ??= [];
+      if (!NONE.test(value) && value) result.learned.push(value);
     } else {
-      result.handoffs = /^(none|no|nothing|n\/a|-)\.?$/i.test(value)
+      result.handoffs = NONE.test(value)
         ? []
         : value
             .split(';')

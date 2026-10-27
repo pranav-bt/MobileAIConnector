@@ -10,7 +10,7 @@
     "dev:mock": "tsx src/index.ts --engine mock",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "smoke": "tsx test/routing.smoke.ts && tsx test/codex-engine.smoke.ts && tsx test/console.smoke.ts && tsx test/pair.smoke.ts && tsx test/pair-split.smoke.ts && tsx test/pair-debate.smoke.ts && tsx test/codex-freelancers.smoke.ts && tsx test/one-window.smoke.ts && tsx test/project-mcp.smoke.ts && tsx test/apps.smoke.ts && tsx test/rules-first.smoke.ts && tsx test/message-routing.smoke.ts && tsx test/thread.smoke.ts && tsx test/smoke.ts && tsx test/orchestrator.smoke.ts && tsx test/pairing.smoke.ts"
+    "smoke": "tsx test/routing.smoke.ts && tsx test/codex-engine.smoke.ts && tsx test/console.smoke.ts && tsx test/pair.smoke.ts && tsx test/pair-split.smoke.ts && tsx test/pair-debate.smoke.ts && tsx test/codex-freelancers.smoke.ts && tsx test/one-window.smoke.ts && tsx test/project-mcp.smoke.ts && tsx test/apps.smoke.ts && tsx test/rules-first.smoke.ts && tsx test/team-notes.smoke.ts && tsx test/message-routing.smoke.ts && tsx test/thread.smoke.ts && tsx test/smoke.ts && tsx test/orchestrator.smoke.ts && tsx test/pairing.smoke.ts"
   },
   "dependencies": {
     "@agent-hq/shared": "*",
