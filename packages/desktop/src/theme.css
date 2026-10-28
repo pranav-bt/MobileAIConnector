@@ -196,6 +196,12 @@ button {
   color: var(--accent);
   background: rgba(79, 216, 196, 0.08);
 }
+.pair-toggle.on.away {
+  border-color: rgba(232, 180, 74, 0.6);
+  color: var(--amber);
+  background: rgba(232, 180, 74, 0.1);
+  font-weight: 700;
+}
 
 /* Floor plan */
 .floor {

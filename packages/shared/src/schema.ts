@@ -318,6 +318,9 @@ export const PermissionRequestSchema = z.object({
   scope: PermissionScopeSchema,
   requestedAt: z.number(),
   resolvedAt: z.number().nullable(),
+  // Decided by Away (the owner was away and didn't answer in time): what it
+  // did and why. Away only ever takes the safe answer.
+  auto: z.string().optional(),
 });
 export type PermissionRequest = z.infer<typeof PermissionRequestSchema>;
 
@@ -547,6 +550,10 @@ export const HubInfoSchema = z.object({
   // Roblox Studio windows open on this PC (studios.list refreshes it), for
   // picking a task's Studio.
   studios: z.array(z.object({ name: z.string(), placeId: z.string().nullable() })).optional(),
+  // Away: while on, a card left unanswered for `minutes` gets its safe answer
+  // (worker requests are declined; master cards keep the work going) so
+  // nothing waits all night.
+  away: z.object({ on: z.boolean(), since: z.number().nullable(), minutes: z.number() }).optional(),
 });
 export type HubInfo = z.infer<typeof HubInfoSchema>;
 

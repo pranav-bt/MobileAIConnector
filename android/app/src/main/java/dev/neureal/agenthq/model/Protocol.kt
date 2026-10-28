@@ -128,6 +128,8 @@ data class PermissionRequest(
     val scope: String = "once",
     val requestedAt: Double = 0.0,
     val resolvedAt: Double? = null,
+    // Answered by Away (the owner didn't answer in time): what it did.
+    val auto: String? = null,
 )
 
 @Serializable
@@ -184,6 +186,7 @@ data class PaState(
 
 @Serializable
 data class Snapshot(
+    val info: HubInfo = HubInfo(),
     val agents: List<Agent> = emptyList(),
     val teams: List<Team> = emptyList(),
     val tasks: List<Task> = emptyList(),
@@ -192,6 +195,14 @@ data class Snapshot(
     val usage: Usage = Usage(),
     val pa: PaState = PaState(),
 )
+
+// The parts of the hub's info the phone uses.
+@Serializable
+data class HubInfo(val away: AwayInfo? = null)
+
+// Away: while on, cards left `minutes` unanswered get their safe answer.
+@Serializable
+data class AwayInfo(val on: Boolean = false, val since: Double? = null, val minutes: Double = 15.0)
 
 @Serializable
 data class SharedFile(
@@ -217,6 +228,7 @@ sealed interface HubEvent {
     data class ProjectRemoved(val projectId: String) : HubEvent
     data class UsageUpdated(val usage: Usage) : HubEvent
     data class PaUpdated(val pa: PaState) : HubEvent
+    data class HubUpdated(val info: HubInfo) : HubEvent
     data class FileShared(val file: SharedFile) : HubEvent
     data class TaskTranscript(val taskId: String, val entries: List<TranscriptEntry>, val backfill: Boolean, val more: Boolean) : HubEvent
     data object Ignored : HubEvent
@@ -238,6 +250,7 @@ fun decodeEnvelope(raw: String): HubEvent? {
             "project.removed" -> HubEvent.ProjectRemoved(event["projectId"]!!.jsonPrimitive.content)
             "usage.updated" -> HubEvent.UsageUpdated(json.decodeFromJsonElement(event["usage"]!!))
             "pa.updated" -> HubEvent.PaUpdated(json.decodeFromJsonElement(event["pa"]!!))
+            "hub.updated" -> HubEvent.HubUpdated(json.decodeFromJsonElement(event["info"]!!))
             "file.shared" -> HubEvent.FileShared(json.decodeFromJsonElement(event["file"]!!))
             "task.transcript" -> HubEvent.TaskTranscript(
                 event["taskId"]!!.jsonPrimitive.content,
@@ -328,6 +341,11 @@ object Commands {
     fun tasksControl(action: String): JsonObject = buildJsonObject {
         put("type", "tasks.control")
         put("action", action)
+    }
+
+    fun awaySet(on: Boolean): JsonObject = buildJsonObject {
+        put("type", "away.set")
+        put("on", on)
     }
 
     fun paListAdd(list: String, text: String): JsonObject = buildJsonObject {

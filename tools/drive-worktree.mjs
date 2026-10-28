@@ -58,6 +58,15 @@ await page.waitForFunction(() => !document.body.textContent.includes("Bots' work
 check("after merging, the bots' work section is gone", true);
 await page.screenshot({ path: `${SHOTS}/worktree-3-merged.png`, fullPage: true });
 
+// 4. Away: the switch turns on (amber AWAY) and off again.
+await page.getByRole('button', { name: 'Away', exact: true }).click();
+await page.waitForSelector('button[aria-pressed="true"]:has-text("AWAY")', { timeout: 10000 });
+check('Away turns on', true);
+await page.locator('.topbar').screenshot({ path: `${SHOTS}/worktree-4-away.png` });
+await page.getByRole('button', { name: 'AWAY', exact: true }).click();
+await page.waitForSelector('button[aria-pressed="false"]:has-text("Away")', { timeout: 10000 });
+check('Away turns off', true);
+
 check('no page errors', errors.length === 0, errors.join(' | '));
 await browser.close();
 console.log(checks.every(Boolean) ? 'WORKTREE UI PASS' : 'WORKTREE UI FAIL');

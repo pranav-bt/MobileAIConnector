@@ -252,8 +252,11 @@ npm run typecheck      # tsc across workspaces
 - The bots' worktree (so long jobs never stop for a card): every git
   project's workers run in a worktree on `agent-hq/<base>`, cut from the
   owner's current branch (`WorktreeManager`, worktrees.ts; made on first need
-  under `~/AgentHQ/worktrees/<project>` — NOT in Bots, which every team can
-  write; `worktreesDir` option, off in mock mode). On creation it copies the
+  in the owner's full-access folder, `D:\Work\Bots\worktrees\<project>` —
+  the owner's call: it's throwaway space, so a neighbour deleting it is
+  acceptable (committed work survives on the branch; a missing folder is
+  pruned and re-made); `~/AgentHQ/worktrees` without a full grant;
+  `worktreesDir` option = that fallback, null/mock = off). On creation it copies the
   ignored files a checkout needs (≤1 MB each, ≤50 MB: secrets.env, local
   settings — never the hub's data dir), Wally `Packages/` folders, and runs
   `npm ci` when node_modules was ignored. The record rides the project
@@ -300,6 +303,19 @@ npm run typecheck      # tsc across workspaces
   brief names the Studio and the tools only where Studio is in play.
   `studios.list` refreshes `HubInfo.studios` for the picker. Tests:
   `worktree.smoke` (in `npm run smoke`).
+- Away (TopBar "Away" / the phone's ☾ button, `away.set`, allowed from the
+  paired phone too — it never approves a worker's request; config
+  `away: {on, since, minutes}`, default 15 min, on `HubInfo.away`): while
+  on, `#awaySweep` (30 s) answers any card pending longer than `minutes`
+  (since it was raised or Away went on) with `#awayAnswer`'s safe answer —
+  a worker's `perm-` card is DECLINED and the worker gets an inbox note (find
+  a way inside its folders, or STATUS: blocked); pair caps go with the work
+  as it stands ("Go with…" / the author's draft / skip the split); `msg-`
+  keeps it with its team; `stuck-` runs the master's recovery (one pass,
+  then it escalates); a rule conflict → the project wins; `project-`,
+  `route-`, `scale-`, `rules-suggest-` → declined. The card gets `auto`
+  (shown "by Away" in the console) and a status row; Away off posts a
+  "welcome back" summary. Tests: `away.smoke` (in `npm run smoke`).
 - Project MCP: besides its team's grants, a worker gets the MCP servers set
   up for its project folder, as Claude Code opened there loads them
   (`projectMcpServers` in engine/mcp-catalog.ts): the folder's own servers

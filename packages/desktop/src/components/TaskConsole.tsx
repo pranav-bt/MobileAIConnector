@@ -248,7 +248,8 @@ function Row(props: { state: HubState; entry: TranscriptEntry; send: (command: C
     const resolved = request?.status ?? (entry.state === 'ok' ? 'approved' : entry.state === 'error' ? 'denied' : 'answered');
     return (
       <div className="act" style={{ margin: '6px 0', color: 'var(--faint)' }}>
-        <span style={{ color: resolved === 'approved' ? 'var(--green)' : 'var(--amber)' }}>card {resolved}</span> · {entry.text}
+        <span style={{ color: resolved === 'approved' ? 'var(--green)' : 'var(--amber)' }}>card {resolved}{request?.auto ? ' by Away' : ''}</span> · {entry.text}
+        {request?.auto && <div style={{ marginTop: 2 }}>{request.auto}</div>}
       </div>
     );
   }

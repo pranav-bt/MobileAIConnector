@@ -19,7 +19,7 @@ import { ProjectRegistry } from './orchestrator/projects.js';
 import { PairingManager } from './security/pairing.js';
 import { SecurityController } from './security/controller.js';
 import { startLimitsPoller } from './usage/limits.js';
-import { loadHubConfig, saveModelOverrides, savePaEnabled, saveAccessGrants, savePermissionMode, type PermissionMode, type WorkspaceRoot } from './config.js';
+import { loadHubConfig, saveModelOverrides, savePaEnabled, saveAccessGrants, savePermissionMode, saveAway, type AwayState, type PermissionMode, type WorkspaceRoot } from './config.js';
 import type { CommandHandlers } from './commands.js';
 import { projectMcpServers, readMcpCatalog } from './engine/mcp-catalog.js';
 import { CodexEngine } from './engine/codex.js';
@@ -47,10 +47,15 @@ export interface HubOptions {
   claudeConfigPath?: string; // tests override ~/.claude.json (the MCP catalog)
   generalDir?: string; // tests override ~/AgentHQ/General (the General workspace)
   detectApps?: () => string[]; // tests override the Blender install scan
-  // Where the bots' worktrees go (null = off: workers run in the project
-  // folder). Default: ~/AgentHQ/worktrees for real agents, off in mock mode.
+  // Where the bots' worktrees go when no full-access folder is granted (with
+  // one — D:\Work\Bots — they go in its worktrees\). null = off: workers run
+  // in the project folder. Default: ~/AgentHQ/worktrees for real agents, off
+  // in mock mode.
   worktreesDir?: string | null;
   studios?: StudioLister; // tests override the Roblox Studio window list
+  // Tests: Away's wait (minutes; fractions ok) and how often it checks.
+  awayMinutes?: number;
+  awaySweepMs?: number;
 }
 
 export interface RunningHub {
@@ -117,6 +122,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   let masterRules = (): string => '';
   let mcpCatalog = (): string[] => [];
   let studioNames = (): { name: string; placeId: string | null }[] => [];
+  let awayState = (): AwayState | null => null;
   let apps: AppRegistry | null = null;
   let workerCwds: () => string[] = () => [];
   let attachFreelancers: (manager: FreelancerManager) => void = () => {};
@@ -175,6 +181,15 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
       options.worktreesDir !== undefined ? options.worktreesDir : mode === 'claude' ? join(homedir(), 'AgentHQ', 'worktrees') : null,
     );
     if (options.studios) orchestrator.configureStudios(new StudioDirectory(options.studios));
+    orchestrator.configureAway(
+      { ...config.away, ...(options.awayMinutes ? { minutes: options.awayMinutes } : {}) },
+      (away) => {
+        saveAway(dataDir, away);
+        bus.publish({ type: 'hub.updated', info: makeInfo() });
+      },
+      options.awaySweepMs,
+    );
+    awayState = () => orchestrator.awayState();
     studioNames = () => orchestrator.studioNames();
     orchestrator.onInfoChange(() => bus.publish({ type: 'hub.updated', info: makeInfo() }));
     masterRules = () => orchestrator.masterRulesText();
@@ -223,6 +238,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     accessGrants,
     ...(apps ? { apps: apps.list(), appSuggestions: apps.suggestions() } : {}),
     studios: studioNames(),
+    ...(awayState() ? { away: awayState()! } : {}),
   });
   bus.publish({ type: 'hub.updated', info: makeInfo() });
 

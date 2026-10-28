@@ -21,7 +21,16 @@ export interface HubConfig {
   paEnabled: boolean; // the PA desk master switch (/pa on|off)
   modelOverrides: ModelOverrides; // owner model choices over the defaults
   accessGrants: AccessGrant[]; // folders every worker may read / write (Settings > Hub)
+  // Away: cards left unanswered this long get their safe answer.
+  away: AwayState;
 }
+
+export interface AwayState {
+  on: boolean;
+  since: number | null;
+  minutes: number;
+}
+export const DEFAULT_AWAY_MINUTES = 15;
 
 // Claude Code's scratch folder (…\Temp\claude\<project>\<session>\scratchpad):
 // workers use it the way Claude Code does in VS Code, so it's open by default.
@@ -37,6 +46,7 @@ const DEFAULT_CONFIG: HubConfig = {
   paEnabled: true,
   modelOverrides: { teams: {} },
   accessGrants: DEFAULT_ACCESS_GRANTS,
+  away: { on: false, since: null, minutes: DEFAULT_AWAY_MINUTES },
 };
 
 export function loadHubConfig(dataDir: string): HubConfig {
@@ -63,6 +73,11 @@ export function loadHubConfig(dataDir: string): HubConfig {
               return result.success ? [result.data] : [];
             })
           : DEFAULT_ACCESS_GRANTS,
+        away: {
+          on: parsed.away?.on === true,
+          since: parsed.away?.on === true && typeof parsed.away.since === 'number' ? parsed.away.since : null,
+          minutes: typeof parsed.away?.minutes === 'number' && parsed.away.minutes >= 1 ? parsed.away.minutes : DEFAULT_AWAY_MINUTES,
+        },
       };
     } catch {
       /* unreadable — fall through to defaults */
@@ -94,4 +109,10 @@ export function saveAccessGrants(dataDir: string, grants: AccessGrant[]): void {
   const configPath = join(dataDir, 'config.json');
   const config = loadHubConfig(dataDir);
   writeFileSync(configPath, JSON.stringify({ ...config, accessGrants: grants }, null, 2));
+}
+
+export function saveAway(dataDir: string, away: AwayState): void {
+  const configPath = join(dataDir, 'config.json');
+  const config = loadHubConfig(dataDir);
+  writeFileSync(configPath, JSON.stringify({ ...config, away }, null, 2));
 }

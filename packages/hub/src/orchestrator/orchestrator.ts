@@ -46,7 +46,7 @@ import { evaluatePermission, type WorkspaceScope } from './policy.js';
 import { StudioDirectory } from './studios.js';
 import { WorktreeManager } from './worktrees.js';
 import { delay, isInside, type LockedDir } from './util.js';
-import type { PermissionMode } from '../config.js';
+import type { AwayState, PermissionMode } from '../config.js';
 import { parseRules, type ParsedRules, type TeamRegistry } from './teams.js';
 import { slugify, type ProjectRegistry } from './projects.js';
 import type { TranscriptRow, TranscriptStore } from '../transcripts.js';
@@ -288,6 +288,12 @@ export class Orchestrator implements CommandHandlers {
   // Roblox Studio windows open on this PC (tests inject a fake list).
   #studios = new StudioDirectory();
   #studioList: { name: string; placeId: string | null }[] = [];
+  // Away: the owner's switch, the sweep that answers overdue cards, and what
+  // it decided since the owner left (the welcome-back summary).
+  #away: AwayState = { on: false, since: null, minutes: 15 };
+  #onAwayChange: (away: AwayState) => void = () => {};
+  #awayTimer: NodeJS.Timeout | null = null;
+  #awayDecided: string[] = [];
 
   #projects: ProjectRegistry;
   #policy: { mode: PermissionMode };
@@ -357,6 +363,8 @@ export class Orchestrator implements CommandHandlers {
   stopRulesWatch(): void {
     if (this.#rulesTimer) clearInterval(this.#rulesTimer);
     this.#rulesTimer = null;
+    if (this.#awayTimer) clearInterval(this.#awayTimer);
+    this.#awayTimer = null;
   }
 
   // The master's rules reach clients on HubInfo (hub.updated).
@@ -946,14 +954,19 @@ export class Orchestrator implements CommandHandlers {
 
   // --- the bots' worktrees ---------------------------------------------------
   // Every git project's workers run in a worktree on agent-hq/<base>, cut
-  // from the owner's branch (made on first need, under `root`). null = off.
+  // from the owner's branch, made on first need in the owner's full-access
+  // scratch folder (<Bots>\worktrees\<project>) — `fallback` when there's
+  // none. null = off.
 
-  configureWorktrees(root: string | null): void {
-    this.#worktreeRoot = root;
+  configureWorktrees(fallback: string | null): void {
+    this.#worktreeRoot = fallback;
     this.#hideFolders();
-    this.#worktrees = root
+    this.#worktrees = fallback
       ? new WorktreeManager({
-          root: () => root,
+          root: () => {
+            const free = this.#freeDirs()[0];
+            return free ? join(free, 'worktrees') : fallback;
+          },
           get: (projectId) => this.#projects.get(projectId)?.worktree ?? null,
           save: (projectId, worktree) => {
             const project = this.#projects.setWorktree(projectId, worktree);
@@ -1024,6 +1037,107 @@ export class Orchestrator implements CommandHandlers {
       this.#activity('master', null, `couldn't list Roblox Studio windows — ${error instanceof Error ? error.message : String(error)}`);
     }
     this.#onInfoChange();
+  }
+
+  // --- Away -------------------------------------------------------------------
+  // While the owner is away, a card left unanswered for `minutes` gets its
+  // safe answer instead of holding the work all night: a worker's request is
+  // DECLINED (never approved) and the worker is told to find a way inside
+  // its folders or report it blocked; master cards keep the work going the
+  // careful way (see #awayAnswer). Every such card says what Away did.
+
+  configureAway(away: AwayState, onChange: (away: AwayState) => void, sweepMs = 30_000): void {
+    this.#away = away;
+    this.#onAwayChange = onChange;
+    if (this.#awayTimer) clearInterval(this.#awayTimer);
+    this.#awayTimer = setInterval(() => this.#awaySweep(), sweepMs);
+    this.#awayTimer.unref();
+  }
+
+  awayState(): AwayState {
+    return this.#away;
+  }
+
+  setAway(on: boolean): void {
+    if (on === this.#away.on) return;
+    if (on) {
+      this.#away = { ...this.#away, on: true, since: now() };
+      this.#awayDecided = [];
+      this.#activity('master', null, `away — cards left ${this.#away.minutes} min get their safe answer: workers' requests are declined (they work around them or report blocked), stuck/pair/rule cards keep the work going`);
+    } else {
+      this.#away = { ...this.#away, on: false, since: null };
+      const decided = this.#awayDecided;
+      this.#awayDecided = [];
+      this.#activity(
+        'master',
+        null,
+        decided.length
+          ? `welcome back — while you were away ${decided.length} card${decided.length === 1 ? ' was' : 's were'} answered for you: ${decided.slice(0, 8).join(' · ')}${decided.length > 8 ? ` · and ${decided.length - 8} more` : ''}`
+          : 'welcome back — nothing needed answering while you were away',
+      );
+    }
+    this.#onAwayChange(this.#away);
+    this.#awaySweep();
+  }
+
+  #awaySweep(): void {
+    if (!this.#away.on) return;
+    const limit = this.#away.minutes * 60_000;
+    const since = this.#away.since ?? now();
+    for (const request of Object.values(this.#bus.state.permissions)) {
+      if (request.status !== 'pending') continue;
+      if (now() - Math.max(request.requestedAt, since) < limit) continue;
+      this.#awayResolve(request);
+    }
+  }
+
+  // The safe answer for a card nobody answered.
+  #awayAnswer(request: PermissionRequest): { decision: 'approve' | 'deny'; choice?: number; did: string } {
+    const id = request.id;
+    const pick = (pattern: RegExp, did: (label: string) => string) => {
+      const index = (request.options ?? []).findIndex((label) => pattern.test(label));
+      return index >= 0 ? { decision: 'approve' as const, choice: index, did: did(request.options![index]!) } : null;
+    };
+    if (id.startsWith('pair-')) {
+      // Disagreement / plan / debate caps: go with the work as it stands (the
+      // author's version, plan or draft), else skip the split.
+      return (
+        pick(/^go with/i, (label) => `chose "${label}"`) ??
+        (id.includes('-debate') && request.options?.length ? { decision: 'approve', choice: 0, did: `chose "${request.options[0]}"` } : null) ??
+        pick(/skip the split/i, (label) => `chose "${label}"`) ?? { decision: 'deny', did: 'left it for you' }
+      );
+    }
+    if (id.startsWith('msg-')) return pick(/keep it here/i, () => 'kept the message with its team') ?? { decision: 'deny', did: 'held the message' };
+    if (id.startsWith('stuck-')) return { decision: 'approve', did: "ran the master's recovery (one try; it escalates if that sticks too)" };
+    if (id.startsWith('rules-suggest-')) return { decision: 'deny', did: 'added no routing rules' };
+    if (id.startsWith('rules-')) return { decision: 'approve', did: "the project's rule won (noted under Resolved conflicts — change it any time)" };
+    if (id.startsWith('project-')) return { decision: 'deny', did: 'ran nothing (resend it with @project)' };
+    if (id.startsWith('route-')) return { decision: 'deny', did: 'kept it in the current project' };
+    if (id.startsWith('scale-')) return { decision: 'deny', did: "didn't add a worker" };
+    return { decision: 'deny', did: 'declined it' };
+  }
+
+  #awayResolve(request: PermissionRequest): void {
+    const answer = this.#awayAnswer(request);
+    const minutes = this.#away.minutes;
+    const what = (request.summary || request.command).replace(/\s+/g, ' ').slice(0, 90);
+    this.respondPermission(request.id, answer.decision, 'once', answer.choice);
+    const decided = this.#bus.state.permissions[request.id];
+    if (!decided || decided.status === 'pending') return;
+    const auto = `You were away — after ${minutes} min with no answer, Away ${answer.did}.`;
+    this.#bus.publish({ type: 'permission.updated', request: { ...decided, auto } });
+    this.#awayDecided.push(`${answer.did} — ${what}`);
+    if (request.taskId) this.#row(request.taskId, { role: 'master', agentId: 'master', kind: 'status', text: `${auto} (${what})` });
+    // A worker's request: tell it why, and what to do instead.
+    if (request.id.startsWith('perm-')) {
+      this.#inboxes
+        .get(request.taskId)
+        ?.push(
+          `Agent HQ: the owner is away, so your request was declined automatically: ${request.command.slice(0, 300)}\n` +
+            'Find a way that stays inside your own folders (your project/worktree and the scratch folders you were given) without it. ' +
+            'If the task truly needs it, finish everything else and report it under STATUS: blocked — the owner will decide when back.',
+        );
+    }
   }
 
   // What the policy checks a worker's command against.
@@ -1786,7 +1900,8 @@ export class Orchestrator implements CommandHandlers {
         `You work in the bots' worktree of ${taskProject.name}: ${workScope.cwd}, on the branch ${worktree?.branch ?? 'agent-hq/…'} (cut from the owner's ${worktree?.base ?? 'branch'}). ` +
           `The owner's own checkout, ${workScope.projectDir}, is theirs: read it if useful, never write there. ` +
           'Everything here can be undone, so work freely: deleting, resetting, rebuilding and project-local installs (npm/pnpm/yarn, uv, a venv in the project) run without asking — the hub commits the worktree before anything destructive and after your run. ' +
-          'Commit your work here as usual. Never switch branches, move or delete other branches or tags, push, or change git config or remotes — the owner reviews this branch and merges it.',
+          'Commit your work here as usual. Never switch branches, move or delete other branches or tags, push, or change git config or remotes — the owner reviews this branch and merges it. ' +
+          "Other projects' worktrees may sit beside this one — they are other teams' work: leave them alone.",
       );
     }
     const studioNote = this.#studioNote(task, taskProject);

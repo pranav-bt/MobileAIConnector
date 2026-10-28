@@ -191,6 +191,7 @@ export function TopBar(props: {
   // until changed; every other open Studio stays the owner's).
   const [studio, setStudio] = useState('');
   const studios = props.state.info.studios ?? [];
+  const away = props.state.info.away;
   const hintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeCount = Object.values(props.state.agents).filter(isActive).length;
   const usage = props.state.usage;
@@ -274,6 +275,19 @@ export function TopBar(props: {
         </span>
       ) : (
         <>
+          <button
+            type="button"
+            className={`pair-toggle${away?.on ? ' on away' : ''}`}
+            aria-pressed={!!away?.on}
+            title={
+              away?.on
+                ? `Away since ${new Date(away.since ?? Date.now()).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}: a card left ${away.minutes} min gets its safe answer — workers' requests are declined (never approved), stuck/pair/rule cards keep the work going. Click when you're back.`
+                : `Going away? Cards left ${away?.minutes ?? 15} min then get their safe answer instead of holding work all night — workers' requests are declined, never approved.`
+            }
+            onClick={() => props.send({ type: 'away.set', on: !away?.on })}
+          >
+            {away?.on ? 'AWAY' : 'Away'}
+          </button>
           <span className="pill">
             <span className="dot" style={{ background: 'var(--green)' }} />
             {activeCount} AGENTS ACTIVE

@@ -1045,6 +1045,28 @@ private fun TasksTab(snapshot: Snapshot, connected: Boolean, onSubmitTask: (Stri
             }
         }
 
+        // Away: going to bed / out — cards left unanswered get their safe
+        // answer (workers' requests declined, never approved) instead of
+        // holding the work until morning.
+        item {
+            val away = snapshot.info.away
+            val on = away?.on == true
+            val minutes = (away?.minutes ?: 15.0).toInt()
+            OutlinedButton(
+                onClick = { hub.sendCommand(dev.neureal.agenthq.model.Commands.awaySet(!on)) },
+                modifier = Modifier.fillMaxWidth().height(36.dp),
+                shape = RoundedCornerShape(9.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, if (on) HQ.amber else HQ.line),
+            ) {
+                Text(
+                    if (on) "☾ AWAY — cards answered safely after $minutes min · tap when back"
+                    else "☾ Going away? Cards then get a safe answer after $minutes min",
+                    color = if (on) HQ.amber else HQ.muted,
+                    fontSize = 11.sp,
+                )
+            }
+        }
+
         item {
             SectionLabel("New task")
             Spacer(Modifier.height(6.dp))

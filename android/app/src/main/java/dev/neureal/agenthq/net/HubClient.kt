@@ -247,6 +247,7 @@ class HubClient(private val store: KV, private val deviceName: String) {
                     }
                     is HubEvent.UsageUpdated -> stateFlow.value = stateFlow.value.copy(usage = event.usage)
                     is HubEvent.PaUpdated -> stateFlow.value = stateFlow.value.copy(pa = event.pa)
+                    is HubEvent.HubUpdated -> stateFlow.value = stateFlow.value.copy(info = event.info)
                     is HubEvent.FileShared -> filesFlow.value = (filesFlow.value + event.file).takeLast(6)
                     else -> {}
                 }

@@ -224,10 +224,19 @@ try {
   if (readFileSync(join(proj, 'secrets.env'), 'utf8') !== 'TOKEN=abc\n') fail("the owner's ignored secrets changed");
   console.log("merge ok: main fast-forwarded to the bots' work; worktree, branch and record removed");
 
-  // 5. A conflict is refused (nothing moves); discard throws the work away.
+  // 5. With a full-access scratch folder granted (the owner's Bots), new
+  // worktrees go in its worktrees\ folder. A conflict is refused (nothing
+  // moves); discard throws the work away.
+  const bots = join(workRoot, 'Bots');
+  mkdirSync(bots, { recursive: true });
+  from = events.length;
+  send({ type: 'access.set', grants: [{ path: bots, access: 'full' }] });
+  await waitFor('bots grant', (e) => e.type === 'hub.updated' && (e.info.accessGrants ?? []).some((grant) => grant.access === 'full'), 10000, from);
   await ask('@game design: lines-done write-file:clash.txt bots version');
   const again = projectNow()?.worktree;
   if (!again) fail('no new worktree for the next ask');
+  if (again.root !== join(bots, 'worktrees', projectNow()!.id)) fail(`with Bots granted the worktree should be in it: ${again.root}`);
+  console.log('location ok: with the full-access folder granted, the worktree is made in <Bots>/worktrees');
   writeFileSync(join(proj, 'clash.txt'), 'owner version\n');
   git(proj, 'add', 'clash.txt');
   git(proj, 'commit', '-q', '-m', 'owner clash');

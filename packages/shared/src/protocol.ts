@@ -51,6 +51,9 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('worktree.discard'), projectId: z.string() }),
   // Re-read the open Roblox Studio windows into HubInfo.studios.
   z.object({ type: z.literal('studios.list') }),
+  // Away on/off (from the PC or the paired phone — it only ever declines or
+  // takes the safe answer, never approves a worker's request).
+  z.object({ type: z.literal('away.set'), on: z.boolean() }),
   // The master drafts routing-table rules ("keywords → Team") from the asks
   // it has routed; you get a card to add them (a match then routes with no
   // model call).

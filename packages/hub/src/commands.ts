@@ -59,6 +59,8 @@ export interface CommandHandlers {
   discardWorktree?(projectId: string): void | Promise<void>;
   // Re-read the open Roblox Studio windows (HubInfo.studios).
   listStudios?(): void | Promise<void>;
+  // Away on/off: unanswered cards get their safe answer after a while.
+  setAway?(on: boolean): void;
 }
 
 export function dispatchCommand(handlers: CommandHandlers, command: ClientCommand): void {
@@ -141,6 +143,8 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
     case 'studios.list':
       void handlers.listStudios?.();
       return;
+    case 'away.set':
+      return handlers.setAway?.(command.on);
     case 'pairing.start':
     case 'pairing.cancel':
     case 'device.revoke':
