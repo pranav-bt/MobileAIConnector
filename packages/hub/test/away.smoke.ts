@@ -97,7 +97,10 @@ try {
   await waitFor('declined', (e) => e.type === 'permission.updated' && e.request.id === asked.id && e.request.status === 'denied' && !!e.request.auto, 10000, worker.from);
   if (!/You were away — after .* min with no answer, Away declined it\./.test(card(asked.id)?.auto ?? '')) fail(`auto note: ${card(asked.id)?.auto}`);
   await finished(worker.id, worker.from);
-  console.log("away ok: a worker's request was declined automatically, and the card says so");
+  // Away's no isn't the owner's: the stuck task still gets the master's recovery.
+  await pendingCard(worker.id, worker.from, `stuck-${worker.id}`);
+  if (activitySince(worker.from).some((line) => line.includes('stopped at your denial'))) fail("Away's decline was taken as the owner's");
+  console.log("away ok: a worker's request was declined automatically, the card says so, and the stuck task still got a recovery");
 
   // 4. A pair's round cap goes with the work as it stands.
   const pair = await submit('/pair @game coding: pair-never-agree rename the loader');

@@ -61,6 +61,8 @@ export interface CommandHandlers {
   listStudios?(): void | Promise<void>;
   // Away on/off: unanswered cards get their safe answer after a while.
   setAway?(on: boolean): void;
+  // The Roblox Studio an ask (and its project) uses from now on.
+  setTaskStudio?(taskId: string, studio: string | null): void;
 }
 
 export function dispatchCommand(handlers: CommandHandlers, command: ClientCommand): void {
@@ -145,6 +147,8 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
       return;
     case 'away.set':
       return handlers.setAway?.(command.on);
+    case 'task.studio':
+      return handlers.setTaskStudio?.(command.taskId, command.studio);
     case 'pairing.start':
     case 'pairing.cancel':
     case 'device.revoke':

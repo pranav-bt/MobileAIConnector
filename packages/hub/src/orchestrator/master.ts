@@ -1155,9 +1155,10 @@ export async function planRecovery(
 // routing — so the master checks who it is for. "same": whoever is on this
 // work (follow-ups, questions, corrections — the default when in doubt);
 // "team": new work that clearly belongs to a DIFFERENT team's charter, with
-// a self-contained instruction for it; "ask": new work but no clear team.
+// a self-contained instruction for it; "ask": new work but no clear team;
+// "plan": the owner wants the plan's waiting steps to start.
 export interface ThreadMessageRoute {
-  route: 'same' | 'team' | 'ask';
+  route: 'same' | 'team' | 'ask' | 'plan';
   teamId?: string;
   teamIds?: string[];
   title?: string;
@@ -1175,6 +1176,7 @@ export async function routeThreadMessage(
     report: string | null; // the latest report on it
     steps: { title: string; team: string; status: string }[];
     working: string | null; // "<team> on <step>" when a step is working now
+    waiting?: string[]; // plan steps not started yet ("<team> — <title>")
   },
   message: string,
   model: ModelSpec,
@@ -1192,6 +1194,7 @@ export async function routeThreadMessage(
     `- Latest report: ${(thread.report ?? '(none yet)').replace(/\s+/g, ' ').slice(0, 600)}`,
     ...(thread.steps.length ? ['- Steps so far:', ...thread.steps.slice(-6).map((step) => `  - ${step.title} (${step.team}, ${step.status})`)] : []),
     `- Working right now: ${thread.working ?? 'nobody'}`,
+    ...(thread.waiting?.length ? [`- Plan steps not started yet (the plan halted before them): ${thread.waiting.join('; ')}`] : []),
     '',
     ...ownerRulesBlock(ownerRules, "The owner's rules for picking teams (follow them):"),
     `The owner now says: "${message.slice(0, 2000)}"`,
@@ -1204,6 +1207,7 @@ export async function routeThreadMessage(
     '{"route": "same"} — a follow-up, a question, a correction, or more of the same kind of work for whoever is already on it. If it could honestly go either way, it is "same".',
     '{"route": "team", "teamId": "<team id>", "title": "<short imperative title, max 60 chars>", "instruction": "<what that team must do — self-contained: include the facts from the thread it needs>", "why": "<one sentence>"} — the message asks for NEW work whose deliverable is a different team\'s craft.',
     '{"route": "ask", "teamIds": ["<team id>", "..."], "why": "<one sentence>"} — it is new work for another team but you cannot tell which one.',
+    ...(thread.waiting?.length ? ['{"route": "plan"} — the owner wants the plan\'s steps that have not started yet to start now (their words go along to them).'] : []),
   ].join('\n');
   const { text, tokens } = await engine.complete({ prompt, model });
   const raw = lastJsonObject(text, (value) => typeof value['route'] === 'string');
@@ -1221,6 +1225,7 @@ export async function routeThreadMessage(
       tokens,
     };
   }
+  if (raw?.['route'] === 'plan' && thread.waiting?.length) return { decision: { route: 'plan' }, tokens };
   if (raw?.['route'] === 'ask') {
     const teamIds = Array.isArray(raw['teamIds']) ? raw['teamIds'].filter((id): id is string => typeof id === 'string' && known.has(id)) : [];
     return { decision: { route: 'ask', teamIds, why: str(raw['why'], 200) }, tokens };

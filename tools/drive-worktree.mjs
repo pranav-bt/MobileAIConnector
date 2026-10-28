@@ -49,6 +49,21 @@ check('the commit is listed', /agent-hq: .*draw a logo/.test(text));
 await page.locator('.tcard', { hasText: 'Projects' }).screenshot({ path: `${SHOTS}/worktree-2-bots-work.png` });
 void section;
 
+// 2b. The task's window shows the ask's Studio and changes it (ask + project).
+await page.click('button:has-text("Tasks")');
+await page.click('.tcard:has-text("draw a logo")');
+await page.click('button:has-text("Open console")');
+const askStudio = page.locator('.console-drawer select[aria-label="Roblox Studio for this ask"]');
+await askStudio.waitFor({ timeout: 15000 });
+check("the task's window shows the ask's Studio", (await askStudio.inputValue()) === 'Pranav2_Workspace', await askStudio.inputValue());
+await askStudio.selectOption('Heat');
+await page.waitForSelector('.console-drawer >> text=Roblox Studio for this ask and', { timeout: 10000 });
+check('changing it in the window applies', (await askStudio.inputValue()) === 'Heat');
+await page.locator('.console-drawer .console-head').screenshot({ path: `${SHOTS}/worktree-2b-console-studio.png` });
+await askStudio.selectOption('Pranav2_Workspace');
+await page.click('.console-drawer button:has-text("Close")');
+await page.click('.navi:has-text("Resources")');
+
 // 3. Merge asks once more, then lands it; the section goes.
 const merge = page.getByRole('button', { name: 'Merge', exact: true });
 await merge.click();

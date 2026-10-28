@@ -286,8 +286,13 @@ npm run typecheck      # tsc across workspaces
   detached HEAD keep the old in-place rules.
 - Each ask names its Roblox Studio (`Task.studio`; `studio:<name>` /
   `studio:"a b"` anywhere in the ask or a later message — `parseStudioToken`
-  in shared — or the composer's Studio picker, `studio` on task.submit;
-  steps use the ask's, `#studioOf`). Every open Studio is the owner's except
+  in shared — or the composer's Studio picker, `studio` on task.submit, or
+  the task window's picker, `task.studio`; a message about Studio that names
+  an open window in full, without "don't/not", does it too). It's THREAD-wide:
+  steps use the ask's, and an ask's Studio becomes its project's
+  (`Project.studio`, set as the ask's work starts) — every later step,
+  handover and ask in the project uses it until changed (`#studioOf`: ask >
+  project). Every open Studio is the owner's except
   that one: Studio MCP calls go through `onMcpCall` (Claude: a PreToolUse
   hook, because project settings may pre-allow Studio tools and allowed
   tools skip canUseTool; Codex: the elicitation's `_meta.tool_params`) →
@@ -315,7 +320,24 @@ npm run typecheck      # tsc across workspaces
   then it escalates); a rule conflict → the project wins; `project-`,
   `route-`, `scale-`, `rules-suggest-` → declined. The card gets `auto`
   (shown "by Away" in the console) and a status row; Away off posts a
-  "welcome back" summary. Tests: `away.smoke` (in `npm run smoke`).
+  "welcome back" summary. Away's no is NOT the owner's (`#ownerDenied` is
+  left alone), so a task stuck after it still gets the recovery. Tests:
+  `away.smoke` (in `npm run smoke`).
+- One ask, one story, for every team on it: `#threadNote` puts the thread in
+  every step's brief (plan steps, handovers, QA, fixes, recoveries) — the
+  owner's ask, what they said since (`TranscriptStore.ownerMessages` of the
+  ask's window), the other steps' reports, and the plan steps still to come
+  for other teams ("do your step's part only"); a resumed conversation gets
+  only what other teams reported since (`#threadSince`). A plan never drops
+  its steps: each step carries the rest (`Task.planNext`); if the plan halts
+  on a step (stuck, stopped), they wait on it — they start when that step
+  later finishes (a follow-up, a recovery retry/handover takes them over; a
+  recovery split appends them), or when the owner says so in the ask's
+  window ("start/continue/resume … steps/plan" by rule, else the message
+  check's `"plan"` route) via `#resumePlan`. Step 1 of a plan keeps the ask's
+  own record fields (Studio, /qa) — the master's plan used to rebuild it and
+  drop the Studio. Tests: `ask-thread.smoke` (in `npm run smoke`), the
+  console picker in `tools/drive-worktree.mjs`.
 - Project MCP: besides its team's grants, a worker gets the MCP servers set
   up for its project folder, as Claude Code opened there loads them
   (`projectMcpServers` in engine/mcp-catalog.ts): the folder's own servers

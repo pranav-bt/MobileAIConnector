@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { appendFile, mkdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { TranscriptEntry } from '@agent-hq/shared';
@@ -91,6 +92,32 @@ export class TranscriptStore {
     const end = upTo < 0 ? all.length : upTo;
     const start = Math.max(0, end - PAGE);
     return { entries: all.slice(start, end), more: start > 0 };
+  }
+
+  // What the owner typed in a task's window (its steps' windows too — their
+  // rows are mirrored into the ask's), oldest first, the latest `limit`.
+  // Read straight from the file: only owner lines are parsed.
+  ownerMessages(taskId: string, limit = 8): string[] {
+    let raw: string;
+    try {
+      raw = readFileSync(this.#file(taskId), 'utf8');
+    } catch {
+      return [];
+    }
+    const seen = new Set<string>();
+    const texts: string[] = [];
+    for (const line of raw.split('\n')) {
+      if (!line.includes('"role":"owner"')) continue;
+      try {
+        const entry = JSON.parse(line) as TranscriptEntry;
+        if (entry.kind !== 'message' || entry.id === 'ask' || seen.has(entry.id)) continue;
+        seen.add(entry.id);
+        texts.push(entry.text);
+      } catch {
+        continue;
+      }
+    }
+    return texts.slice(-limit);
   }
 
   watch(taskId: string, listener: Listener): () => void {

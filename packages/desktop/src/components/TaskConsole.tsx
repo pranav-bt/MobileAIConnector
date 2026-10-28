@@ -308,6 +308,37 @@ function Thinking(props: { entry: TranscriptEntry }): JSX.Element {
   );
 }
 
+// The Roblox Studio this ask's workers drive — the ask's own, else its
+// project's (the last one assigned there). Changing it applies to the ask
+// and its project from now on.
+function StudioPick(props: { state: HubState; task: Task; send: (command: ClientCommand) => void }): JSX.Element | null {
+  const { state, task } = props;
+  const root = state.tasks[task.rootTaskId ?? task.id] ?? task;
+  const project = task.projectId ? state.projects[task.projectId] : undefined;
+  const current = root.studio ?? project?.studio ?? '';
+  const studios = state.info.studios ?? [];
+  if (!current && studios.length === 0) return null;
+  return (
+    <select
+      className={`pair-toggle${current ? ' on' : ''}`}
+      style={{ marginTop: 6 }}
+      value={current}
+      aria-label="Roblox Studio for this ask"
+      title="The Roblox Studio window every team on this ask may drive (and the project's from now on) — every other open Studio stays yours"
+      onFocus={() => props.send({ type: 'studios.list' })}
+      onChange={(event) => props.send({ type: 'task.studio', taskId: root.id, studio: event.target.value || null })}
+    >
+      <option value="">Studio: none</option>
+      {current && !studios.some((window) => window.name === current) && <option value={current}>Studio: {current} (not open)</option>}
+      {studios.map((window) => (
+        <option key={window.name} value={window.name}>
+          Studio: {window.name}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 export function TaskConsole(props: {
   state: HubState;
   taskId: string;
@@ -387,6 +418,7 @@ export function TaskConsole(props: {
           </div>
           <PairLine task={task} authorModel={model} />
           <StepLine state={state} task={task} />
+          <StudioPick state={state} task={task} send={send} />
         </div>
         {STOPPABLE.includes(task.status) && (
           <button className="console-btn danger" onClick={() => send({ type: 'task.stop', taskId })} title="Stop — this task and any step of it still working; the conversation is kept, send a message to pick it up again">

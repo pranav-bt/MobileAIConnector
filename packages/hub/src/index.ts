@@ -181,6 +181,8 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
       options.worktreesDir !== undefined ? options.worktreesDir : mode === 'claude' ? join(homedir(), 'AgentHQ', 'worktrees') : null,
     );
     if (options.studios) orchestrator.configureStudios(new StudioDirectory(options.studios));
+    // The open windows, so a message naming one is understood from the start.
+    if (mode === 'claude' || options.studios) void orchestrator.listStudios();
     orchestrator.configureAway(
       { ...config.away, ...(options.awayMinutes ? { minutes: options.awayMinutes } : {}) },
       (away) => {

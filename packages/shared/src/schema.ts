@@ -161,6 +161,17 @@ export const TaskSchema = z.object({
   // or the placeId) — `studio:<name>` in the ask, or `studio` on task.submit.
   // Steps of the ask use the ask's. Any other open Studio is the owner's.
   studio: z.string().nullable().optional(),
+  // A step of a multi-team plan carries the steps still to come after it.
+  // The plan normally runs them in a row; if it halts here (stuck, stopped),
+  // they wait on this task: they start when it later finishes (a follow-up,
+  // a recovery) or when the owner says to go on.
+  planNext: z
+    .object({
+      title: z.string(),
+      steps: z.array(z.object({ teamId: z.string(), title: z.string(), instruction: z.string() })),
+    })
+    .nullable()
+    .optional(),
   // Pair mode: two workers on two engines. 'review' = second opinion — the
   // author does the work, the reviewer (read-only) checks the actual result,
   // rounds repeat until the reviewer agrees (or the round cap asks the owner).
@@ -356,6 +367,10 @@ export const ProjectSchema = z.object({
   usedTokens: z.number(),
   alerted75: z.boolean(),
   worktree: WorktreeSchema.nullable().optional(),
+  // The Roblox Studio window this project's work uses — the last one the
+  // owner assigned to an ask here. Every task in the project (each step,
+  // handover, later asks) uses it unless its ask names another.
+  studio: z.string().nullable().optional(),
 });
 export type Project = z.infer<typeof ProjectSchema>;
 

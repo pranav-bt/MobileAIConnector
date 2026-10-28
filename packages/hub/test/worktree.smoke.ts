@@ -195,12 +195,16 @@ try {
   writeFileSync(join(proj, 'owner.txt'), 'mine\n');
   git(proj, 'add', 'owner.txt');
   git(proj, 'commit', '-q', '-m', 'owner work');
-  const second = await ask('@game design: lines-done write-file:second.txt more work');
+  const second = await ask('@game design: lines-done env-echo write-file:second.txt more work');
   if (!activitySince(second.from).some((line) => line.includes('took in your 1 newer commit on main'))) fail(`no catch-up: ${activitySince(second.from).join(' / ')}`);
+  // The first ask's Studio is the project's now: this ask uses it too.
+  if (!second.synopsis.includes('env AGENT_HQ_STUDIO=Pranav2_Workspace')) fail(`the project's Studio didn't carry over: ${second.synopsis}`);
   if (!existsSync(join(tree.root, 'owner.txt')) || !existsSync(join(tree.root, 'second.txt'))) fail('catch-up / second run missing in the worktree');
   console.log("catch-up ok: the owner's newer commit merged into the worktree before the next run");
 
-  // 3. No Studio assigned: a Studio call asks the owner.
+  // 3. No Studio assigned (cleared from a task's window): a Studio call asks the owner.
+  send({ type: 'task.studio', taskId: second.id, studio: null });
+  await waitFor('studio cleared', (e) => e.type === 'project.updated' && e.project.workspaceDir === proj && !e.project.studio, 10000, second.from);
   const third = await ask('@game design: lines-done studio-call:s-bot poke studio', 'card');
   if (!third.card?.flags.some((flag) => flag.includes('no Studio was assigned'))) fail(`no-Studio card: ${JSON.stringify(third.card)}`);
   send({ type: 'permission.respond', requestId: third.card.id, decision: 'deny', scope: 'once' });

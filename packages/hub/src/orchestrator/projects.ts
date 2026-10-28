@@ -244,6 +244,16 @@ export class ProjectRegistry {
     return project;
   }
 
+  setStudio(id: string, studio: string | null): Project | null {
+    const current = this.#projects.get(id);
+    if (!current || (current.studio ?? null) === studio) return null;
+    const project: Project = { ...current, studio };
+    if (!studio) delete project.studio;
+    this.#projects.set(id, project);
+    this.#save();
+    return project;
+  }
+
   // Returns the updated project, plus whether it just crossed 75% of quota.
   addTokens(id: string, tokens: number): { project: Project; crossed75: boolean } | null {
     const current = this.#projects.get(id);

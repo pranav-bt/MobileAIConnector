@@ -51,6 +51,9 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('worktree.discard'), projectId: z.string() }),
   // Re-read the open Roblox Studio windows into HubInfo.studios.
   z.object({ type: z.literal('studios.list') }),
+  // The Roblox Studio window an ask (and so its project) uses from now on;
+  // null = none (its workers leave Studio alone).
+  z.object({ type: z.literal('task.studio'), taskId: z.string(), studio: z.string().max(200).nullable() }),
   // Away on/off (from the PC or the paired phone — it only ever declines or
   // takes the safe answer, never approves a worker's request).
   z.object({ type: z.literal('away.set'), on: z.boolean() }),

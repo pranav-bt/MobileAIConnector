@@ -5,6 +5,16 @@ import type { OrchestratorEngine, WorkerInbox, WorkerRunCallbacks, WorkerRunResu
 import type { LockedDir } from '../orchestrator/util.js';
 import { isAppBridge } from '../apps.js';
 
+// Keyword triggers fire on the task itself: not on the background section
+// (after "---"; project history can mention "install"), nor on the ask's
+// thread every step gets (the owner's ask, other steps' reports).
+function mockTaskText(prompt: string): string {
+  return (prompt.split('\n---\n')[0] ?? prompt)
+    .replace(/This task is part of one ask from the owner\.[\s\S]*?read them before redoing anything\./, '')
+    .replace(/\n\nMeanwhile on this ask:[\s\S]*$/, '')
+    .toLowerCase();
+}
+
 // Deterministic engine for tests and offline development: routes by team-id
 // keyword, "installs" trigger a permission request, everything resolves fast.
 export class MockEngine implements OrchestratorEngine {
@@ -25,6 +35,7 @@ export class MockEngine implements OrchestratorEngine {
       if (said.includes('classify-fail')) throw new Error('mock: the routing check failed');
       const teamIds = [...args.prompt.matchAll(/^- id: ([a-z0-9-]+)/gm)].map((match) => match[1] ?? '');
       if (said.includes('unclear-request')) return { text: JSON.stringify({ route: 'ask', teamIds: teamIds.slice(1, 3), why: 'mock: could be either' }), tokens: 3 };
+      if (said.includes('onward-request') && args.prompt.includes('Plan steps not started yet')) return { text: JSON.stringify({ route: 'plan' }), tokens: 3 };
       const wanted = said.match(/\b([a-z]+)-request\b/)?.[1];
       if (wanted && teamIds.includes(wanted)) {
         return { text: JSON.stringify({ route: 'team', teamId: wanted, title: `Mock: ${said.slice(0, 40)}`, instruction: `Do what the owner asked: ${said}`, why: `mock: it's ${wanted} work` }), tokens: 3 };
@@ -139,10 +150,18 @@ export class MockEngine implements OrchestratorEngine {
             project: 'thread',
             title: 'Multi-step feature',
             reason: 'mock plan',
-            plan: [
-              { teamId: 'design', title: 'Design pass', instruction: 'design the feature' },
-              { teamId: 'coding', title: 'Build pass', instruction: 'implement the design' },
-            ],
+            // "plan-stuck": the first step reports it couldn't finish; the
+            // later steps report their Studio (env-echo).
+            plan: text.includes('plan-stuck')
+              ? [
+                  { teamId: 'design', title: 'Design pass', instruction: 'design the feature (blocked-test)' },
+                  { teamId: 'coding', title: 'Build pass', instruction: 'implement the design (env-echo lines-done brief-echo)' },
+                  { teamId: 'design', title: 'Polish pass', instruction: 'polish it (env-echo lines-done)' },
+                ]
+              : [
+                  { teamId: 'design', title: 'Design pass', instruction: 'design the feature' },
+                  { teamId: 'coding', title: 'Build pass', instruction: 'implement the design' },
+                ],
           }),
           tokens: 15,
         };
@@ -256,7 +275,7 @@ export class MockEngine implements OrchestratorEngine {
     this.#sessions.set(sessionId, memory);
     callbacks.onSession?.(sessionId);
     if (args.resumeSessionId) callbacks.onActivity(`mock: resumed ${sessionId}`);
-    const taskText = (args.prompt.split('\n---\n')[0] ?? args.prompt).toLowerCase();
+    const taskText = mockTaskText(args.prompt);
     const firstLine = (args.prompt.split('\n')[0] ?? '').slice(0, 200);
     // A pair-mode reviewer: answers with a verdict. "pair-never-agree" never
     // agrees, "pair-disagree-once" agrees from its second review on,
@@ -457,9 +476,7 @@ export class MockEngine implements OrchestratorEngine {
     signal?: AbortSignal;
   }): Promise<WorkerRunResult> {
     const { callbacks, signal } = args;
-    // Keyword triggers must fire on the task itself, not on the appended
-    // background-context section (project history can mention "install").
-    const taskText = (args.prompt.split('\n---\n')[0] ?? args.prompt).toLowerCase();
+    const taskText = mockTaskText(args.prompt);
     callbacks.onActivity(`mock: model ${args.model.id} · effort ${args.model.effort ?? 'default'}`);
     callbacks.onActivity(`mock: engine ${args.model.engine}`);
     // Makes the worker's file scope observable, so the smoke can prove a

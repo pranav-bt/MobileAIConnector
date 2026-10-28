@@ -256,6 +256,9 @@ export class Orchestrator implements CommandHandlers {
   #recoveryRound = new Map<string, number>();
   // Tasks where the owner denied an approval: getting stuck there is their call.
   #ownerDenied = new Set<string>();
+  // Plan steps a #runChain is running right now (it starts the next step
+  // itself; a step finishing outside it starts the steps waiting on it).
+  #chainDriven = new Set<string>();
   // Task console: per-task transcripts, the inbox of each running worker, and
   // owner messages waiting for a task to start or continue.
   #transcripts: TranscriptStore | null = null;
@@ -803,16 +806,13 @@ export class Orchestrator implements CommandHandlers {
     if (!task) return;
     const named = parseStudioToken(text.trim());
     const message = named.text;
-    if (named.studio) {
-      // "studio:<name>" in a message (re)assigns the ask's Studio.
-      const root = this.#bus.state.tasks[this.#rootOf(taskId)] ?? task;
-      this.#patchTask(root.id, { studio: named.studio });
-      this.#row(taskId, { role: 'owner', kind: 'message', text: text.trim() });
-      this.#row(taskId, { role: 'master', agentId: 'master', kind: 'status', text: `Roblox Studio for this ask is now "${named.studio}"` });
-      if (!message) return;
-    }
+    // "studio:<name>" — or a message about Studio naming an open window by
+    // its full name ("use Pranav3_Workspace as the studio") — (re)assigns
+    // the ask's Studio, and so its project's.
+    const studio = named.studio ?? this.#studioNamedIn(message);
+    this.#row(taskId, { role: 'owner', kind: 'message', text: text.trim() });
+    if (studio && studio !== this.#studioOf(taskId)) this.setTaskStudio(taskId, studio);
     if (!message) return;
-    if (!named.studio) this.#row(taskId, { role: 'owner', kind: 'message', text: message });
     // A freelancer's task continues its own terminal session.
     if (task.title.startsWith('[FL ') && task.agentIds[0]) {
       this.freelancerSend(task.agentIds[0], message);
@@ -1121,7 +1121,11 @@ export class Orchestrator implements CommandHandlers {
     const answer = this.#awayAnswer(request);
     const minutes = this.#away.minutes;
     const what = (request.summary || request.command).replace(/\s+/g, ' ').slice(0, 90);
+    // Away's no is not the owner's: a task it declined for still gets the
+    // master's recovery if it gets stuck (the owner's own no stops that).
+    const ownerSaidNo = this.#ownerDenied.has(request.taskId);
     this.respondPermission(request.id, answer.decision, 'once', answer.choice);
+    if (!ownerSaidNo) this.#ownerDenied.delete(request.taskId);
     const decided = this.#bus.state.permissions[request.id];
     if (!decided || decided.status === 'pending') return;
     const auto = `You were away — after ${minutes} min with no answer, Away ${answer.did}.`;
@@ -1164,7 +1168,7 @@ export class Orchestrator implements CommandHandlers {
       existsSync(join(project.workspaceDir || this.#workspaceDir, 'default.project.json'));
     if (!roblox) return '';
     if (!studio) {
-      return "No Roblox Studio is assigned to this task — don't drive one (the open Studio windows are the owner's; a Studio call asks the owner). If the work needs Studio, do the rest and say so in your report; the owner assigns one with studio:<name>.";
+      return "No Roblox Studio is assigned to this task — don't drive one (the open Studio windows are the owner's; a Studio call asks the owner). If the work needs Studio, do the rest and say so in your report; the owner picks one in the task's window (or with studio:<name>).";
     }
     const free = this.#freeDirs()[0];
     const tools = free && existsSync(join(free, 'tools', 'studio')) ? join(free, 'tools', 'studio') : '';
@@ -1175,14 +1179,57 @@ export class Orchestrator implements CommandHandlers {
     );
   }
 
-  // The ask's Studio (a step inherits its ask's).
+  // The Studio a task uses: its ask's (a step inherits its ask's), else its
+  // project's — the last one the owner assigned there, so every team on the
+  // thread uses the same window without it being named again.
   #studioOf(taskId: string): string | null {
     const tasks = this.#bus.state.tasks;
     const task = tasks[taskId];
     if (!task) return null;
+    return this.#askStudio(task) ?? (task.projectId ? this.#projects.get(task.projectId)?.studio ?? null : null);
+  }
+
+  #askStudio(task: Task): string | null {
+    const tasks = this.#bus.state.tasks;
     const parent = task.parentTaskId ? tasks[task.parentTaskId] : undefined;
     const chain = [task, task.rootTaskId ? tasks[task.rootTaskId] : undefined, parent, parent?.rootTaskId ? tasks[parent.rootTaskId] : undefined];
     return chain.find((candidate) => candidate?.studio)?.studio ?? null;
+  }
+
+  // An ask's Studio becomes its project's (what later steps and asks use).
+  #rememberStudio(projectId: string | null | undefined, studio: string | null): void {
+    if (!projectId) return;
+    const updated = this.#projects.setStudio(projectId, studio);
+    if (updated) this.#bus.publish({ type: 'project.updated', project: updated });
+  }
+
+  // The owner sets (or clears) the Studio of an ask from its window: the ask
+  // and its project use it from now on.
+  setTaskStudio(taskId: string, studio: string | null): void {
+    const root = this.#bus.state.tasks[this.#rootOf(taskId)];
+    if (!root) return;
+    const name = studio?.trim() || null;
+    this.#patchTask(root.id, { studio: name });
+    this.#rememberStudio(root.projectId, name);
+    this.#row(taskId, {
+      role: 'master',
+      agentId: 'master',
+      kind: 'status',
+      text: name ? `Roblox Studio for this ask and ${this.#projectName(root.projectId)} is now "${name}" — its workers drive only that window` : 'No Roblox Studio for this ask now — its workers leave Studio alone',
+    });
+  }
+
+  // An open Studio window named in full in a message that talks about Studio
+  // and doesn't say not to use it.
+  #studioNamedIn(message: string): string | null {
+    if (!/\bstudio\b/i.test(message) || /\b(don'?t|do not|never|not|stop)\b/i.test(message)) return null;
+    const lower = message.toLowerCase();
+    const hits = this.#studioList.filter((window) => new RegExp(`(^|[^\\w])${window.name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^\\w])`).test(lower));
+    return hits.length === 1 ? hits[0]!.name : null;
+  }
+
+  #projectName(projectId: string | null | undefined): string {
+    return (projectId && this.#projects.get(projectId)?.name) || 'its project';
   }
 
   // Environment for a worker's tools: the Studio tools take the window from
@@ -1761,7 +1808,7 @@ export class Orchestrator implements CommandHandlers {
   // Sequenced multi-team plan: each step runs after the previous one and
   // receives its synopsis as a handover; QA follows only the final step.
   async #runChain(
-    firstTaskId: string,
+    firstTaskId: string | null, // null = every step is a new task
     steps: PlanStep[],
     projectId: string,
     overallTitle: string,
@@ -1769,6 +1816,7 @@ export class Orchestrator implements CommandHandlers {
     pairChoice?: boolean,
     pairMode: PairMode = 'review',
     rootTaskId?: string, // a recovery plan: every step belongs to that ask
+    opts: { handover?: string; offset?: number } = {},
   ): Promise<void> {
     this.#activity(
       'master',
@@ -1776,7 +1824,10 @@ export class Orchestrator implements CommandHandlers {
       `plan for "${overallTitle}": ${steps.map((step, index) => `${index + 1}. ${this.#registry.get(step.teamId)?.name ?? step.teamId}`).join(' → ')}`,
     );
 
-    let handover: string | null = null;
+    let handover: string | null = opts.handover ?? null;
+    // A resumed plan numbers its steps where the plan left off.
+    const offset = opts.offset ?? 0;
+    const total = offset + steps.length;
     for (let index = 0; index < steps.length; index++) {
       const step = steps[index]!;
       const team = this.#registry.get(step.teamId);
@@ -1786,26 +1837,34 @@ export class Orchestrator implements CommandHandlers {
         ? `${step.instruction}\n\nHandover from the previous step (${handover}`
         : step.instruction;
 
-      const taskId = index === 0 ? firstTaskId : `t-${now().toString(36)}-${++this.#taskCounter}`;
+      const taskId = index === 0 && firstTaskId !== null ? firstTaskId : `t-${now().toString(36)}-${++this.#taskCounter}`;
+      const reuse = taskId === firstTaskId;
+      const existing = reuse ? this.#bus.state.tasks[taskId] : undefined;
       if (recoveryRound) this.#recoveryRound.set(taskId, recoveryRound);
+      const rest = steps.slice(index + 1);
       const record: Task = {
+        // The ask's own record becomes step 1: it keeps what the owner set on
+        // it (its Studio, a /qa, the thread's words).
+        ...existing,
         id: taskId,
-        title: `Step ${index + 1}/${steps.length} — ${step.title}`.slice(0, 60),
+        title: `Step ${offset + index + 1}/${total} — ${step.title}`.slice(0, 60),
         detail,
         projectId,
         teamId: team.id,
-        ownerAsk: index === 0 ? this.#bus.state.tasks[taskId]?.ownerAsk ?? null : null,
+        ownerAsk: existing?.ownerAsk ?? null,
         status: 'queued',
         progressPct: 0,
         agentIds: [],
         synopsis: null,
-        tokensUsed: 0,
+        tokensUsed: existing?.tokensUsed ?? 0,
         pair: this.#pairFor(team, pairChoice, pairMode),
         // later steps of a plan belong to the ask that started it
-        rootTaskId: rootTaskId ?? (index === 0 ? this.#bus.state.tasks[taskId]?.rootTaskId ?? null : firstTaskId),
-        createdAt: this.#bus.state.tasks[taskId]?.createdAt ?? now(),
+        rootTaskId: rootTaskId ?? (reuse ? existing?.rootTaskId ?? null : firstTaskId),
+        planNext: rest.length ? { title: overallTitle, steps: rest } : null,
+        createdAt: existing?.createdAt ?? now(),
         updatedAt: now(),
       };
+      if (!rootTaskId && index === 0 && !reuse) firstTaskId = taskId;
       this.#publishTask(record);
 
       // Respect the team's concurrency cap without jumping its queue forever.
@@ -1813,14 +1872,104 @@ export class Orchestrator implements CommandHandlers {
         if (this.#stopping.has(taskId) || ['paused', 'failed'].includes(this.#bus.state.tasks[taskId]?.status ?? '')) return;
         await delay(2000);
       }
-      const synopsis = await this.#runTask(taskId, team, isLast);
+      this.#chainDriven.add(taskId);
+      let synopsis: string | null;
+      try {
+        synopsis = await this.#runTask(taskId, team, isLast);
+      } finally {
+        this.#chainDriven.delete(taskId);
+      }
       if (synopsis === null) {
-        this.#activity('master', taskId, `plan halted at step ${index + 1}/${steps.length}`);
+        this.#activity(
+          'master',
+          taskId,
+          `plan halted at step ${offset + index + 1}/${total}` +
+            (rest.length ? ` — the next ${rest.length === 1 ? 'step waits' : `${rest.length} steps wait`} (${rest.map((next) => this.#registry.get(next.teamId)?.name ?? next.teamId).join(' → ')}): ${rest.length === 1 ? 'it starts' : 'they start'} when this step finishes, or say "continue the plan"` : ''),
+        );
         return;
       }
+      this.#patchTask(taskId, { planNext: null });
       handover = `${team.name} team): ${synopsis.replace(/\s+/g, ' ').slice(0, 600)}`;
     }
     this.#activity('master', null, `plan complete: ${overallTitle}`);
+  }
+
+  // A halted plan goes on: the steps waiting on `holderId` start now, as new
+  // steps of the same ask, with the holder's report as their handover (and
+  // the owner's words, when they asked for it).
+  #resumePlan(holderId: string, why: string, ownerSaid = ''): boolean {
+    const holder = this.#bus.state.tasks[holderId];
+    const waiting = holder?.planNext;
+    if (!holder || !waiting?.steps.length) return false;
+    this.#patchTask(holderId, { planNext: null });
+    const done = Number(/^Step (\d+)\//.exec(holder.title)?.[1] ?? 0);
+    const handover =
+      `${this.#registry.get(holder.teamId ?? '')?.name ?? 'previous'} team, ${holder.status}): ${(holder.synopsis ?? '(no report)').replace(/\s+/g, ' ').slice(0, 600)}` +
+      (ownerSaid ? `\n\nThe owner said when starting this step: "${ownerSaid.slice(0, 1500)}"` : '');
+    this.#activity('master', holderId, `plan goes on (${why}): ${waiting.steps.map((step) => this.#registry.get(step.teamId)?.name ?? step.teamId).join(' → ')}`);
+    void this.#runChain(null, waiting.steps, holder.projectId ?? this.#projects.defaultProject().id, waiting.title, this.#recoveryRound.get(holderId) ?? 0, undefined, 'review', this.#rootOf(holderId), {
+      handover,
+      offset: done,
+    });
+    return true;
+  }
+
+  // One ask, one story: every team working on an ask (plan steps, handovers,
+  // QA, fixes, recoveries) gets the thread — the owner's ask and what they
+  // said since, what each other step reported, and which steps the plan
+  // still has for other teams — so nobody starts cold, rediscovers what an
+  // earlier step found, or does another team's step. Capped.
+  #threadNote(task: Task): string {
+    if (isInternalTask(task)) return '';
+    const tasks = this.#bus.state.tasks;
+    const rootId = this.#rootOf(task.id);
+    const root = tasks[rootId];
+    if (!root) return '';
+    const teamName = (id: string | null | undefined) => (id && this.#registry.get(id)?.name) || 'a team';
+    const thread = Object.values(tasks)
+      .filter((step) => (step.id === rootId || step.rootTaskId === rootId) && !isInternalTask(step))
+      .sort((a, b) => a.createdAt - b.createdAt);
+    const reports = thread.filter((step) => step.id !== task.id && step.synopsis).slice(-8);
+    const said = this.#transcripts?.ownerMessages(rootId) ?? [];
+    const upNext = [...(task.planNext?.steps ?? [])];
+    const laterElsewhere = thread.filter((step) => step.id !== task.id && step.planNext?.steps.length);
+    if (task.id === rootId && reports.length === 0 && said.length === 0 && upNext.length === 0) return '';
+    const lines = ["This task is part of one ask from the owner. Several teams work on it in turn; here is the thread so far (the owner's words come first):"];
+    if (root.ownerAsk) lines.push(`The owner's ask: "${root.ownerAsk.slice(0, 2500)}"`);
+    if (said.length) lines.push('What the owner has said since (oldest first):', ...said.map((text) => `- "${text.replace(/\s+/g, ' ').slice(0, 600)}"`));
+    if (reports.length) {
+      lines.push(
+        'What the other steps reported (oldest first):',
+        ...reports.map((step) => `- ${step.title} — ${teamName(step.teamId)}, ${step.status}: ${(step.synopsis ?? '').replace(/\s+/g, ' ').slice(0, 1000)}`),
+      );
+    }
+    if (upNext.length) {
+      lines.push(
+        `After you, the plan goes on with: ${upNext.map((step) => `${teamName(step.teamId)} — ${step.title}`).join('; ')}. Do your step's part only; leave theirs to them (say in your report what they need from you).`,
+      );
+    }
+    for (const step of laterElsewhere) {
+      lines.push(`Still to come after "${step.title}": ${step.planNext!.steps.map((next) => `${teamName(next.teamId)} — ${next.title}`).join('; ')}.`);
+    }
+    lines.push("Every team on this ask works in the same folder, so the earlier steps' files, notes and handover docs are already there — read them before redoing anything.");
+    return lines.join('\n');
+  }
+
+  // A resumed conversation knows its own story; it only needs what other
+  // teams on the ask reported since it started (and what the plan still has
+  // for them).
+  #threadSince(task: Task): string {
+    const rootId = this.#rootOf(task.id);
+    const teamName = (id: string | null | undefined) => (id && this.#registry.get(id)?.name) || 'a team';
+    const others = Object.values(this.#bus.state.tasks)
+      .filter((step) => (step.id === rootId || step.rootTaskId === rootId) && step.id !== task.id && step.createdAt > task.createdAt && step.synopsis && !isInternalTask(step))
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .slice(-4);
+    const lines = others.map((step) => `- ${step.title} — ${teamName(step.teamId)}, ${step.status}: ${(step.synopsis ?? '').replace(/\s+/g, ' ').slice(0, 600)}`);
+    if (task.planNext?.steps.length) {
+      lines.push(`After you, the plan goes on with: ${task.planNext.steps.map((step) => `${teamName(step.teamId)} — ${step.title}`).join('; ')} — leave their part to them.`);
+    }
+    return lines.length ? `\n\nMeanwhile on this ask:\n${lines.join('\n')}` : '';
   }
 
   // The worker's context, cheapest layer first: task text, recent synopses
@@ -1830,6 +1979,8 @@ export class Orchestrator implements CommandHandlers {
     const sections = [task.detail];
     const integrationBrief = this.#integrationBriefs.get(task.id);
     if (integrationBrief) sections.push('', integrationBrief);
+    const thread = this.#threadNote(task);
+    if (thread) sections.push('', thread);
     const access = this.#accessNote();
     if (access) sections.push('', access);
     const apps = this.#appsNote(task.teamId);
@@ -1998,6 +2149,10 @@ export class Orchestrator implements CommandHandlers {
     // (an integration run starts from its parts' total).
     const piece = isInternalTask(task);
     const baseTokens = task.tokensUsed;
+    // The Studio the owner gave this ask is the project's from now on (set
+    // as its work starts — a later run of an older ask doesn't take it back).
+    const askStudio = !task.session ? this.#askStudio(task) : null;
+    if (askStudio) this.#rememberStudio(project.id, askStudio);
     // Codex stays out of Agent HQ's own project for now (owner's decision):
     // that seat runs on the team's own Claude model there instead.
     const codexFallback = workerSpec.engine === 'codex' && project.id === this.#projects.defaultProject().id;
@@ -2084,7 +2239,7 @@ export class Orchestrator implements CommandHandlers {
         .join('\n\n');
       const resumeSessionId = continuing && current.session?.engine === workerSpec.engine ? current.session.id : undefined;
       const prompt = resumeSessionId
-        ? followText
+        ? `${followText}${this.#threadSince(current)}`
         : continuing
           ? `${followText}\n\n(A follow-up on earlier work — the original ask and what was reported are below.)\n\n` +
             `${this.#buildWorkerPrompt(current)}\nEarlier report: ${(current.synopsis ?? '(none)').slice(0, 1500)}`
@@ -2287,6 +2442,10 @@ export class Orchestrator implements CommandHandlers {
         this.#deliverReport(task, team, report, review.synopsis);
       }
 
+      // A plan step that finished outside its plan (the plan halted on it,
+      // then a follow-up or a recovery got it done): the plan goes on — the
+      // waiting steps hand over, and QA follows the plan's last step.
+      if (!this.#chainDriven.has(taskId) && this.#resumePlan(taskId, 'this step is done now')) return outcome;
       // A console follow-up that changed no files needs no new QA pass.
       if (autoQa && (!continuing || filesChanged)) void this.#enqueueQa(taskId, team, review.synopsis, filesChanged);
       // A finished QA task gets a verdict: pass, or a remediation round.
@@ -3683,11 +3842,20 @@ export class Orchestrator implements CommandHandlers {
     const rootId = this.#rootOf(taskId);
     const root = this.#bus.state.tasks[rootId];
     const team = task?.teamId ? this.#registry.get(task.teamId) : undefined;
-    if (!task || !root || !team || message.split(/\s+/).filter(Boolean).length <= 3) return this.#deliverMessage(taskId, message);
     const teamName = (id: string | null | undefined) => (id && this.#registry.get(id)?.name) || id || 'unassigned';
     const steps = Object.values(this.#bus.state.tasks)
       .filter((candidate) => candidate.rootTaskId === rootId)
       .sort((a, b) => a.createdAt - b.createdAt);
+    // Plan steps waiting on a step that isn't running: "start those steps" /
+    // "continue the plan" starts them (a fixed rule; the check below is the
+    // backup for other wordings).
+    const holder = [root, ...steps].find((step) => step?.planNext?.steps.length && !isLiveStatus(step.status));
+    const waiting = holder?.planNext?.steps.map((step) => `${teamName(step.teamId)} — ${step.title}`) ?? [];
+    if (holder && /\b(start|continue|resume|run|go on|kick off|carry on|proceed)\b[^.?!]*\b(steps?|plan)\b/i.test(message)) {
+      this.#resumePlan(holder.id, 'you said to go on', message);
+      return;
+    }
+    if (!task || !root || !team || message.split(/\s+/).filter(Boolean).length <= 3) return this.#deliverMessage(taskId, message);
     // Where the message would go without the check (a step working now, or the task).
     const workingStep = taskId === rootId ? steps.find((step) => this.#inboxes.has(step.id)) : undefined;
     const rootTeam = (root.teamId && this.#registry.get(root.teamId)) || team;
@@ -3708,6 +3876,7 @@ export class Orchestrator implements CommandHandlers {
             : this.#inboxes.has(taskId)
               ? `${team.name} on this task`
               : null,
+          waiting,
         },
         message,
         spec,
@@ -3729,6 +3898,7 @@ export class Orchestrator implements CommandHandlers {
       return;
     }
     if (decision.route === 'ask') return this.#askWhichTeam(taskId, root, rootTeam, message, decision.teamIds ?? [], decision.why ?? '');
+    if (decision.route === 'plan' && holder && this.#resumePlan(holder.id, 'you said to go on', message)) return;
     return this.#deliverMessage(taskId, message);
   }
 
@@ -3910,10 +4080,13 @@ export class Orchestrator implements CommandHandlers {
     const context =
       `This continues a stuck task ("${task.title}", ${team.name}). What stopped it: ${problem.replace(/\s+/g, ' ').slice(0, 600)}\n\n` +
       `The original ask: ${task.detail.slice(0, 1500)}`;
+    // Plan steps waiting on the stuck task wait on the recovery instead.
+    const waiting = task.planNext ?? null;
+    if (waiting) this.#patchTask(taskId, { planNext: null });
     if (plan.action === 'split') {
       const firstId = `t-${now().toString(36)}-${++this.#taskCounter}`;
       this.#recoveryRound.set(firstId, round);
-      const steps = plan.steps.map((step, index) => (index === 0 ? { ...step, instruction: `${step.instruction}\n\n${context}` } : step));
+      const steps = [...plan.steps.map((step, index) => (index === 0 ? { ...step, instruction: `${step.instruction}\n\n${context}` } : step)), ...(waiting?.steps ?? [])];
       void this.#runChain(firstId, steps, task.projectId ?? this.#projects.defaultProject().id, baseTitle, round, undefined, 'review', this.#rootOf(taskId));
       return;
     }
@@ -3932,6 +4105,7 @@ export class Orchestrator implements CommandHandlers {
       detail: `${plan.instruction}\n\n${context}`,
       projectId: task.projectId,
       teamId: target.id,
+      planNext: waiting,
       status: 'queued',
       progressPct: 0,
       agentIds: [],
