@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, type Dirent } from 'node:fs';
 import { basename, join, resolve, sep } from 'node:path';
-import type { Project, WorkspaceRoot } from '@agent-hq/shared';
+import type { Project, WorkspaceRoot, Worktree } from '@agent-hq/shared';
 
 // A folder under the workspace roots that could be registered as a project.
 export interface ProjectFolder {
@@ -231,6 +231,17 @@ export class ProjectRegistry {
     if (removed) this.#save();
     this.#folderCache = null;
     return removed;
+  }
+
+  // The bots' worktree record (null removes it). Returns the updated project.
+  setWorktree(id: string, worktree: Worktree | null): Project | null {
+    const current = this.#projects.get(id);
+    if (!current) return null;
+    const project: Project = { ...current, worktree };
+    if (!worktree) delete project.worktree;
+    this.#projects.set(id, project);
+    this.#save();
+    return project;
   }
 
   // Returns the updated project, plus whether it just crossed 75% of quota.

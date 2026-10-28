@@ -187,6 +187,10 @@ export function TopBar(props: {
   // 'debate' (both draft, then converge on one).
   const [pair, setPair] = useState<PairMode | null>(null);
   const [hint, setHint] = useState<string | null>(null);
+  // The Roblox Studio window the next tasks' workers may drive (stays picked
+  // until changed; every other open Studio stays the owner's).
+  const [studio, setStudio] = useState('');
+  const studios = props.state.info.studios ?? [];
   const hintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeCount = Object.values(props.state.agents).filter(isActive).length;
   const usage = props.state.usage;
@@ -212,7 +216,7 @@ export function TopBar(props: {
       }
       return;
     }
-    props.send({ type: 'task.submit', text: trimmed, ...(pair ? { pair: true, pairMode: pair } : {}) });
+    props.send({ type: 'task.submit', text: trimmed, ...(pair ? { pair: true, pairMode: pair } : {}), ...(studio ? { studio } : {}) });
     setText('');
     setPair(null);
   };
@@ -247,6 +251,22 @@ export function TopBar(props: {
         >
           {pair === 'split' ? 'Pair · split' : pair === 'debate' ? 'Pair · debate' : 'Pair'}
         </button>
+        <select
+          className={`pair-toggle${studio ? ' on' : ''}`}
+          value={studio}
+          aria-label="Roblox Studio for the next tasks"
+          title="The Roblox Studio window the next tasks' workers may drive — every other open Studio stays yours (studio:<name> in a task does the same)"
+          onFocus={() => props.send({ type: 'studios.list' })}
+          onChange={(event) => setStudio(event.target.value)}
+        >
+          <option value="">Studio: none</option>
+          {studio && !studios.some((window) => window.name === studio) && <option value={studio}>Studio: {studio} (closed)</option>}
+          {studios.map((window) => (
+            <option key={`${window.name}-${window.placeId ?? ''}`} value={window.name}>
+              Studio: {window.name}
+            </option>
+          ))}
+        </select>
       </div>
       {hint ? (
         <span className="act" style={{ color: 'var(--amber)', maxWidth: 520, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>

@@ -157,6 +157,10 @@ export const TaskSchema = z.object({
   // The owner asked for a QA pass on this ask ("/qa …", or `qa` on
   // task.submit), whatever the "## QA" rules say for its team.
   qa: z.boolean().optional(),
+  // The Roblox Studio window this ask's workers may drive (its place name,
+  // or the placeId) — `studio:<name>` in the ask, or `studio` on task.submit.
+  // Steps of the ask use the ask's. Any other open Studio is the owner's.
+  studio: z.string().nullable().optional(),
   // Pair mode: two workers on two engines. 'review' = second opinion — the
   // author does the work, the reviewer (read-only) checks the actual result,
   // rounds repeat until the reviewer agrees (or the round cap asks the owner).
@@ -320,6 +324,26 @@ export type PermissionRequest = z.infer<typeof PermissionRequestSchema>;
 // A project = a workspace + a ledger. Workers run inside workspaceDir and
 // only see that project's files and history. Quotas are token shares of the
 // subscription limits — never dollars.
+// The bots' worktree of a git project: a separate checkout on its own branch
+// (agent-hq/<base>) cut from the owner's branch. Workers run there, so
+// nothing they do touches the owner's folder or branch until the owner
+// merges it (which removes the worktree) or discards it.
+export const WorktreeSchema = z.object({
+  root: z.string(), // the worktree's top folder (git worktree path)
+  dir: z.string(), // where workers run: the project's folder inside it
+  branch: z.string(), // agent-hq/<base>
+  base: z.string(), // the owner's branch it was cut from and merges into
+  ahead: z.number(), // commits on the bots' branch the owner's doesn't have
+  behind: z.number(), // the owner's commits since (merged in when clean)
+  changedFiles: z.number(),
+  dirty: z.boolean(), // uncommitted changes in the worktree right now
+  commits: z.array(z.object({ sha: z.string(), subject: z.string(), at: z.number() })),
+  note: z.string().nullable().optional(), // the last merge/catch-up problem, for the owner
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+export type Worktree = z.infer<typeof WorktreeSchema>;
+
 export const ProjectSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -328,6 +352,7 @@ export const ProjectSchema = z.object({
   quotaTokens: z.number(),
   usedTokens: z.number(),
   alerted75: z.boolean(),
+  worktree: WorktreeSchema.nullable().optional(),
 });
 export type Project = z.infer<typeof ProjectSchema>;
 
@@ -519,6 +544,9 @@ export const HubInfoSchema = z.object({
   // Desktop apps teams can be granted (their ids are in mcpCatalog too).
   apps: z.array(AppSchema).optional(),
   appSuggestions: z.array(AppSuggestionSchema).optional(),
+  // Roblox Studio windows open on this PC (studios.list refreshes it), for
+  // picking a task's Studio.
+  studios: z.array(z.object({ name: z.string(), placeId: z.string().nullable() })).optional(),
 });
 export type HubInfo = z.infer<typeof HubInfoSchema>;
 

@@ -117,6 +117,11 @@ export function startServer(
           case 'app.remove':
             if (mode !== 'plain' || !local) return;
             break;
+          // The bots' work lands on (or leaves) the owner's branch — the PC's call.
+          case 'worktree.merge':
+          case 'worktree.discard':
+            if (mode !== 'plain' || !local) return;
+            break;
           case 'team.create':
           case 'team.update':
             if ((mode !== 'plain' || !local) && command.mcpServers) {

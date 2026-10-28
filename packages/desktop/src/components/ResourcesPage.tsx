@@ -1,4 +1,5 @@
-import type { HubState } from '@agent-hq/shared';
+import { useState } from 'react';
+import type { ClientCommand, HubState, Project, Worktree } from '@agent-hq/shared';
 import { formatResetDay, formatResetTime, formatTokens, usageColor } from '../status';
 
 // Categorical hues for the model mix, in bar order — validated for the dark
@@ -6,7 +7,7 @@ import { formatResetDay, formatResetTime, formatTokens, usageColor } from '../st
 // segments, contrast); Codex added 2026-10-15 (dataviz validate_palette.js).
 const TIER_COLORS = { sonnet: '#14A38B', opus: '#7B66E8', haiku: '#BE8A2D', codex: '#D1556E' } as const;
 
-export function ResourcesPage(props: { state: HubState }): JSX.Element {
+export function ResourcesPage(props: { state: HubState; send: (command: ClientCommand) => void }): JSX.Element {
   const { usage, tasks, teams, projects } = props.state;
   const projectList = Object.values(projects).sort((a, b) => b.usedTokens - a.usedTokens);
   const mix = usage.modelMixPct;
@@ -136,6 +137,7 @@ export function ResourcesPage(props: { state: HubState }): JSX.Element {
                 <div className="track" style={{ marginTop: 5 }}>
                   <div className="fill" style={{ width: `${pct}%`, background: usageColor(pct) }} />
                 </div>
+                {project.worktree && <BotsWork project={project} worktree={project.worktree} send={props.send} />}
               </div>
             );
           })}
@@ -205,6 +207,59 @@ export function ResourcesPage(props: { state: HubState }): JSX.Element {
             </div>
           ))}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// The bots' worktree of a project: their branch, what's on it, and the
+// owner's two buttons (each asks once more before it acts).
+function BotsWork(props: { project: Project; worktree: Worktree; send: (command: ClientCommand) => void }): JSX.Element {
+  const { worktree } = props;
+  const [armed, setArmed] = useState<'merge' | 'discard' | null>(null);
+  const counts = [
+    worktree.ahead ? `${worktree.ahead} commit${worktree.ahead === 1 ? '' : 's'} ahead` : 'nothing new yet',
+    worktree.changedFiles ? `${worktree.changedFiles} file${worktree.changedFiles === 1 ? '' : 's'} changed` : '',
+    worktree.behind ? `${worktree.behind} behind your ${worktree.base}` : '',
+    worktree.dirty ? 'uncommitted changes' : '',
+  ].filter(Boolean);
+  const act = (action: 'merge' | 'discard') => {
+    if (armed !== action) {
+      setArmed(action);
+      return;
+    }
+    setArmed(null);
+    props.send({ type: action === 'merge' ? 'worktree.merge' : 'worktree.discard', projectId: props.project.id });
+  };
+  return (
+    <div style={{ marginTop: 8, padding: '8px 10px', border: '1px solid var(--line)', borderRadius: 6 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+        <span className="act">
+          Bots' work: <span className="mono">{worktree.branch}</span> → <span className="mono">{worktree.base}</span> · {counts.join(' · ')}
+        </span>
+        <span style={{ display: 'flex', gap: 6 }}>
+          <button type="button" className="btn approve" style={{ padding: '3px 10px' }} onClick={() => act('merge')} onBlur={() => setArmed(null)}>
+            {armed === 'merge' ? `Merge into ${worktree.base}?` : 'Merge'}
+          </button>
+          <button type="button" className="btn deny" style={{ padding: '3px 10px' }} onClick={() => act('discard')} onBlur={() => setArmed(null)}>
+            {armed === 'discard' ? 'Throw it away?' : 'Discard'}
+          </button>
+        </span>
+      </div>
+      {worktree.note && (
+        <div className="act" style={{ color: 'var(--amber)', marginTop: 4 }}>
+          {worktree.note}
+        </div>
+      )}
+      {worktree.commits.slice(0, 5).map((commit) => (
+        <div key={commit.sha} className="act" style={{ marginTop: 3 }}>
+          <span className="mono" style={{ color: 'var(--ghost)' }}>{commit.sha}</span> {commit.subject}{' '}
+          <span style={{ color: 'var(--faint)' }}>· {new Date(commit.at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
+        </div>
+      ))}
+      {worktree.commits.length > 5 && <div className="act" style={{ color: 'var(--faint)', marginTop: 3 }}>…and {worktree.commits.length - 5} more</div>}
+      <div className="act" style={{ color: 'var(--faint)', marginTop: 4 }}>
+        {worktree.root} — merging takes in your latest {worktree.base} first, fast-forwards it, then removes the worktree
       </div>
     </div>
   );

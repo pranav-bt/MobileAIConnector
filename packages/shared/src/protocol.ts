@@ -41,7 +41,16 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
     // A QA pass for this ask even if its team isn't under "## QA" in the
     // master's rules ("/qa …" on the text does the same).
     qa: z.boolean().optional(),
+    // The Roblox Studio window this ask's workers may drive ("studio:<name>"
+    // in the text does the same).
+    studio: z.string().max(200).optional(),
   }),
+  // The bots' worktree of a project: merge it into the owner's branch (then
+  // it's removed), or throw it away. PC only.
+  z.object({ type: z.literal('worktree.merge'), projectId: z.string() }),
+  z.object({ type: z.literal('worktree.discard'), projectId: z.string() }),
+  // Re-read the open Roblox Studio windows into HubInfo.studios.
+  z.object({ type: z.literal('studios.list') }),
   // The master drafts routing-table rules ("keywords → Team") from the asks
   // it has routed; you get a card to add them (a match then routes with no
   // model call).

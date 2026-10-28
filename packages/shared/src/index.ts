@@ -5,3 +5,4 @@ export * from './rules.js';
 export * from './pair.js';
 export * from './threads.js';
 export * from './report.js';
+export * from './studio.js';

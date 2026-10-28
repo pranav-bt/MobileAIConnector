@@ -6,7 +6,7 @@ import type { AccessGrant, ClientCommand, ModelOverrides, ModelTier, PairMode } 
 // these handlers — the server routes them to the SecurityController.
 export interface CommandHandlers {
   // pair: true/false forces pair mode on/off; omitted = the team's default.
-  submitTask(text: string, projectId: string | null, pair?: boolean, pairMode?: PairMode, qa?: boolean): void;
+  submitTask(text: string, projectId: string | null, pair?: boolean, pairMode?: PairMode, qa?: boolean, studio?: string): void;
   suggestRoutingRules?(): void;
   stopTask(taskId: string): void;
   // Task console: talk to a task (the demo hub has no consoles).
@@ -54,6 +54,11 @@ export interface CommandHandlers {
   addApp?(command: Omit<Extract<ClientCommand, { type: 'app.add' }>, 'type'>): void;
   updateApp?(command: Omit<Extract<ClientCommand, { type: 'app.update' }>, 'type'>): void;
   removeApp?(appId: string): void;
+  // The bots' worktree of a project: onto the owner's branch, or thrown away.
+  mergeWorktree?(projectId: string): void | Promise<void>;
+  discardWorktree?(projectId: string): void | Promise<void>;
+  // Re-read the open Roblox Studio windows (HubInfo.studios).
+  listStudios?(): void | Promise<void>;
 }
 
 export function dispatchCommand(handlers: CommandHandlers, command: ClientCommand): void {
@@ -61,7 +66,7 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
     case 'hello':
       return; // connection bookkeeping happens in the server
     case 'task.submit':
-      return handlers.submitTask(command.text, command.projectId ?? null, command.pair, command.pairMode, command.qa);
+      return handlers.submitTask(command.text, command.projectId ?? null, command.pair, command.pairMode, command.qa, command.studio);
     case 'rules.suggest':
       return handlers.suggestRoutingRules?.();
     case 'task.stop':
@@ -127,6 +132,15 @@ export function dispatchCommand(handlers: CommandHandlers, command: ClientComman
     }
     case 'app.remove':
       return handlers.removeApp?.(command.appId);
+    case 'worktree.merge':
+      void handlers.mergeWorktree?.(command.projectId);
+      return;
+    case 'worktree.discard':
+      void handlers.discardWorktree?.(command.projectId);
+      return;
+    case 'studios.list':
+      void handlers.listStudios?.();
+      return;
     case 'pairing.start':
     case 'pairing.cancel':
     case 'device.revoke':

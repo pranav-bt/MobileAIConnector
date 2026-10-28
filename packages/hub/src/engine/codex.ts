@@ -419,7 +419,23 @@ export class CodexEngine implements OrchestratorEngine {
         }
         if (method === 'mcpServer/elicitation/request') {
           const server = String(request['serverName'] ?? '');
-          if ((request['_meta'] as JsonObject | undefined)?.['codex_approval_kind'] === 'mcp_tool_call') {
+          const meta = request['_meta'] as JsonObject | undefined;
+          if (meta?.['codex_approval_kind'] === 'mcp_tool_call') {
+            // The orchestrator's check first (a worker stays on its task's
+            // Roblox Studio): the tool from the prompt, its arguments from _meta.
+            if (callbacks.onMcpCall) {
+              const tool = String(request['message'] ?? '').match(/tool "([^"]+)"/)?.[1] ?? '';
+              const params = meta['tool_params'];
+              const verdict = await callbacks.onMcpCall({
+                server,
+                tool,
+                input: params && typeof params === 'object' && !Array.isArray(params) ? (params as Record<string, unknown>) : {},
+              });
+              if (!verdict.allow) {
+                callbacks.onActivity(`${server} ${tool}: refused — ${verdict.message}`);
+                return { action: 'decline' };
+              }
+            }
             // Codex asks before every MCP tool call. A connection the team
             // was granted runs without a card, as Claude workers' MCP tools
             // do (an app's bridge enforces its own read-only mode); any other

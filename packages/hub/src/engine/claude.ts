@@ -110,6 +110,7 @@ export class ClaudeEngine implements OrchestratorEngine {
     resumeSessionId?: string;
     inbox?: WorkerInbox;
     readOnly?: boolean;
+    env?: Record<string, string>;
   }): Promise<WorkerRunResult> {
     const { callbacks } = args;
     const maxSubagents = args.maxSubagents ?? DEFAULT_MAX_SUBAGENTS;
@@ -172,7 +173,35 @@ export class ClaudeEngine implements OrchestratorEngine {
         ...(args.resumeSessionId ? { resume: args.resumeSessionId } : {}),
         cwd: args.cwd,
         additionalDirectories: args.extraDirs ?? [],
+        ...(args.env && Object.keys(args.env).length > 0 ? { env: { ...process.env, ...args.env } } : {}),
         ...(mcpServers ? { mcpServers } : {}),
+        // MCP calls are checked here, not in canUseTool: a project's settings
+        // may pre-allow its Studio tools, and allowed tools never reach
+        // canUseTool. Hooks run for every call (long timeout: a card may wait).
+        ...(callbacks.onMcpCall
+          ? {
+              hooks: {
+                PreToolUse: [
+                  {
+                    matcher: 'mcp__.*',
+                    timeout: 86_400,
+                    hooks: [
+                      async (input: unknown) => {
+                        const call = isRecord(input) ? input : {};
+                        const name = typeof call['tool_name'] === 'string' ? call['tool_name'] : '';
+                        const [, server = '', tool = ''] = name.match(/^mcp__(.+?)__(.+)$/) ?? [];
+                        if (!server || !callbacks.onMcpCall) return {};
+                        const verdict = await callbacks.onMcpCall({ server, tool, input: isRecord(call['tool_input']) ? call['tool_input'] : {} });
+                        return verdict.allow
+                          ? {}
+                          : { hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'deny' as const, permissionDecisionReason: verdict.message } };
+                      },
+                    ],
+                  },
+                ],
+              },
+            }
+          : {}),
         // Exactly the team's grants: without this every worker also gets the
         // PC's user-scope servers (verified: test/probe-mcp-scope.ts).
         strictMcpConfig: true,

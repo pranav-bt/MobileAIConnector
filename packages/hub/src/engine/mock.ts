@@ -1,3 +1,4 @@
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ModelSpec, Team } from '@agent-hq/shared';
 import type { OrchestratorEngine, WorkerInbox, WorkerRunCallbacks, WorkerRunResult } from './types.js';
@@ -246,6 +247,7 @@ export class MockEngine implements OrchestratorEngine {
     resumeSessionId?: string;
     inbox?: WorkerInbox;
     readOnly?: boolean;
+    env?: Record<string, string>;
   }): Promise<WorkerRunResult> {
     const { callbacks } = args;
     const sessionId =
@@ -406,6 +408,28 @@ export class MockEngine implements OrchestratorEngine {
     }
     // "brief-echo" shows the whole brief the worker got, as a console row.
     if (taskText.includes('brief-echo')) callbacks.onTranscript?.({ id: `${rowId}-brief`, kind: 'message', text: `BRIEF: ${args.prompt}` });
+    // Worktree / Studio markers: "write-file:<name>" writes a file in the
+    // worker's folder; "rm-file:<name>" asks the policy to delete it (rm -f
+    // <name>) and deletes it if allowed; "studio-call:<id>" calls a Roblox
+    // Studio tool on that window; "env-echo" reports AGENT_HQ_STUDIO.
+    const steps: string[] = [];
+    for (const [, name] of taskText.matchAll(/write-file:([\w.-]+)/g)) {
+      writeFileSync(join(args.cwd, name!), `mock ${name} ${Date.now()}\n`);
+      steps.push(`wrote ${name}`);
+    }
+    for (const [, name] of taskText.matchAll(/rm-file:([\w.-]+)/g)) {
+      const decision = await callbacks.onPermission({ toolName: 'Bash', command: `rm -f ${name}`, reason: 'mock delete' });
+      if (decision === 'approve') rmSync(join(args.cwd, name!), { force: true });
+      steps.push(`rm ${name}: ${decision}`);
+    }
+    for (const [, id] of taskText.matchAll(/studio-call:([\w-]+)/g)) {
+      const verdict = callbacks.onMcpCall
+        ? await callbacks.onMcpCall({ server: 'Roblox_Studio', tool: 'execute_luau', input: { studio_id: id, code: 'return 1', datamodel_type: 'Edit' } })
+        : { allow: true as const };
+      steps.push(`studio ${id}: ${verdict.allow ? 'allowed' : `refused (${verdict.message})`}`);
+    }
+    if (taskText.includes('env-echo')) steps.push(`env AGENT_HQ_STUDIO=${args.env?.['AGENT_HQ_STUDIO'] ?? '(unset)'}`);
+    if (steps.length) report = `${steps.join(' · ')}\n${report}`;
     const notesCheck = /notes-check:(\w+)/.exec(taskText);
     if (notesCheck) {
       const at = args.prompt.indexOf('Team notes — lessons');

@@ -13,6 +13,7 @@ import { startDemo } from './demo.js';
 import { ClaudeEngine } from './engine/claude.js';
 import { MockEngine } from './engine/mock.js';
 import { Orchestrator } from './orchestrator/orchestrator.js';
+import { StudioDirectory, type StudioLister } from './orchestrator/studios.js';
 import { TeamRegistry } from './orchestrator/teams.js';
 import { ProjectRegistry } from './orchestrator/projects.js';
 import { PairingManager } from './security/pairing.js';
@@ -46,6 +47,10 @@ export interface HubOptions {
   claudeConfigPath?: string; // tests override ~/.claude.json (the MCP catalog)
   generalDir?: string; // tests override ~/AgentHQ/General (the General workspace)
   detectApps?: () => string[]; // tests override the Blender install scan
+  // Where the bots' worktrees go (null = off: workers run in the project
+  // folder). Default: ~/AgentHQ/worktrees for real agents, off in mock mode.
+  worktreesDir?: string | null;
+  studios?: StudioLister; // tests override the Roblox Studio window list
 }
 
 export interface RunningHub {
@@ -111,6 +116,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
   let transcripts: TranscriptStore | null = null;
   let masterRules = (): string => '';
   let mcpCatalog = (): string[] => [];
+  let studioNames = (): { name: string; placeId: string | null }[] => [];
   let apps: AppRegistry | null = null;
   let workerCwds: () => string[] = () => [];
   let attachFreelancers: (manager: FreelancerManager) => void = () => {};
@@ -165,6 +171,11 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
       },
       options.claudeProjectsDir,
     );
+    orchestrator.configureWorktrees(
+      options.worktreesDir !== undefined ? options.worktreesDir : mode === 'claude' ? join(homedir(), 'AgentHQ', 'worktrees') : null,
+    );
+    if (options.studios) orchestrator.configureStudios(new StudioDirectory(options.studios));
+    studioNames = () => orchestrator.studioNames();
     orchestrator.onInfoChange(() => bus.publish({ type: 'hub.updated', info: makeInfo() }));
     masterRules = () => orchestrator.masterRulesText();
     mcpCatalog = () => orchestrator.mcpCatalogNames();
@@ -211,6 +222,7 @@ export async function startHub(options: HubOptions = {}): Promise<RunningHub> {
     mcpCatalog: mcpCatalog(),
     accessGrants,
     ...(apps ? { apps: apps.list(), appSuggestions: apps.suggestions() } : {}),
+    studios: studioNames(),
   });
   bus.publish({ type: 'hub.updated', info: makeInfo() });
 

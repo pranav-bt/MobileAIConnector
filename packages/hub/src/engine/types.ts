@@ -29,6 +29,11 @@ export interface WorkerRunCallbacks {
   // can still be continued.
   onSession?(sessionId: string): void;
   onTranscript?(row: EngineRow): void;
+  // Before an MCP tool call runs, whatever the PC's settings pre-allow (a
+  // project's settings may allow Studio tools outright): the orchestrator
+  // keeps workers on their task's Roblox Studio. A refusal's message goes
+  // back to the worker.
+  onMcpCall?(call: { server: string; tool: string; input: Record<string, unknown> }): Promise<{ allow: true } | { allow: false; message: string }>;
 }
 
 export interface WorkerRunResult {
@@ -93,5 +98,9 @@ export interface OrchestratorEngine {
     // A reviewer: may read and run read-only commands, never write (file
     // tools removed, shell writes refused, Codex sandbox read-only).
     readOnly?: boolean;
+    // Extra environment for the worker's tools (its Roblox Studio's name).
+    // Claude workers get it in their process; Codex has no per-thread
+    // environment, so its workers rely on the brief.
+    env?: Record<string, string>;
   }): Promise<WorkerRunResult>;
 }

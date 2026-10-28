@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { MODEL_DEFAULTS, PAIR_REVIEWER_DEFAULT, catalogModel, isInternalTask, isLiveStatus, stepKind, parseExchange, parseVerdict, resolveModel, rulesFor, toolName, parseReportLines, type AccessGrant, type Agent, type ClientCommand, type EngineId, type ModelChoice, type PairMode, type PairVerdict, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
+import { MODEL_DEFAULTS, PAIR_REVIEWER_DEFAULT, catalogModel, isInternalTask, isLiveStatus, stepKind, parseExchange, parseVerdict, resolveModel, rulesFor, toolName, parseReportLines, parseStudioToken, resolveStudio, type AccessGrant, type Agent, type ClientCommand, type EngineId, type ModelChoice, type PairMode, type PairVerdict, type ModelOverrides, type ModelSpec, type ModelTier, type PermissionRequest, type Project, type Task, type Team, type Usage } from '@agent-hq/shared';
 import type { HubBus } from '../bus.js';
 import type { CommandHandlers } from '../commands.js';
 import type { OrchestratorEngine, WorkerRunCallbacks, WorkerRunResult } from '../engine/types.js';
@@ -42,7 +42,9 @@ import {
 } from './master.js';
 import { DEFAULT_QA_RULE, MASTER_SECTIONS, hasSection } from './rules-file.js';
 import { capturePcScreen, saveIncomingFile, shareFile } from '../files.js';
-import { evaluatePermission } from './policy.js';
+import { evaluatePermission, type WorkspaceScope } from './policy.js';
+import { StudioDirectory } from './studios.js';
+import { WorktreeManager } from './worktrees.js';
 import { delay, isInside, type LockedDir } from './util.js';
 import type { PermissionMode } from '../config.js';
 import { parseRules, type ParsedRules, type TeamRegistry } from './teams.js';
@@ -94,8 +96,20 @@ interface SeatContext {
   taskId: string;
   team: Team;
   project: Project;
-  scope: { cwd: string; extraDirs: string[]; locked: LockedDir };
+  scope: WorkScope;
   controller: AbortController;
+}
+
+// Where a worker runs and what it may touch. `cwd` is the bots' worktree of
+// the project when it has one (`worktree`), else the project folder
+// (`projectDir`, the owner's checkout — also where the project's Claude Code
+// folder and MCP servers are looked up).
+interface WorkScope {
+  cwd: string;
+  projectDir: string;
+  worktree: boolean;
+  extraDirs: string[];
+  locked: LockedDir;
 }
 
 const seatChoice = (spec: ModelSpec): ModelChoice => ({ model: spec.id, ...(spec.effort ? { effort: spec.effort } : {}) });
@@ -265,6 +279,15 @@ export class Orchestrator implements CommandHandlers {
   // Failover switches already announced ("<seat>:<engine>").
   #failoverNoted = new Set<string>();
   #cardsSeen = new Set<string>();
+  // The bots' worktrees (null = off: workers run in the project folder), and
+  // the folder they're made in (hidden from project discovery).
+  #worktrees: WorktreeManager | null = null;
+  #worktreeRoot: string | null = null;
+  // Each running task's scope, for its brief (which folder it works in).
+  #taskScopes = new Map<string, WorkScope>();
+  // Roblox Studio windows open on this PC (tests inject a fake list).
+  #studios = new StudioDirectory();
+  #studioList: { name: string; placeId: string | null }[] = [];
 
   #projects: ProjectRegistry;
   #policy: { mode: PermissionMode };
@@ -770,9 +793,18 @@ export class Orchestrator implements CommandHandlers {
   messageTask(taskId: string, text: string): void {
     const task = this.#bus.state.tasks[taskId];
     if (!task) return;
-    const message = text.trim();
+    const named = parseStudioToken(text.trim());
+    const message = named.text;
+    if (named.studio) {
+      // "studio:<name>" in a message (re)assigns the ask's Studio.
+      const root = this.#bus.state.tasks[this.#rootOf(taskId)] ?? task;
+      this.#patchTask(root.id, { studio: named.studio });
+      this.#row(taskId, { role: 'owner', kind: 'message', text: text.trim() });
+      this.#row(taskId, { role: 'master', agentId: 'master', kind: 'status', text: `Roblox Studio for this ask is now "${named.studio}"` });
+      if (!message) return;
+    }
     if (!message) return;
-    this.#row(taskId, { role: 'owner', kind: 'message', text: message });
+    if (!named.studio) this.#row(taskId, { role: 'owner', kind: 'message', text: message });
     // A freelancer's task continues its own terminal session.
     if (task.title.startsWith('[FL ') && task.agentIds[0]) {
       this.freelancerSend(task.agentIds[0], message);
@@ -864,12 +896,13 @@ export class Orchestrator implements CommandHandlers {
   // other project, which is how a task pinned to one project wrote into
   // another. The only extras are the hub's phone inbox/outbox, which workers
   // in every project are told to use by name.
-  #extraDirs(cwd: string, team?: Team): string[] {
+  #extraDirs(cwd: string, team?: Team, projectDir = cwd): string[] {
     const paDir = team && this.#isPaTeam(team) && this.#pa ? this.#pa.paths.dir : '';
     // The project's own Claude Code folder (its memory, saved tool results) —
-    // as Claude Code opened in that folder has it — and the folders the
-    // owner opened for writing (Settings > Hub; the scratch folder by default).
-    const claudeCode = this.#claudeCodeDir(cwd);
+    // as Claude Code opened in that folder has it (the owner's folder, also
+    // for a worker in the bots' worktree) — and the folders the owner
+    // opened for writing (Settings > Hub; the scratch folder by default).
+    const claudeCode = this.#claudeCodeDir(projectDir);
     try {
       mkdirSync(claudeCode, { recursive: true });
     } catch {
@@ -902,7 +935,184 @@ export class Orchestrator implements CommandHandlers {
     this.#accessGrants = grants;
     this.#onAccessChange = onChange;
     if (claudeProjectsDir) this.#claudeProjectsDir = claudeProjectsDir;
-    this.#projects.hideFolders(grants.map((grant) => grant.path));
+    this.#hideFolders();
+  }
+
+  // Folders never offered as projects: the owner's granted ones and the
+  // bots' worktrees.
+  #hideFolders(): void {
+    this.#projects.hideFolders([...this.#accessGrants.map((grant) => grant.path), ...(this.#worktreeRoot ? [this.#worktreeRoot] : [])]);
+  }
+
+  // --- the bots' worktrees ---------------------------------------------------
+  // Every git project's workers run in a worktree on agent-hq/<base>, cut
+  // from the owner's branch (made on first need, under `root`). null = off.
+
+  configureWorktrees(root: string | null): void {
+    this.#worktreeRoot = root;
+    this.#hideFolders();
+    this.#worktrees = root
+      ? new WorktreeManager({
+          root: () => root,
+          get: (projectId) => this.#projects.get(projectId)?.worktree ?? null,
+          save: (projectId, worktree) => {
+            const project = this.#projects.setWorktree(projectId, worktree);
+            if (project) this.#bus.publish({ type: 'project.updated', project });
+          },
+          lockedDir: this.#registry.dataDir,
+          log: (_projectId, message) => this.#activity('master', null, message),
+        })
+      : null;
+  }
+
+  // Where a task's workers run: the project's worktree when it has one
+  // (made now if needed), else the project folder.
+  async #workScope(project: Project, team: Team): Promise<WorkScope> {
+    const projectDir = project.workspaceDir || this.#workspaceDir;
+    const dir = this.#worktrees ? await this.#worktrees.ensure(project).catch(() => null) : null;
+    const cwd = dir ?? projectDir;
+    return { cwd, projectDir, worktree: !!dir, extraDirs: this.#extraDirs(cwd, team, projectDir), locked: this.#lockedData(team) };
+  }
+
+  // The owner's call from the Projects page: the bots' work goes onto their
+  // branch (the worktree is removed), or is thrown away. Not while a task is
+  // working in that project.
+  async mergeWorktree(projectId: string): Promise<void> {
+    await this.#worktreeAction(projectId, 'merge');
+  }
+
+  async discardWorktree(projectId: string): Promise<void> {
+    await this.#worktreeAction(projectId, 'discard');
+  }
+
+  async #worktreeAction(projectId: string, action: 'merge' | 'discard'): Promise<void> {
+    const project = this.#projects.get(projectId);
+    if (!project?.worktree || !this.#worktrees) return;
+    const busy = Object.values(this.#bus.state.tasks).filter(
+      (task) => task.projectId === projectId && isLiveStatus(task.status) && task.status !== 'routing',
+    );
+    if (busy.length > 0) {
+      this.#activity('master', null, `${project.name}: not ${action === 'merge' ? 'merging' : 'discarding'} the bots' work while ${busy.length} task${busy.length === 1 ? ' is' : 's are'} still working there — stop or finish ${busy.length === 1 ? 'it' : 'them'} first`);
+      return;
+    }
+    const outcome = action === 'merge' ? await this.#worktrees.merge(project) : await this.#worktrees.discard(project);
+    this.#activity('master', null, `${project.name}: ${outcome.message}`);
+  }
+
+  // --- Roblox Studio ---------------------------------------------------------
+  // A task's workers drive only its own Studio window (Task.studio, the
+  // ask's for its steps); every other open Studio is the owner's.
+
+  configureStudios(directory: StudioDirectory): void {
+    this.#studios = directory;
+  }
+
+  studioNames(): { name: string; placeId: string | null }[] {
+    return this.#studioList;
+  }
+
+  // Re-read the open windows into HubInfo.studios (the composer's picker).
+  async listStudios(): Promise<void> {
+    try {
+      const windows = await this.#studios.list(0);
+      this.#studioList = windows.map((window) => {
+        const match = window.name.match(/^(.*?)\s*\(placeId:\s*(\d+)\)\s*$/);
+        return { name: (match?.[1] ?? window.name).trim(), placeId: match?.[2] ?? null };
+      });
+    } catch (error) {
+      this.#studioList = [];
+      this.#activity('master', null, `couldn't list Roblox Studio windows — ${error instanceof Error ? error.message : String(error)}`);
+    }
+    this.#onInfoChange();
+  }
+
+  // What the policy checks a worker's command against.
+  #policyScope(taskId: string, scope: WorkScope): WorkspaceScope {
+    return {
+      cwd: scope.cwd,
+      extraDirs: scope.extraDirs,
+      locked: scope.locked,
+      freeDirs: this.#freeDirs(),
+      worktree: scope.worktree,
+      studio: this.#studioOf(taskId),
+    };
+  }
+
+  // What the brief says about Roblox Studio — only where Studio is in play
+  // (a Studio is assigned, the team has a Roblox connection, or the project
+  // is a Roblox one).
+  #studioNote(task: Task, project: Project): string {
+    const studio = this.#studioOf(task.id);
+    const team = task.teamId ? this.#registry.get(task.teamId) : undefined;
+    const roblox =
+      !!studio ||
+      Object.keys(team?.mcpServers ?? {}).some((name) => /roblox/i.test(name)) ||
+      existsSync(join(project.workspaceDir || this.#workspaceDir, 'default.project.json'));
+    if (!roblox) return '';
+    if (!studio) {
+      return "No Roblox Studio is assigned to this task — don't drive one (the open Studio windows are the owner's; a Studio call asks the owner). If the work needs Studio, do the rest and say so in your report; the owner assigns one with studio:<name>.";
+    }
+    const free = this.#freeDirs()[0];
+    const tools = free && existsSync(join(free, 'tools', 'studio')) ? join(free, 'tools', 'studio') : '';
+    return (
+      `Roblox Studio for this task: "${studio}" — the ONLY Studio window you may drive; every other open Studio is the owner's, never touch it. ` +
+      'In Studio MCP calls pass its studio_id (list_roblox_studios gives it).' +
+      (tools ? ` To sync this project's code into it or run Luau there, use the Studio tools in ${tools} (see its README) with --studio "${studio}" — AGENT_HQ_STUDIO is set to it.` : '')
+    );
+  }
+
+  // The ask's Studio (a step inherits its ask's).
+  #studioOf(taskId: string): string | null {
+    const tasks = this.#bus.state.tasks;
+    const task = tasks[taskId];
+    if (!task) return null;
+    const parent = task.parentTaskId ? tasks[task.parentTaskId] : undefined;
+    const chain = [task, task.rootTaskId ? tasks[task.rootTaskId] : undefined, parent, parent?.rootTaskId ? tasks[parent.rootTaskId] : undefined];
+    return chain.find((candidate) => candidate?.studio)?.studio ?? null;
+  }
+
+  // Environment for a worker's tools: the Studio tools take the window from
+  // AGENT_HQ_STUDIO (Heat's own tools read HEAT_STUDIO, and default to the
+  // owner's "Heat" window without it — so it's always set).
+  #studioEnv(taskId: string): Record<string, string> {
+    const studio = this.#studioOf(taskId);
+    return { AGENT_HQ_STUDIO: studio ?? '', HEAT_STUDIO: studio ?? '(no Studio is assigned to this task)' };
+  }
+
+  // Before a Roblox Studio tool runs: only on the task's own window. No
+  // Studio assigned → the owner is asked; a wrong window → refused, with
+  // the right id, so the worker corrects itself without a card.
+  #mcpGuard(taskId: string, workerId: string, team: Team): NonNullable<WorkerRunCallbacks['onMcpCall']> {
+    return async ({ server, tool, input }) => {
+      const studioId = typeof input['studio_id'] === 'string' ? input['studio_id'] : null;
+      if (!(/roblox/i.test(server) || studioId) || tool === 'list_roblox_studios') return { allow: true };
+      const assigned = this.#studioOf(taskId);
+      let windows: { id: string; name: string }[] = [];
+      try {
+        windows = await this.#studios.list();
+        if (studioId && !windows.some((window) => window.id === studioId)) windows = await this.#studios.list(0);
+      } catch (error) {
+        return { allow: false, message: `Agent HQ couldn't check which Roblox Studio window that is (${error instanceof Error ? error.message : String(error)}) — leave Studio alone and say so in your report.` };
+      }
+      const window = studioId ? windows.find((candidate) => candidate.id === studioId) : undefined;
+      const label = window?.name ?? (studioId ? `studio_id ${studioId}` : 'the active Studio');
+      if (!assigned) {
+        const decision = await this.#raisePermission(taskId, workerId, team, `mcp__${server}__${tool}`, `${tool} on ${label}`, `Roblox Studio call while working on this task`, [
+          `uses Roblox Studio "${label}" — no Studio was assigned to this task`,
+        ]);
+        return decision === 'approve'
+          ? { allow: true }
+          : { allow: false, message: 'The owner said no to this Roblox Studio call. No Studio is assigned to this task: leave Studio alone and say in your report what you needed it for (the owner can resend with studio:<name>).' };
+      }
+      const target = resolveStudio(assigned, windows);
+      if (target === null) return { allow: false, message: `This task's Studio "${assigned}" isn't open right now — leave Studio alone and say so in your report.` };
+      if (target === 'ambiguous') return { allow: false, message: `"${assigned}" matches several open Studio windows — leave Studio alone and ask the owner in your report which one.` };
+      if (studioId === target.id) return { allow: true };
+      return {
+        allow: false,
+        message: `Use only this task's Roblox Studio: "${target.name}" (studio_id ${target.id}). ${window ? `"${window.name}" belongs to the owner` : 'Pass its studio_id'} — never drive another window.`,
+      };
+    };
   }
 
   // The full-access folders, for the shell policy.
@@ -984,7 +1194,7 @@ export class Orchestrator implements CommandHandlers {
     }
     const before = new Map(this.#accessGrants.map((grant) => [grant.path.toLowerCase(), grant.access]));
     this.#accessGrants = kept;
-    this.#projects.hideFolders(kept.map((grant) => grant.path));
+    this.#hideFolders();
     this.#onAccessChange(kept);
     const label = { read: 'read', write: 'read & write', full: 'full (deletes without asking)' } as const;
     const changes = [
@@ -1064,8 +1274,8 @@ export class Orchestrator implements CommandHandlers {
 
   // --- commands ----------------------------------------------------------
 
-  submitTask(text: string, _projectId?: string | null, pair?: boolean, pairMode?: PairMode, qa?: boolean): void {
-    void this.#intake(text, pair, pairMode, qa);
+  submitTask(text: string, _projectId?: string | null, pair?: boolean, pairMode?: PairMode, qa?: boolean, studio?: string): void {
+    void this.#intake(text, pair, pairMode, qa, studio);
   }
 
   activeWorkerCwds(): string[] {
@@ -1198,8 +1408,12 @@ export class Orchestrator implements CommandHandlers {
     }
   }
 
-  async #intake(rawText: string, pairChoice?: boolean, pairMode: PairMode = 'review', qa = false): Promise<void> {
-    let text = rawText.trim();
+  async #intake(rawText: string, pairChoice?: boolean, pairMode: PairMode = 'review', qa = false, studioChoice?: string): Promise<void> {
+    // "studio:<name>" anywhere names the Roblox Studio window the ask's
+    // workers may drive (the composer's picker sends it as a field).
+    const named = parseStudioToken(rawText.trim());
+    let text = named.text;
+    const studio = studioChoice?.trim() || named.studio;
     // "/qa …" asks for a QA pass on this ask whatever the "## QA" rules say
     // (it combines with /pair and /solo, either order).
     const qaFirst = text.match(/^\/qa\s+([\s\S]+)$/i);
@@ -1293,6 +1507,7 @@ export class Orchestrator implements CommandHandlers {
       teamId: null,
       ownerAsk: text,
       ...(qa ? { qa: true } : {}),
+      ...(studio ? { studio } : {}),
       status: 'routing',
       progressPct: 0,
       agentIds: [],
@@ -1302,6 +1517,7 @@ export class Orchestrator implements CommandHandlers {
       updatedAt: now(),
     });
     this.#row(taskId, { id: 'ask', role: 'owner', kind: 'message', text: rawText.trim() });
+    if (studio) this.#row(taskId, { role: 'master', agentId: 'master', kind: 'status', text: `Roblox Studio for this ask: "${studio}" — its workers drive only that window` });
 
     this.#routingCount += 1;
     this.#patchAgent('master', { status: 'working', activity: `routing: ${text.slice(0, 50)}` });
@@ -1562,10 +1778,21 @@ export class Orchestrator implements CommandHandlers {
         );
       }
     }
+    const taskProject = (task.projectId ? this.#projects.get(task.projectId) : undefined) ?? this.#projects.defaultProject();
+    const workScope = this.#taskScopes.get(task.id);
+    if (workScope?.worktree) {
+      const worktree = taskProject.worktree;
+      sections.push(
+        `You work in the bots' worktree of ${taskProject.name}: ${workScope.cwd}, on the branch ${worktree?.branch ?? 'agent-hq/…'} (cut from the owner's ${worktree?.base ?? 'branch'}). ` +
+          `The owner's own checkout, ${workScope.projectDir}, is theirs: read it if useful, never write there. ` +
+          'Everything here can be undone, so work freely: deleting, resetting, rebuilding and project-local installs (npm/pnpm/yarn, uv, a venv in the project) run without asking — the hub commits the worktree before anything destructive and after your run. ' +
+          'Commit your work here as usual. Never switch branches, move or delete other branches or tags, push, or change git config or remotes — the owner reviews this branch and merges it.',
+      );
+    }
+    const studioNote = this.#studioNote(task, taskProject);
+    if (studioNote) sections.push(studioNote);
     if (this.#projects.roots.length > 0) {
-      const workspaceDir =
-        ((task.projectId ? this.#projects.get(task.projectId) : undefined) ?? this.#projects.defaultProject())
-          .workspaceDir || this.#workspaceDir;
+      const workspaceDir = workScope?.cwd ?? (taskProject.workspaceDir || this.#workspaceDir);
       const rootList = this.#projects.roots.map((root) => `${root.path} (${root.label})`).join(' · ');
       sections.push(
         `File locations policy: you may READ and SEARCH anywhere under these roots, including ALL subdirectories at any depth — recurse into them when searching: ${rootList}. ` +
@@ -1695,19 +1922,30 @@ export class Orchestrator implements CommandHandlers {
 
     const controller = new AbortController();
     this.#controllers.set(taskId, controller);
-    // Everything this worker may touch, decided once: the file tools are
-    // scoped to it by the SDK, and the policy gates shell writes that leave it.
-    const scope = {
+    // Placeholder until the worktree is ready (the stop path reads it).
+    let scope: WorkScope = {
       cwd: project.workspaceDir || this.#workspaceDir,
-      extraDirs: this.#extraDirs(project.workspaceDir || this.#workspaceDir, team),
+      projectDir: project.workspaceDir || this.#workspaceDir,
+      worktree: false,
+      extraDirs: [],
       locked: this.#lockedData(team),
     };
-    this.#runningCwds.set(taskId, scope.cwd);
     if (codexFallback) {
       this.#activity(workerId, taskId, `Codex isn't used in Agent HQ's own project yet — this worker runs on ${catalogModel(workerSpec.id)?.label ?? workerSpec.id}`);
     }
 
     try {
+      // Everything this worker may touch, decided once: the file tools are
+      // scoped to it by the SDK, and the policy gates shell writes that
+      // leave it. In a git project that's the bots' worktree; with nobody
+      // else working there, it first takes in the owner's newer commits.
+      scope = await this.#workScope(project, team);
+      if (scope.worktree && ![...this.#runningCwds.values()].includes(scope.cwd)) {
+        const caughtUp = await this.#worktrees?.catchUp(project.id);
+        if (caughtUp) this.#activity('master', taskId, caughtUp);
+      }
+      this.#runningCwds.set(taskId, scope.cwd);
+      this.#taskScopes.set(taskId, scope);
       // Team rules vs this project's CLAUDE.md: the owner settles genuine
       // conflicts before the worker starts (the prompt is built after, so it
       // carries the answers).
@@ -1772,16 +2010,21 @@ export class Orchestrator implements CommandHandlers {
             }
           }
         },
-        onPermission: ({ toolName, command, reason }) => {
+        onPermission: async ({ toolName, command, reason }) => {
           // The shell is not confined by the SDK's directory grants, so the
           // policy gets the worker's scope and gates writes that leave it.
-          const verdict = evaluatePermission(toolName, command, this.#policy.mode, { ...scope, freeDirs: this.#freeDirs() });
-          if (verdict.decision === 'allow') return Promise.resolve('approve' as const);
+          const verdict = evaluatePermission(toolName, command, this.#policy.mode, this.#policyScope(taskId, scope));
+          if (verdict.decision === 'allow') {
+            // Allowed because the worktree reverts it: commit what's there first.
+            if (verdict.checkpoint) await this.#worktrees?.checkpoint(project.id, `before: ${command.replace(/\s+/g, ' ').slice(0, 80)}`);
+            return 'approve' as const;
+          }
           return this.#raisePermission(taskId, workerId, team, toolName, command, reason, verdict.flags);
         },
+        onMcpCall: this.#mcpGuard(taskId, workerId, team),
       };
       // The team as the engine sees it: + this project's MCP servers.
-      const workerTeam = this.#workerTeam(team, scope.cwd, taskId, true);
+      const workerTeam = this.#workerTeam(team, scope.projectDir, taskId, true);
       const runAuthor = async (authorPrompt: string, resumeId?: string) => {
         if (inbox.closed) {
           inbox = new MessageInbox();
@@ -1791,23 +2034,34 @@ export class Orchestrator implements CommandHandlers {
         // land on the task between the author's runs.
         tokenBase = this.#bus.state.tasks[taskId]?.tokensUsed ?? tokenBase;
         runTotal = 0;
-        const run = await this.#engine.runWorker({
-          prompt: authorPrompt,
-          title: task.title,
-          team: workerTeam,
-          model: workerSpec,
-          cwd: scope.cwd,
-          extraDirs: scope.extraDirs,
-          locked: scope.locked,
-          ...(piece ? { maxSubagents: 0 } : {}),
-          ...(resumeId ? { resumeSessionId: resumeId } : {}),
-          inbox,
-          signal: controller.signal,
-          callbacks: authorCallbacks,
-        });
-        agentBase += runTotal;
-        runTotal = 0;
-        return run;
+        try {
+          const run = await this.#engine.runWorker({
+            prompt: authorPrompt,
+            title: task.title,
+            team: workerTeam,
+            model: workerSpec,
+            cwd: scope.cwd,
+            extraDirs: scope.extraDirs,
+            locked: scope.locked,
+            env: this.#studioEnv(taskId),
+            ...(piece ? { maxSubagents: 0 } : {}),
+            ...(resumeId ? { resumeSessionId: resumeId } : {}),
+            inbox,
+            signal: controller.signal,
+            callbacks: authorCallbacks,
+          });
+          agentBase += runTotal;
+          runTotal = 0;
+          return run;
+        } finally {
+          // Whatever the run left (finished, failed or stopped) is committed
+          // on the bots' branch — not a split piece's: its integrator reads
+          // the parts as uncommitted work and commits the whole.
+          if (scope.worktree && !piece && (await this.#worktrees?.checkpoint(project.id, task.title))) {
+            const branch = this.#projects.get(project.id)?.worktree?.branch;
+            this.#activity(workerId, taskId, `saved to ${branch ?? "the bots' branch"} in the bots' worktree — merge it from Projects when you're happy`);
+          }
+        }
       };
       if (opts.agreed) this.#patchAgent(workerId, { status: 'working', activity: 'writing up the agreed draft' });
       const result = opts.agreed ? { synopsis: opts.agreed.report, tokens: 0, filesChanged: false } : await runAuthor(prompt, resumeSessionId);
@@ -1949,6 +2203,7 @@ export class Orchestrator implements CommandHandlers {
       }
       this.#controllers.delete(taskId);
       this.#runningCwds.delete(taskId);
+      this.#taskScopes.delete(taskId);
       this.#stopping.delete(taskId);
       this.#patchAgent(`${team.id}-lead`, { status: 'idle', activity: 'standing by', taskId: null });
       this.#retireWorker(workerId);
@@ -2056,7 +2311,8 @@ export class Orchestrator implements CommandHandlers {
       task.detail,
       maxParts,
       checkSpec,
-      project.workspaceDir || this.#workspaceDir,
+      // Paths are owned in the folder the parts will run in (the worktree).
+      (await this.#workScope(project, team)).cwd,
       this.#masterRules(MASTER_SECTIONS.splitting, 'split'),
     );
     this.#recordTokens(checkSpec.tier, result.tokens);
@@ -2457,7 +2713,7 @@ export class Orchestrator implements CommandHandlers {
     taskId: string;
     team: Team;
     project: Project;
-    scope: { cwd: string; extraDirs: string[]; locked: LockedDir };
+    scope: WorkScope;
     workerSpec: ModelSpec;
     workerId: string;
     controller: AbortController;
@@ -2623,7 +2879,7 @@ export class Orchestrator implements CommandHandlers {
       return this.#engine.runWorker({
         prompt,
         title: `${kind.toLowerCase()}: ${title}`,
-        team: this.#workerTeam(team, ctx.scope.cwd, null, false, true),
+        team: this.#workerTeam(team, ctx.scope.projectDir, null, false, true),
         model: spec,
         cwd: ctx.scope.cwd,
         extraDirs: ctx.scope.extraDirs,
@@ -2650,12 +2906,15 @@ export class Orchestrator implements CommandHandlers {
             const ledger = this.#projects.addTokens(ctx.project.id, delta);
             if (ledger) this.#bus.publish({ type: 'project.updated', project: ledger.project });
           },
+          // A side seat only reads: no worktree allowances for it.
           onPermission: ({ toolName, command, reason }) => {
-            const verdict = evaluatePermission(toolName, command, this.#policy.mode, { ...ctx.scope, freeDirs: this.#freeDirs() });
+            const verdict = evaluatePermission(toolName, command, this.#policy.mode, { ...this.#policyScope(taskId, ctx.scope), worktree: false });
             if (verdict.decision === 'allow') return Promise.resolve('approve' as const);
             return this.#raisePermission(taskId, id, team, toolName, command, reason, verdict.flags);
           },
+          onMcpCall: this.#mcpGuard(taskId, id, team),
         },
+        env: this.#studioEnv(taskId),
       });
     };
     return { id, run, close: () => this.#retireWorker(id) };
@@ -2808,14 +3067,13 @@ export class Orchestrator implements CommandHandlers {
     if (hubProject && (authorSpec.engine === 'codex' || partnerSpec.engine === 'codex')) {
       return asReview("Codex doesn't build in Agent HQ's own project yet — it reviews instead");
     }
-    const workspace = project.workspaceDir || this.#workspaceDir;
     const controller = new AbortController();
     this.#controllers.set(taskId, controller);
     const ctx: SeatContext = {
       taskId,
       team,
       project,
-      scope: { cwd: workspace, extraDirs: this.#extraDirs(workspace, team), locked: this.#lockedData(team) },
+      scope: await this.#workScope(project, team),
       controller,
     };
     const release = () => {
@@ -3074,14 +3332,13 @@ export class Orchestrator implements CommandHandlers {
       authorSpec = resolveModel(team.workerModel === 'codex' ? 'sonnet' : team.workerModel);
     }
     const partnerSpec = task.pair?.reviewer?.model ? resolveModel('opus', task.pair.reviewer) : this.#reviewerSpec(team, authorSpec);
-    const workspace = project.workspaceDir || this.#workspaceDir;
     const controller = new AbortController();
     this.#controllers.set(taskId, controller);
     const ctx: SeatContext = {
       taskId,
       team,
       project,
-      scope: { cwd: workspace, extraDirs: this.#extraDirs(workspace, team), locked: this.#lockedData(team) },
+      scope: await this.#workScope(project, team),
       controller,
     };
     const release = () => {

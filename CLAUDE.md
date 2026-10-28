@@ -249,6 +249,57 @@ npm run typecheck      # tsc across workspaces
   out`) or a heredoc's script body (unless fed to a shell) as write targets,
   and `Format-Table` is no longer "destructive" (`Format-Volume` is). Tests:
   `bots-folder.smoke` (in `npm run smoke`).
+- The bots' worktree (so long jobs never stop for a card): every git
+  project's workers run in a worktree on `agent-hq/<base>`, cut from the
+  owner's current branch (`WorktreeManager`, worktrees.ts; made on first need
+  under `~/AgentHQ/worktrees/<project>` — NOT in Bots, which every team can
+  write; `worktreesDir` option, off in mock mode). On creation it copies the
+  ignored files a checkout needs (≤1 MB each, ≤50 MB: secrets.env, local
+  settings — never the hub's data dir), Wally `Packages/` folders, and runs
+  `npm ci` when node_modules was ignored. The record rides the project
+  (`Project.worktree`: branch, base, ahead/behind, commits, files, note).
+  In it (`WorkspaceScope.worktree`) deletes/resets/`git clean -fd` with plain
+  relative targets and project-local installs (npm/pnpm/yarn/bun without
+  -g, uv, cargo add, go get, a venv's pip) run without a card — the verdict
+  says `checkpoint` and the hub commits the worktree first (`--no-verify`,
+  Agent HQ identity when the repo has none); every run is committed after
+  too ("saved to agent-hq/…"). Still asks: `git clean -x`, `.git`, the
+  worktree root, git that reaches the shared repo (`gitReachesOutsideWorktree`:
+  switch/checkout <branch>, branch -D/-f/-m, stash drop/clear, config
+  writes, remotes, tag -d, update-ref, gc --prune, reflog expire, worktree,
+  `fetch x:y`), pushes, global installs, dlx/exec, and any write into the
+  owner's checkout (outside the scope). Workers are told (brief) where they
+  are, that the owner's folder is read-only to them, and to commit freely
+  but never switch/push. Before a run with nobody else in the worktree the
+  owner's newer commits are merged in if clean (`catchUp`; a conflict is a
+  note). Project MCP, Claude Code's project folder and the rules check use
+  the owner's folder (`WorkScope.projectDir`). Projects page (Resources):
+  "Bots' work" per project — Merge (merges `base` into the worktree first;
+  a conflict is refused with the files named; then fast-forwards the
+  owner's branch — `merge --ff-only` if it's checked out, so git refuses on
+  colliding uncommitted changes — and removes worktree + branch) / Discard;
+  `worktree.merge`/`worktree.discard`, local clients only, refused while a
+  task of that project is working. Non-git projects (General) and a
+  detached HEAD keep the old in-place rules.
+- Each ask names its Roblox Studio (`Task.studio`; `studio:<name>` /
+  `studio:"a b"` anywhere in the ask or a later message — `parseStudioToken`
+  in shared — or the composer's Studio picker, `studio` on task.submit;
+  steps use the ask's, `#studioOf`). Every open Studio is the owner's except
+  that one: Studio MCP calls go through `onMcpCall` (Claude: a PreToolUse
+  hook, because project settings may pre-allow Studio tools and allowed
+  tools skip canUseTool; Codex: the elicitation's `_meta.tool_params`) →
+  `#mcpGuard`: the task's window (`resolveStudio`, by place name / placeId /
+  unique prefix; ids from `StudioDirectory`, which asks StudioMCP.exe
+  itself) runs, another is refused with the right studio_id, none assigned
+  → a card. A shell `--studio X` naming another window asks
+  (`WorkspaceScope.studio`). Workers get `AGENT_HQ_STUDIO` (+ `HEAT_STUDIO`,
+  which Heat's own tools read — set to a non-window when none is assigned so
+  they can't fall back to the owner's "Heat"). Sync/run tools for any
+  project: `D:\Work\Bots\tools\studio` (generalised from Heat's; studio
+  from --studio or AGENT_HQ_STUDIO, never a default; own git repo). The
+  brief names the Studio and the tools only where Studio is in play.
+  `studios.list` refreshes `HubInfo.studios` for the picker. Tests:
+  `worktree.smoke` (in `npm run smoke`).
 - Project MCP: besides its team's grants, a worker gets the MCP servers set
   up for its project folder, as Claude Code opened there loads them
   (`projectMcpServers` in engine/mcp-catalog.ts): the folder's own servers

@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
+import { sameStudio } from '@agent-hq/shared';
 import type { PermissionMode } from '../config.js';
 import { containsPath, realPath, writableBy, type LockedDir } from './util.js';
 
@@ -139,6 +140,19 @@ export interface WorkspaceScope {
   locked?: LockedDir;
   /** Folders the owner gave full access (D:\Work\Bots): deleting there needs no card. */
   freeDirs?: string[];
+  /**
+   * The cwd is the bots' git worktree of the project (its own branch, cut
+   * from the owner's): deleting and resetting inside it, and project-local
+   * installs, need no card — the hub commits the worktree first, so it all
+   * reverts. git commands that reach the owner's branches or the shared repo
+   * still ask.
+   */
+  worktree?: boolean;
+  /**
+   * The task's Roblox Studio (null = none assigned): a command naming
+   * another one (`--studio X`) asks. Undefined = not checked.
+   */
+  studio?: string | null;
 }
 
 // A heredoc's body is the program's input, not shell words: a Python script
@@ -209,7 +223,10 @@ const VALUE_FLAG = /^-(Filter|Include|Exclude|ErrorAction|WarningAction|Depth)$/
 // git words that are not paths: the subcommand and its refs.
 const GIT_WORD = /^(reset|clean|checkout|restore|stash|HEAD[~^\d]*|origin\/\S+)$/i;
 
-export function deletesOnlyInFreeDirs(command: string, freeDirs: string[]): boolean {
+// `cwd` (the bots' worktree) also counts as free, and plain names resolve
+// inside it with no cd.
+export function deletesOnlyInFreeDirs(command: string, freeDirs: string[], cwd?: string): boolean {
+  if (cwd) freeDirs = [...freeDirs, cwd];
   if (freeDirs.length === 0) return false;
   const dirs = freeDirs.map((dir) => realPath(resolve(dir)));
   // A token as a resolved path, or null when it isn't plainly one.
@@ -220,10 +237,14 @@ export function deletesOnlyInFreeDirs(command: string, freeDirs: string[]): bool
     if (!absolute && !base) return null; // a bare name: relative to what?
     return realPath(resolve(base ?? '', absolute ?? value));
   };
-  // Inside a full-access folder; deleting the folder itself still asks.
+  // Inside a full-access folder; deleting the folder itself still asks, and
+  // so does a .git (a worktree's link to its repo, or a repo's history).
   const within = (full: string | null, rootToo = false): boolean =>
-    !!full && dirs.some((dir) => containsPath(dir, full) && (rootToo || full.toLowerCase() !== dir.toLowerCase()));
-  let base: string | null = null; // a cd into a free folder makes plain names safe
+    !!full &&
+    !/(^|[\\/])\.git([\\/]|$)/i.test(full) &&
+    dirs.some((dir) => containsPath(dir, full) && (rootToo || full.toLowerCase() !== dir.toLowerCase()));
+  const start = cwd ? realPath(resolve(cwd)) : null;
+  let base: string | null = start; // a cd into a free folder makes plain names safe
   let deleted = false;
   for (const pipeline of withoutHeredocBodies(command).split(/\|\||&&|[;\n]/)) {
     const parts = pipeline.split('|').map((part) => part.trim()).filter(Boolean);
@@ -264,7 +285,102 @@ export function deletesOnlyInFreeDirs(command: string, freeDirs: string[]): bool
   return deleted;
 }
 
-export type PolicyVerdict = { decision: 'allow' } | { decision: 'ask'; flags: string[] };
+// --- the bots' worktree --------------------------------------------------------
+// A worktree shares its repo with the owner's checkout: branches, the stash,
+// config, remotes and history are one store. Work on the worktree's own
+// branch is free; these reach past it and still ask.
+const GIT_STAGE = new RegExp(String.raw`^git\s+(?:${GIT_GLOBAL_OPT}\s+)*([\w-]+)(.*)$`, 'i');
+
+export function gitReachesOutsideWorktree(command: string): string | null {
+  for (const stage of stages(withoutHeredocBodies(command))) {
+    const match = GIT_STAGE.exec(stage);
+    if (!match) continue;
+    const sub = match[1]!.toLowerCase();
+    const rest = ` ${match[2] ?? ''} `;
+    const words = rest.trim().split(/\s+/).filter(Boolean);
+    const has = (pattern: RegExp) => words.some((word) => pattern.test(word));
+    switch (sub) {
+      case 'branch':
+        if (has(/^(-[dDmMcCfu]|--delete|--force|--move|--copy|--set-upstream-to.*|--unset-upstream)$/)) return 'moves or deletes a branch';
+        break;
+      case 'switch':
+        return 'switches the worktree off its branch';
+      case 'checkout': {
+        if (/\s--\s/.test(rest)) break; // git checkout [<tree>] -- <paths>: restores files
+        if (has(/^(-b|-B|--orphan|--detach)$/)) return 'switches the worktree off its branch';
+        // A bare word with no dot or slash is a branch, not a file.
+        if (words.some((word) => !word.startsWith('-') && !/[./\\*]/.test(word))) return 'switches the worktree off its branch';
+        break;
+      }
+      case 'update-ref':
+      case 'symbolic-ref':
+      case 'replace':
+      case 'filter-branch':
+      case 'filter-repo':
+      case 'prune':
+      case 'worktree':
+        return 'changes the repo outside this worktree';
+      case 'gc':
+        if (has(/^--prune/)) return 'erases history';
+        break;
+      case 'reflog':
+        if (has(/^(expire|delete)$/)) return 'erases history';
+        break;
+      case 'stash':
+        if (has(/^(drop|clear)$/)) return 'deletes stashed work (the stash is shared with your checkout)';
+        break;
+      case 'config':
+        if (!has(/^(--get|--get-all|--get-regexp|--list|-l|--show-origin)$/)) return "changes the repo's git settings";
+        break;
+      case 'remote':
+        if (has(/^(add|remove|rm|rename|set-url|set-head|set-branches|prune)$/)) return "changes the repo's remotes";
+        break;
+      case 'tag':
+        if (has(/^(-d|--delete|-f|--force)$/)) return 'moves or deletes a tag';
+        break;
+      case 'fetch':
+        if (words.some((word) => !word.startsWith('-') && word.includes(':'))) return 'updates one of your branches';
+        break;
+    }
+  }
+  return null;
+}
+
+// Installs that stay inside the project (its node_modules / lockfile, a
+// venv in it, its manifest) — committed or rebuilt like any other change.
+// Global and system installs, and running a downloaded package (dlx/exec),
+// still ask.
+const INSTALL_STAGE = /\b(npm|pnpm|yarn|bun)\s+(install|i|add|remove|uninstall|update|upgrade|dlx|exec)\b|\b(pip3?|pipx|uv|cargo|gem|composer|go)\s+(install|add|get)\b/i;
+const LOCAL_INSTALL = [
+  /\b(npm|pnpm|yarn|bun)\s+(install|i|add|remove|uninstall|update|upgrade|ci)\b(?![^;|&]*\s(-g|--global|--location[= ]global)\b)/i,
+  /(^|[\s\\/"'])\.?venv[\\/](Scripts|bin)[\\/]pip3?(\.exe)?["']?\s+install\b/i,
+  /\buv\s+(add|sync|remove|lock)\b/i,
+  /\bcargo\s+add\b/i,
+  /\bgo\s+get\b/i,
+  /\bcomposer\s+(install|require|update)\b/i,
+];
+
+export function installsOnlyInProject(command: string): boolean {
+  const installing = stages(withoutHeredocBodies(command)).filter((stage) => INSTALL_STAGE.test(stage));
+  return installing.length > 0 && installing.every((stage) => LOCAL_INSTALL.some((pattern) => pattern.test(stage)));
+}
+
+// `--studio X` on a command (the Studio tools take the window by name).
+const STUDIO_ARG = /--studio[=\s]+("[^"]+"|'[^']+'|[^\s;|&]+)/gi;
+
+function strayStudio(command: string, studio: string | null): string | null {
+  for (const match of command.matchAll(STUDIO_ARG)) {
+    const named = unquote(match[1] ?? '');
+    if (!studio) return `drives Roblox Studio "${named}" — no Studio is assigned to this task`;
+    if (!sameStudio(named, studio)) return `drives another Roblox Studio ("${named}"; this task's is "${studio}")`;
+  }
+  return null;
+}
+
+export type PolicyVerdict =
+  // checkpoint: allowed because the worktree reverts it — commit it first.
+  | { decision: 'allow'; checkpoint?: boolean }
+  | { decision: 'ask'; flags: string[] };
 
 export function evaluatePermission(
   toolName: string,
@@ -287,16 +403,38 @@ export function evaluatePermission(
   if (toolName === 'Write' || toolName === 'Edit' || toolName === 'NotebookEdit') return { decision: 'allow' };
   if (toolName === 'Bash') {
     let flags = [...new Set(BASH_ESCALATIONS.filter((rule) => rule.pattern.test(command)).map((rule) => rule.flag))];
-    // Deleting only inside the owner's full-access folder needs no card.
-    if (flags.includes('destructive') && deletesOnlyInFreeDirs(command, scope?.freeDirs ?? [])) {
-      flags = flags.filter((flag) => flag !== 'destructive');
+    const worktree = !!scope?.worktree;
+    let checkpoint = false;
+    // Deleting only inside the owner's full-access folder needs no card, nor
+    // (in the bots' worktree) inside the worktree — committed first.
+    // `git clean -x` also deletes the ignored files the worktree was set up
+    // with (secrets, packages), which no commit brings back.
+    if (flags.includes('destructive')) {
+      const free = deletesOnlyInFreeDirs(command, scope?.freeDirs ?? []);
+      const inWorktree =
+        !free && worktree && !/\bgit\b[^;|&\n]*\bclean\b[^;|&\n]*\s-\w*[xX]/.test(command) && deletesOnlyInFreeDirs(command, scope?.freeDirs ?? [], scope!.cwd);
+      if (free || inWorktree) flags = flags.filter((flag) => flag !== 'destructive');
+      checkpoint = inWorktree;
+    }
+    if (worktree && flags.includes('installs packages') && installsOnlyInProject(command)) {
+      flags = flags.filter((flag) => flag !== 'installs packages');
+      checkpoint = true;
+    }
+    if (worktree) {
+      const reach = gitReachesOutsideWorktree(command);
+      if (reach) flags.push(reach);
+    }
+    if (scope?.studio !== undefined) {
+      const studio = strayStudio(command, scope.studio);
+      if (studio) flags.push(studio);
     }
     const stray = scope ? strayShellTarget(command, scope) : null;
     if (stray) {
       const config = scope?.locked && writableBy(stray, [scope.cwd, ...scope.extraDirs]);
       flags.push(config ? `writes Agent HQ's own data (${stray})` : `writes outside this project (${stray})`);
     }
-    return flags.length > 0 ? { decision: 'ask', flags } : { decision: 'allow' };
+    if (flags.length > 0) return { decision: 'ask', flags };
+    return checkpoint ? { decision: 'allow', checkpoint } : { decision: 'allow' };
   }
   return { decision: 'ask', flags: [] }; // unknown gated tool — be safe
 }

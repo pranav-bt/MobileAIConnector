@@ -59,7 +59,7 @@ export function App(): JSX.Element {
         {view === 'tasks' && <TasksPage state={state} send={send} onOpenConsole={openConsole} />}
         {view === 'teams' && <TeamsPage state={state} send={send} />}
         {view === 'pa' && <PaPage state={state} send={send} />}
-        {view === 'resources' && <ResourcesPage state={state} />}
+        {view === 'resources' && <ResourcesPage state={state} send={send} />}
         {view === 'history' && <HistoryPage state={state} onOpenConsole={openConsole} />}
         {view === 'security' && <SecurityPage state={state} send={send} />}
         {view === 'settings' && <SettingsPage state={state} send={send} />}
